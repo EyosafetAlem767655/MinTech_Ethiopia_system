@@ -1,0 +1,79 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Sora:wght@600;700;800&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --clay-700: #a63d25;
+  --clay-800: #8a3622;
+}
+
+html {
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  @apply bg-[#faf6f4] text-ink antialiased;
+}
+
+/* Topographic-style brand backdrop for hero sections */
+.hero-gradient {
+  background:
+    radial-gradient(1200px 500px at 80% -10%, rgba(218, 103, 76, 0.55), transparent 60%),
+    radial-gradient(900px 420px at -10% 30%, rgba(115, 49, 34, 0.9), transparent 65%),
+    linear-gradient(135deg, #8a3622 0%, #733122 55%, #3e160d 100%);
+}
+
+.glass {
+  @apply bg-white/85 backdrop-blur-md border border-white/60 shadow-[0_8px_30px_rgba(62,22,13,0.08)];
+}
+
+.card {
+  @apply rounded-2xl bg-white border border-clay-100 shadow-[0_4px_24px_rgba(62,22,13,0.06)];
+}
+
+.shimmer-bg {
+  background: linear-gradient(90deg, rgba(255,255,255,0) 0%, rgba(255,255,255,0.35) 50%, rgba(255,255,255,0) 100%);
+  background-size: 700px 100%;
+}
+
+/* Staggered entrance helpers */
+.stagger > * {
+  opacity: 0;
+  animation: fadeUp 0.6s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+.stagger > *:nth-child(1) { animation-delay: 0.05s; }
+.stagger > *:nth-child(2) { animation-delay: 0.12s; }
+.stagger > *:nth-child(3) { animation-delay: 0.19s; }
+.stagger > *:nth-child(4) { animation-delay: 0.26s; }
+.stagger > *:nth-child(5) { animation-delay: 0.33s; }
+.stagger > *:nth-child(6) { animation-delay: 0.4s; }
+.stagger > *:nth-child(7) { animation-delay: 0.47s; }
+.stagger > *:nth-child(8) { animation-delay: 0.54s; }
+
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(18px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Exception ticker pulse bar */
+.exception-bar {
+  position: relative;
+  overflow: hidden;
+}
+.exception-bar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.25), transparent);
+  transform: translateX(-100%);
+  animation: sweep 3s ease-in-out infinite;
+}
+@keyframes sweep {
+  60%, 100% { transform: translateX(100%); }
+}
+
+/* Hide scrollbars on horizontal chip rows */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
