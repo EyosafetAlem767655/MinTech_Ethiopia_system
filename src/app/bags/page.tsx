@@ -10,7 +10,6 @@ interface Lot {
   quantity: number;
   deliveryNote: string;
   handlers: string[];
-  photoIds: string[];
   balance?: {
     received: number;
     filled: number;
@@ -33,7 +32,6 @@ interface Claim {
   photos: {
     fileId: string;
     ai?: { damage_severity: string; suspicious: boolean; suspicion_reasons: string[]; damage_visible: boolean };
-    exifCheck?: { issues: string[] };
   }[];
   cosignedBy?: string;
   disposal?: { action: string; amount?: number };
@@ -58,8 +56,6 @@ export default function BagControlPage() {
   const [claims, setClaims] = useState<Claim[]>([]);
   const [tripwires, setTripwires] = useState<Tripwires | null>(null);
   const [tab, setTab] = useState<"lots" | "claims" | "tripwires">("lots");
-  const [showRegister, setShowRegister] = useState(false);
-  const [busyId, setBusyId] = useState("");
 
   const load = useCallback(() => {
     fetch("/api/lots").then((r) => r.json()).then((d) => Array.isArray(d) && setLots(d)).catch(() => {});
@@ -69,50 +65,34 @@ export default function BagControlPage() {
 
   useEffect(load, [load]);
 
-  const act = async (id: string, body: Record<string, unknown>) => {
-    setBusyId(id);
-    await fetch(`/api/claims/${id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    setBusyId("");
-    load();
-  };
-
-  const recordLotEvent = async (lotId: string, type: "filled" | "stock_count" | "adjustment") => {
-    const quantity = Number(window.prompt(type === "stock_count" ? "Physical stock count:" : "Quantity:") || 0);
-    if (!quantity) return;
-    const by = promptName();
-    setBusyId(lotId);
-    await fetch(`/api/lots/${lotId}/events`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type, quantity, by }),
-    });
-    setBusyId("");
-    load();
-  };
+  const openClaims = claims.filter((c) => c.status === "pending" || c.status === "cosign_required");
+  const gaps = lots.filter((lot) => (lot.balance?.gap || 0) > 0);
 
   return (
     <main className="max-w-lg mx-auto">
       <header className="hero-gradient text-white px-5 pt-10 pb-6 rounded-b-3xl">
-        <h1 className="font-display text-xl font-bold">🛡 PB Bag Control</h1>
-        <p className="text-clay-100/80 text-xs mt-1">Lots, evidence-backed damage claims & reconciliation.</p>
+        <h1 className="font-display text-xl font-bold">PB Bag Control</h1>
+        <p className="text-clay-100/80 text-xs mt-1">Inventory, evidence-backed damage claims and reconciliation.</p>
         <a
           href="/api/export/damage-register"
           className="inline-block mt-3 text-xs font-bold bg-white/15 border border-white/25 rounded-full px-4 py-2"
         >
-          📄 Export damage register (PDF)
+          Export damage register
         </a>
       </header>
 
-      <div className="px-4 py-4">
+      <section className="grid grid-cols-3 gap-2 px-4 py-4">
+        <Metric label="Lots" value={String(lots.length)} />
+        <Metric label="Open claims" value={String(openClaims.length)} tone="text-amber-700" />
+        <Metric label="Gaps" value={String(gaps.length)} tone="text-red-700" />
+      </section>
+
+      <div className="px-4 pb-6">
         <div className="flex gap-1.5 bg-clay-50 rounded-full p-1 mb-4">
           {(
             [
               ["lots", `Lots (${lots.length})`],
-              ["claims", `Claims (${claims.filter((c) => c.status === "pending" || c.status === "cosign_required").length})`],
+              ["claims", `Claims (${openClaims.length})`],
               ["tripwires", "Tripwires"],
             ] as const
           ).map(([k, label]) => (
@@ -128,16 +108,8 @@ export default function BagControlPage() {
           ))}
         </div>
 
-        {/* ───────────── Lots ───────────── */}
         {tab === "lots" && (
           <div className="space-y-3 stagger">
-            <button
-              onClick={() => setShowRegister(!showRegister)}
-              className="w-full border-2 border-dashed border-clay-300 rounded-2xl py-3.5 text-clay-700 font-bold text-sm bg-clay-50/50"
-            >
-              {showRegister ? "✕ Close" : "＋ Register new bag lot"}
-            </button>
-            {showRegister && <RegisterLotForm onDone={() => { setShowRegister(false); load(); }} />}
             {lots.map((lot) => {
               const gap = lot.balance?.gap || 0;
               return (
@@ -145,23 +117,23 @@ export default function BagControlPage() {
                   <div className="flex items-center justify-between">
                     <p className="font-display font-bold text-clay-900">{lot.lotCode}</p>
                     {gap > 0 ? (
-                      <span className="text-[11px] font-bold bg-red-600 text-white rounded-full px-2.5 py-1 animate-pulse">
-                        🔴 {gap} unaccounted
+                      <span className="text-[11px] font-bold bg-red-600 text-white rounded-full px-2.5 py-1">
+                        {gap} unaccounted
                       </span>
                     ) : (
                       <span className="text-[11px] font-bold bg-green-100 text-green-700 rounded-full px-2.5 py-1">
-                        ✓ reconciled
+                        reconciled
                       </span>
                     )}
                   </div>
                   <p className="text-xs text-stone-500 mt-0.5">
-                    {lot.supplier} · {lot.bagType} · DN {lot.deliveryNote}
+                    {lot.supplier} - {lot.bagType} - DN {lot.deliveryNote}
                   </p>
                   <div className="grid grid-cols-4 gap-1.5 mt-3 text-center">
                     {[
                       ["Received", lot.balance?.received ?? lot.quantity],
                       ["Filled", lot.balance?.filled ?? 0],
-                      ["Damaged ✓", lot.balance?.damagedVerified ?? 0],
+                      ["Damaged", lot.balance?.damagedVerified ?? 0],
                       ["In stock", lot.balance?.inStock ?? lot.quantity],
                     ].map(([label, v]) => (
                       <div key={label} className="rounded-lg bg-clay-50/80 py-1.5">
@@ -171,34 +143,9 @@ export default function BagControlPage() {
                     ))}
                   </div>
                   {(lot.balance?.damagedPending ?? 0) > 0 && (
-                    <p className="text-[11px] text-amber-700 mt-2">
-                      ⏳ {lot.balance!.damagedPending} bags in pending claims
-                    </p>
+                    <p className="text-[11px] text-amber-700 mt-2">{lot.balance!.damagedPending} bags in pending claims</p>
                   )}
-                  <p className="text-[11px] text-stone-400 mt-2">👤 Handled by: {lot.handlers.join(", ") || "—"}</p>
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    <button
-                      disabled={busyId === lot._id}
-                      onClick={() => recordLotEvent(lot._id, "filled")}
-                      className="rounded-full bg-clay-700 px-3 py-2 text-[11px] font-bold text-white disabled:opacity-50"
-                    >
-                      Record filled bags
-                    </button>
-                    <button
-                      disabled={busyId === lot._id}
-                      onClick={() => recordLotEvent(lot._id, "stock_count")}
-                      className="rounded-full bg-green-100 px-3 py-2 text-[11px] font-bold text-green-700 disabled:opacity-50"
-                    >
-                      Stock count
-                    </button>
-                    <button
-                      disabled={busyId === lot._id}
-                      onClick={() => recordLotEvent(lot._id, "adjustment")}
-                      className="rounded-full bg-stone-100 px-3 py-2 text-[11px] font-bold text-stone-700 disabled:opacity-50"
-                    >
-                      Adjustment
-                    </button>
-                  </div>
+                  <p className="text-[11px] text-stone-400 mt-2">Handled by: {lot.handlers.join(", ") || "-"}</p>
                 </div>
               );
             })}
@@ -206,95 +153,55 @@ export default function BagControlPage() {
           </div>
         )}
 
-        {/* ───────────── Claims ───────────── */}
         {tab === "claims" && (
           <div className="space-y-3 stagger">
-            {claims.map((c) => {
-              const ai = c.photos[0]?.ai;
+            {claims.map((claim) => {
+              const ai = claim.photos[0]?.ai;
               return (
-                <div key={c._id} className="card p-4">
+                <div key={claim._id} className="card p-4">
                   <div className="flex items-center justify-between">
                     <p className="font-bold text-sm">
-                      {c.lotId?.lotCode || "?"} · {c.quantity} bags
+                      {claim.lotId?.lotCode || "?"} - {claim.quantity} bags
                     </p>
-                    <span className={`text-[10px] font-bold rounded-full px-2.5 py-1 ${STATUS_STYLE[c.status] || ""}`}>
-                      {c.status.replace("_", " ")}
+                    <span className={`text-[10px] font-bold rounded-full px-2.5 py-1 ${STATUS_STYLE[claim.status] || ""}`}>
+                      {claim.status.replace("_", " ")}
                     </span>
                   </div>
                   <p className="text-xs text-stone-500 mt-0.5">
-                    {c.worker} · via {c.source === "telegram" ? "✈️ Telegram" : "📱 App"} ·{" "}
-                    {new Date(c.createdAt).toLocaleDateString()}
-                    {c.gps && ` · 📍${c.gps.lat.toFixed(3)},${c.gps.lng.toFixed(3)}`}
+                    {claim.worker} via {claim.source} - {new Date(claim.createdAt).toLocaleDateString()}
+                    {claim.gps && ` - ${claim.gps.lat.toFixed(3)},${claim.gps.lng.toFixed(3)}`}
                   </p>
 
-                  {c.photos.length > 0 && (
+                  {claim.photos.length > 0 && (
                     <div className="flex gap-2 mt-2 overflow-x-auto no-scrollbar">
-                      {c.photos.map((p) => (
+                      {claim.photos.map((photo) => (
                         // eslint-disable-next-line @next/next/no-img-element
-                        <img
-                          key={p.fileId}
-                          src={`/api/files/${p.fileId}`}
-                          alt="evidence"
-                          className="h-20 rounded-lg object-cover"
-                        />
+                        <img key={photo.fileId} src={`/api/files/${photo.fileId}`} alt="Evidence" className="h-20 rounded-lg object-cover" />
                       ))}
                     </div>
                   )}
 
                   {ai && (
                     <div className={`mt-2 rounded-xl px-3 py-2 text-[11px] ${ai.suspicious ? "bg-red-50 text-red-800" : "bg-clay-50 text-clay-800"}`}>
-                      🤖 AI: damage <b>{ai.damage_severity}</b>
-                      {ai.suspicious && <> · ⚠️ suspicious ({ai.suspicion_reasons.join(", ")})</>}
+                      AI: damage <b>{ai.damage_severity}</b>
+                      {ai.suspicious && <> - suspicious ({ai.suspicion_reasons.join(", ")})</>}
                     </div>
                   )}
-                  {c.flags.length > 0 && (
+                  {claim.flags.length > 0 && (
                     <div className="flex flex-wrap gap-1 mt-1.5">
-                      {c.flags.map((f) => (
-                        <span key={f} className="text-[10px] font-bold bg-amber-100 text-amber-800 rounded-full px-2 py-0.5">
-                          {f.replace(/_/g, " ")}
+                      {claim.flags.map((flag) => (
+                        <span key={flag} className="text-[10px] font-bold bg-amber-100 text-amber-800 rounded-full px-2 py-0.5">
+                          {flag.replace(/_/g, " ")}
                         </span>
                       ))}
                     </div>
                   )}
-
-                  <div className="flex flex-wrap gap-2 mt-3">
-                    {c.status === "cosign_required" && (
-                      <button
-                        disabled={busyId === c._id}
-                        onClick={() => act(c._id, { action: "cosign", by: promptName() })}
-                        className="bg-purple-600 text-white text-xs font-bold rounded-full px-3.5 py-2 active:scale-95 disabled:opacity-50"
-                      >
-                        ✍️ Co-sign
-                      </button>
-                    )}
-                    {(c.status === "pending" || c.status === "cosign_required") && (
-                      <>
-                        <button
-                          disabled={busyId === c._id || c.status === "cosign_required"}
-                          onClick={() => act(c._id, { action: "verify", by: promptName() })}
-                          className="bg-green-600 text-white text-xs font-bold rounded-full px-3.5 py-2 active:scale-95 disabled:opacity-40"
-                        >
-                          ✓ Verify
-                        </button>
-                        <button
-                          disabled={busyId === c._id}
-                          onClick={() => act(c._id, { action: "reject", by: promptName() })}
-                          className="bg-clay-100 text-clay-800 text-xs font-bold rounded-full px-3.5 py-2 active:scale-95 disabled:opacity-50"
-                        >
-                          ✕ Reject
-                        </button>
-                      </>
-                    )}
-                    {c.status === "verified" && !c.disposal?.action && (
-                      <DisposalPicker onPick={(d) => act(c._id, { action: "disposal", disposal: d, by: promptName() })} />
-                    )}
-                    {c.disposal?.action && (
-                      <span className="text-[11px] font-bold text-stone-500 py-2">
-                        ♻️ {c.disposal.action.replace(/_/g, " ")}
-                        {c.disposal.amount ? ` · ETB ${c.disposal.amount.toLocaleString()}` : ""}
-                      </span>
-                    )}
-                  </div>
+                  {claim.disposal?.action && (
+                    <p className="mt-2 text-[11px] font-bold text-stone-500">
+                      Disposal: {claim.disposal.action.replace(/_/g, " ")}
+                      {claim.disposal.amount ? ` - ETB ${claim.disposal.amount.toLocaleString()}` : ""}
+                    </p>
+                  )}
                 </div>
               );
             })}
@@ -302,14 +209,13 @@ export default function BagControlPage() {
           </div>
         )}
 
-        {/* ───────────── Tripwires ───────────── */}
         {tab === "tripwires" && tripwires && (
           <div className="space-y-4 stagger">
             {(
               [
-                ["byWorker", "👷 Damage by worker (90d)"],
-                ["byShift", "🕐 Damage by shift (90d)"],
-                ["bySupplierLot", "🏭 Damage by supplier lot (90d)"],
+                ["byWorker", "Damage by worker (90d)"],
+                ["byShift", "Damage by shift (90d)"],
+                ["bySupplierLot", "Damage by supplier lot (90d)"],
               ] as const
             ).map(([key, title]) => (
               <div key={key} className="card p-4">
@@ -317,12 +223,9 @@ export default function BagControlPage() {
                 {tripwires[key].length === 0 && <p className="text-xs text-stone-400">No data yet.</p>}
                 {tripwires[key].map((row) => (
                   <div key={row.key} className="flex items-center justify-between py-1.5 text-xs border-t border-clay-50 first:border-t-0">
-                    <span className={`font-semibold ${row.flagged ? "text-red-700" : ""}`}>
-                      {row.flagged && "🚩 "}
-                      {row.key}
-                    </span>
+                    <span className={`font-semibold ${row.flagged ? "text-red-700" : ""}`}>{row.key}</span>
                     <span className="text-stone-500">
-                      {row.qty} bags · {row.vsMeanX}× mean
+                      {row.qty} bags - {row.vsMeanX}x mean
                     </span>
                   </div>
                 ))}
@@ -335,87 +238,11 @@ export default function BagControlPage() {
   );
 }
 
-function promptName(): string {
-  const saved = localStorage.getItem("mt_supervisor") || "";
-  const name = window.prompt("Your name (for the sign-off record):", saved) || saved || "supervisor";
-  localStorage.setItem("mt_supervisor", name);
-  return name;
-}
-
-function DisposalPicker({ onPick }: { onPick: (d: { action: string; amount?: number }) => void }) {
-  const [open, setOpen] = useState(false);
-  if (!open) {
-    return (
-      <button
-        onClick={() => setOpen(true)}
-        className="bg-clay-700 text-white text-xs font-bold rounded-full px-3.5 py-2 active:scale-95"
-      >
-        ♻️ Assign disposal
-      </button>
-    );
-  }
+function Metric({ label, value, tone = "text-clay-900" }: { label: string; value: string; tone?: string }) {
   return (
-    <div className="flex flex-wrap gap-1.5 animate-fade-in">
-      {[
-        ["returned_to_supplier", "↩ Return to supplier"],
-        ["destroyed", "🔥 Destroyed"],
-      ].map(([action, label]) => (
-        <button
-          key={action}
-          onClick={() => onPick({ action })}
-          className="bg-clay-100 text-clay-800 text-[11px] font-bold rounded-full px-3 py-2"
-        >
-          {label}
-        </button>
-      ))}
-      <button
-        onClick={() => {
-          const amount = Number(window.prompt("Scrap sale amount (ETB):") || 0);
-          onPick({ action: "sold_as_scrap", amount });
-        }}
-        className="bg-clay-100 text-clay-800 text-[11px] font-bold rounded-full px-3 py-2"
-      >
-        💰 Sold as scrap
-      </button>
+    <div className="rounded-xl border border-clay-100 bg-white p-3 text-center">
+      <p className={`font-display text-xl font-bold ${tone}`}>{value}</p>
+      <p className="text-[10px] font-bold uppercase tracking-widest text-stone-400">{label}</p>
     </div>
-  );
-}
-
-function RegisterLotForm({ onDone }: { onDone: () => void }) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const field = "w-full rounded-xl border border-clay-200 px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-clay-500 bg-white";
-
-  const submit = async (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    setBusy(true);
-    setError("");
-    const res = await fetch("/api/lots", { method: "POST", body: new FormData(e.currentTarget) });
-    setBusy(false);
-    if (res.ok) onDone();
-    else setError((await res.json()).error || "Failed to register lot");
-  };
-
-  return (
-    <form onSubmit={submit} className="card p-4 space-y-3 animate-scale-in">
-      <input name="supplier" required placeholder="Supplier" className={field} />
-      <input name="bagType" required placeholder="Bag type (e.g. PP woven 50kg)" className={field} />
-      <div className="grid grid-cols-2 gap-3">
-        <input name="quantity" required type="number" min={1} placeholder="Quantity" className={field} />
-        <input name="deliveryNote" required placeholder="Delivery note #" className={field} />
-      </div>
-      <input name="registeredBy" required placeholder="Your name" className={field} />
-      <div>
-        <label className="text-xs font-bold text-clay-800 block mb-1.5">Photos of the stacked lot</label>
-        <input name="photos" type="file" accept="image/*" capture="environment" multiple className="text-xs" />
-      </div>
-      {error && <p className="text-xs text-red-600">{error}</p>}
-      <button
-        disabled={busy}
-        className="w-full bg-clay-700 text-white font-bold rounded-xl py-3 text-sm disabled:opacity-50"
-      >
-        {busy ? "Registering…" : "Register lot"}
-      </button>
-    </form>
   );
 }

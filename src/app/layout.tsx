@@ -7,7 +7,7 @@ export const metadata: Metadata = {
   title: "MinTech Ethiopia",
   description: "Six-module internal operating system for MinTech Ethiopia",
   manifest: "/manifest.json",
-  icons: { apple: "/icons/apple-touch-icon.png" },
+  icons: { icon: "/favicon.svg", shortcut: "/favicon.svg", apple: "/icons/apple-touch-icon.png" },
   appleWebApp: { capable: true, statusBarStyle: "black-translucent", title: "MinTech" },
 };
 

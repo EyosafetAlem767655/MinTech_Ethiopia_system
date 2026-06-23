@@ -40,8 +40,6 @@ const fmtETB = (n: number) => `ETB ${Math.round(n || 0).toLocaleString()}`;
 export default function ReceiptsPage() {
   const [month, setMonth] = useState(() => new Date().toISOString().slice(0, 7));
   const [data, setData] = useState<ReceiptsData | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
 
   const load = useCallback(async () => {
     const res = await fetch(`/api/receipts?month=${month}`);
@@ -52,24 +50,7 @@ export default function ReceiptsPage() {
     load();
   }, [load]);
 
-  const submit = async (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    setSaving(true);
-    setError("");
-    const res = await fetch("/api/receipts", { method: "POST", body: new FormData(e.currentTarget) });
-    setSaving(false);
-    if (!res.ok) {
-      const json = await res.json().catch(() => ({}));
-      setError(json.error || "Could not save receipt");
-      return;
-    }
-    e.currentTarget.reset();
-    load();
-  };
-
   const monthly = data?.monthly;
-  const field =
-    "w-full rounded-xl border border-clay-200 bg-white px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-clay-500";
   const receipts = useMemo(() => data?.receipts || [], [data]);
 
   return (
@@ -77,13 +58,18 @@ export default function ReceiptsPage() {
       <header className="hero-gradient -mx-4 px-5 pb-7 pt-10 text-white sm:mx-0 sm:mt-4 sm:rounded-2xl">
         <p className="text-xs font-bold tracking-[0.24em] uppercase text-clay-100">M4</p>
         <h1 className="font-display text-2xl font-bold">Receipt Inbox & Monthly Sales Report</h1>
-        <p className="mt-1 text-sm text-clay-100/90">Telegram receipts, client payment evidence, and monthly financials.</p>
+        <p className="mt-1 text-sm text-clay-100/90">Telegram receipt intake, payment evidence and monthly financials.</p>
       </header>
 
       <section className="flex flex-col gap-3 py-5 sm:flex-row sm:items-center sm:justify-between">
         <label className="text-xs font-bold uppercase tracking-widest text-stone-500">
           Month
-          <input value={month} onChange={(e) => setMonth(e.target.value)} type="month" className={`${field} mt-1 max-w-xs`} />
+          <input
+            value={month}
+            onChange={(e) => setMonth(e.target.value)}
+            type="month"
+            className="mt-1 w-full max-w-xs rounded-xl border border-clay-200 bg-white px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-clay-500"
+          />
         </label>
       </section>
 
@@ -98,40 +84,15 @@ export default function ReceiptsPage() {
       )}
 
       <section className="grid gap-4 py-5 lg:grid-cols-[0.72fr_1.28fr]">
-        <div className="space-y-4">
-          <form onSubmit={submit} className="rounded-xl border border-clay-100 bg-white p-4">
-            <h2 className="font-display text-base font-bold text-ink">Manual receipt</h2>
-            <div className="mt-4 space-y-3">
-              <input name="vendor" required placeholder="Vendor or payer" className={field} />
-              <div className="grid grid-cols-2 gap-3">
-                <input name="amount" required type="number" min={1} placeholder="Amount ETB" className={field} />
-                <input name="category" placeholder="Category" className={field} />
-              </div>
-              <input name="client" placeholder="Client (optional)" className={field} />
-              <input name="taxInvoiceNumber" placeholder="Receipt or tax invoice no." className={field} />
-              <label className="block text-xs font-bold text-stone-500">
-                Receipt date
-                <input name="receiptDate" type="date" className={`${field} mt-1`} />
-              </label>
-              <input name="submittedBy" placeholder="Submitted by" className={field} />
-              <input name="photo" type="file" accept="image/*" capture="environment" className="text-xs" />
-              {error && <p className="text-xs font-semibold text-red-600">{error}</p>}
-              <button disabled={saving} className="w-full rounded-xl bg-clay-700 py-3 text-sm font-bold text-white disabled:opacity-50">
-                {saving ? "Saving..." : "Save receipt"}
-              </button>
+        {monthly && (
+          <div className="rounded-xl border border-stone-200 bg-white p-4">
+            <h2 className="font-display text-base font-bold text-ink">Monthly mix</h2>
+            <div className="mt-3 space-y-3">
+              <ReportList title="Top clients" rows={monthly.topClients.map((r) => [r.client, fmtETB(r.amount)])} />
+              <ReportList title="Expense categories" rows={monthly.expenseCategories.map((r) => [r.category, fmtETB(r.amount)])} />
             </div>
-          </form>
-
-          {monthly && (
-            <div className="rounded-xl border border-stone-200 bg-white p-4">
-              <h2 className="font-display text-base font-bold text-ink">Monthly mix</h2>
-              <div className="mt-3 space-y-3">
-                <ReportList title="Top clients" rows={monthly.topClients.map((r) => [r.client, fmtETB(r.amount)])} />
-                <ReportList title="Expense categories" rows={monthly.expenseCategories.map((r) => [r.category, fmtETB(r.amount)])} />
-              </div>
-            </div>
-          )}
-        </div>
+          </div>
+        )}
 
         <div className="rounded-xl border border-stone-200 bg-white">
           <div className="flex items-center justify-between border-b border-stone-100 p-4">

@@ -44,7 +44,6 @@ export default function OwnerDashboard() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [error, setError] = useState("");
   const [pushState, setPushState] = useState<string>("");
-  const [deciding, setDeciding] = useState<string>("");
 
   const load = useCallback(async () => {
     try {
@@ -59,17 +58,6 @@ export default function OwnerDashboard() {
   useEffect(() => {
     load();
   }, [load]);
-
-  const decide = async (id: string, action: "approve" | "reject") => {
-    setDeciding(id);
-    await fetch(`/api/purchase-requests/${id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action, decidedBy: "Mr. Anteneh" }),
-    });
-    setDeciding("");
-    load();
-  };
 
   const today = new Date().toLocaleDateString("en-GB", {
     weekday: "long",
@@ -280,22 +268,9 @@ export default function OwnerDashboard() {
                         </p>
                         {pr.justification && <p className="text-xs text-stone-500 mt-0.5">{pr.justification}</p>}
                       </div>
-                      <div className="flex gap-2 shrink-0">
-                        <button
-                          disabled={deciding === pr._id}
-                          onClick={() => decide(pr._id, "approve")}
-                          className="bg-green-600 hover:bg-green-700 text-white text-xs font-bold rounded-full px-3.5 py-2 transition active:scale-95 disabled:opacity-50"
-                        >
-                          ✓ Approve
-                        </button>
-                        <button
-                          disabled={deciding === pr._id}
-                          onClick={() => decide(pr._id, "reject")}
-                          className="bg-clay-100 hover:bg-clay-200 text-clay-800 text-xs font-bold rounded-full px-3.5 py-2 transition active:scale-95 disabled:opacity-50"
-                        >
-                          ✕
-                        </button>
-                      </div>
+                      <span className="shrink-0 rounded-full bg-amber-100 px-2.5 py-1 text-[10px] font-bold text-amber-800">
+                        pending
+                      </span>
                     </div>
                   </div>
                 ))}

@@ -34,6 +34,50 @@ export async function sendBriefMessage(chatId: string | number, text: string, da
   });
 }
 
+export const REPORT_KEYBOARD = {
+  keyboard: [
+    [{ text: "Report damaged bags" }, { text: "Send receipt" }],
+    [{ text: "Purchase request" }, { text: "WHT receipt" }],
+    [{ text: "Sales/payment report" }, { text: "Truck delivery" }],
+    [{ text: "Shift report" }, { text: "Ask company question" }],
+  ],
+  resize_keyboard: true,
+  one_time_keyboard: false,
+};
+
+export async function sendReportMenu(chatId: string | number, text?: string) {
+  return sendMessage(
+    chatId,
+    text || "Choose what you want to report. Send text, a photo, or both; I will ask for any missing fields.",
+    { reply_markup: REPORT_KEYBOARD }
+  );
+}
+
+export async function answerCallbackQuery(callbackQueryId: string, text: string) {
+  return call("answerCallbackQuery", { callback_query_id: callbackQueryId, text, show_alert: false });
+}
+
+export async function sendPurchaseDecisionRequest(
+  chatId: string | number,
+  request: { id: string; title: string; amount: number; requestedBy: string; justification?: string }
+) {
+  return sendMessage(
+    chatId,
+    `Purchase request pending\n\n<b>${request.title}</b>\nETB ${Math.round(request.amount).toLocaleString()} by ${request.requestedBy}` +
+      (request.justification ? `\n${request.justification}` : ""),
+    {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: "Approve", callback_data: `pr:approve:${request.id}` },
+            { text: "Reject", callback_data: `pr:reject:${request.id}` },
+          ],
+        ],
+      },
+    }
+  );
+}
+
 /** Downloads a Telegram file (photo/document) and returns its bytes. */
 export async function downloadTelegramFile(
   fileId: string

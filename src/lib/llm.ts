@@ -172,7 +172,16 @@ export async function writeBriefNarrative(structured: Record<string, unknown>): 
 /* ──────────────── Telegram ingestion: classify & extract docs ──────────────── */
 
 export interface IngestionExtraction {
-  docType: "receipt" | "purchase_request" | "damage_claim" | "stone_delivery" | "shift_report" | "other";
+  docType:
+    | "receipt"
+    | "purchase_request"
+    | "damage_claim"
+    | "stone_delivery"
+    | "shift_report"
+    | "invoice"
+    | "payment"
+    | "withholding_receipt"
+    | "other";
   fields: Record<string, unknown>;
   missing: string[];
   question: string; // next question to ask the worker, in simple English
@@ -181,7 +190,7 @@ export interface IngestionExtraction {
 
 const INGESTION_SCHEMA = `Return STRICT JSON:
 {
-  "docType": "receipt" | "purchase_request" | "damage_claim" | "stone_delivery" | "shift_report" | "other",
+  "docType": "receipt" | "purchase_request" | "damage_claim" | "stone_delivery" | "shift_report" | "invoice" | "payment" | "withholding_receipt" | "other",
   "fields": { ... extracted fields ... },
   "missing": [field names still needed],
   "question": "ONE short friendly question asking for the most important missing field(s)",
@@ -193,6 +202,9 @@ Required fields per type:
 - damage_claim: lotCode, quantity (number of damaged bags)
 - stone_delivery: truckPlate, loads (number), qualityGrade ("good"|"fair"|"dark/weathered"), supplier, quarry, driverName if visible
 - shift_report: filledSacks (number), downtimeMinutes (number), shift ("day"|"night"), notes
+- invoice: invoiceNumber, client, amount (number, ETB), sacks, dueDate (YYYY-MM-DD), clientPhone
+- payment: invoiceNumber, client, amount (number, ETB), paymentDate (YYYY-MM-DD), method
+- withholding_receipt: invoiceNumber, client, amount (number, ETB), receiptDate (YYYY-MM-DD)
 - other: summary`;
 
 export async function classifyIngestion(opts: {
