@@ -413,12 +413,15 @@ const BriefSchema = new Schema<any>(
 export interface ITelegramSession {
   chatId: string;
   userName?: string;
-  state: "idle" | "awaiting_metadata";
+  state: "idle" | "awaiting_input_type" | "awaiting_metadata";
   draft?: {
     docType?: string; // receipt | purchase_request | damage_claim | stone_delivery | other
     fileId?: string;
     extracted?: Record<string, unknown>;
     missing?: string[];
+    reportLabel?: string;
+    prompt?: string;
+    inputMode?: "text" | "photo" | "photo_caption";
   };
   history: { role: "user" | "assistant"; content: string }[];
   updatedAt: Date;

@@ -16,6 +16,8 @@ import { classifyIngestion, scoreStonePhoto, type IngestionExtraction } from "@/
 import {
   answerCallbackQuery,
   downloadTelegramFile,
+  REPORT_BUTTONS,
+  sendInputTypeMenu,
   sendMessage,
   sendPurchaseDecisionRequest,
   sendReportMenu,
@@ -27,49 +29,100 @@ import { recomputeLotBalances } from "@/lib/metrics";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-const REPORT_CHOICES: Record<string, { docType: IngestionExtraction["docType"]; question: string }> = {
+const REPORT_CHOICES: Record<string, { docType: IngestionExtraction["docType"]; label: string; question: string }> = {
+  "damage bags": {
+    docType: "damage_claim",
+    label: REPORT_BUTTONS.damage,
+    question: "Send a damaged bag photo with the lot code and damaged bag quantity.",
+  },
   "report damaged bags": {
     docType: "damage_claim",
+    label: REPORT_BUTTONS.damage,
     question: "Send a damaged bag photo with the lot code and damaged bag quantity.",
+  },
+  receipt: {
+    docType: "receipt",
+    label: REPORT_BUTTONS.receipt,
+    question: "Send the receipt photo or type vendor, amount, category and date.",
   },
   "send receipt": {
     docType: "receipt",
+    label: REPORT_BUTTONS.receipt,
     question: "Send the receipt photo or type vendor, amount, category and date.",
   },
   "purchase request": {
     docType: "purchase_request",
+    label: REPORT_BUTTONS.purchase,
     question: "Type the item or service, amount and reason. Add a photo if there is supporting evidence.",
   },
   "wht receipt": {
     docType: "withholding_receipt",
+    label: REPORT_BUTTONS.wht,
     question: "Send the 3% WHT receipt photo with invoice number, client and amount.",
+  },
+  "sales/payment": {
+    docType: "payment",
+    label: REPORT_BUTTONS.sales,
+    question: "Send payment evidence or type invoice number, client, amount, payment date and method.",
   },
   "sales/payment report": {
     docType: "payment",
+    label: REPORT_BUTTONS.sales,
     question: "Send payment evidence or type invoice number, client, amount, payment date and method.",
   },
   "truck delivery": {
     docType: "stone_delivery",
+    label: REPORT_BUTTONS.truck,
     question: "Send a truck/stone photo with plate number, loads, source quarry and driver if known.",
   },
   "shift report": {
     docType: "shift_report",
+    label: REPORT_BUTTONS.shift,
     question: "Type filled sacks, downtime minutes, shift and any notes.",
   },
 };
 
 function normaliseChoice(text: string) {
-  return text.trim().toLowerCase();
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/^[^a-z0-9%]+/i, "")
+    .trim();
 }
 
 async function startReportDraft(
   session: any,
-  choice: { docType: IngestionExtraction["docType"]; question: string }
+  choice: { docType: IngestionExtraction["docType"]; label: string; question: string }
 ) {
-  session.state = "awaiting_metadata";
-  session.draft = { docType: choice.docType, extracted: {}, missing: [] };
+  session.state = "awaiting_input_type";
+  session.draft = {
+    docType: choice.docType,
+    reportLabel: choice.label,
+    prompt: choice.question,
+    extracted: {},
+    missing: [],
+  };
   session.history = [{ role: "assistant", content: choice.question }];
   await session.save();
+}
+
+function inputModeFromText(text: string): "text" | "photo" | "photo_caption" | null {
+  const choice = normaliseChoice(text);
+  if (choice === "type details") return "text";
+  if (choice === "send photo") return "photo";
+  if (choice === "photo + caption") return "photo_caption";
+  return null;
+}
+
+function inputPrompt(mode: "text" | "photo" | "photo_caption", prompt: string) {
+  if (mode === "text") return `${prompt}\n\nType the details in one message.`;
+  if (mode === "photo") return `${prompt}\n\nSend the photo now. If needed, I will ask for missing details after reading it.`;
+  return `${prompt}\n\nSend the photo with the key details in the caption.`;
+}
+
+function isMongoAccessError(e: unknown) {
+  const message = e instanceof Error ? e.message : String(e);
+  return message.includes("MongoDB Atlas") || message.includes("IP") || message.includes("whitelist");
 }
 
 async function handlePurchaseCallback(data: string, callbackId: string, chatId: string, userName: string) {
@@ -269,16 +322,21 @@ export async function POST(req: NextRequest) {
   }
 
   const update = await req.json().catch(() => null);
-  await dbConnect();
 
   const cb = update?.callback_query;
   if (cb?.id && cb?.data) {
     const chatId = String(cb.message?.chat?.id || cb.from?.id);
     const userName = [cb.from?.first_name, cb.from?.last_name].filter(Boolean).join(" ") || cb.from?.username || "Telegram user";
-    if (String(cb.data).startsWith("pr:")) {
-      await handlePurchaseCallback(String(cb.data), String(cb.id), chatId, userName);
-    } else {
-      await answerCallbackQuery(String(cb.id), "Unknown action");
+    try {
+      await dbConnect();
+      if (String(cb.data).startsWith("pr:")) {
+        await handlePurchaseCallback(String(cb.data), String(cb.id), chatId, userName);
+      } else {
+        await answerCallbackQuery(String(cb.id), "Unknown action");
+      }
+    } catch (e) {
+      console.error("telegram callback error:", e);
+      await answerCallbackQuery(String(cb.id), "Database is not reachable. Try again after Atlas Network Access is fixed.");
     }
     return NextResponse.json({ ok: true });
   }
@@ -290,16 +348,28 @@ export async function POST(req: NextRequest) {
   const userName = [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(" ") || msg.from?.username || "Telegram user";
   const text: string = msg.text || msg.caption || "";
 
-  try {
-    if (text.startsWith("/start") || text.startsWith("/report")) {
+  if (text.startsWith("/start") || text.startsWith("/report")) {
+    await sendReportMenu(chatId, `Welcome, ${userName}. Choose the report section.`);
+    try {
+      await dbConnect();
       const session =
         (await TelegramSession.findOne({ chatId })) ||
         (await TelegramSession.create({ chatId, userName, state: "idle", history: [] }));
       session.userName = userName;
+      session.state = "idle";
       await session.save();
-      await sendReportMenu(chatId, `Welcome, ${userName}. Choose what you want to report.`);
-      return NextResponse.json({ ok: true });
+    } catch (e) {
+      console.error("telegram start session save failed:", e);
+      await sendMessage(
+        chatId,
+        "Telegram is connected, but the database is not reachable yet. Reports cannot be saved until MongoDB Atlas Network Access allows this Vercel app."
+      ).catch(() => {});
     }
+    return NextResponse.json({ ok: true });
+  }
+
+  try {
+    await dbConnect();
 
     if (text.startsWith("/brief")) {
       const brief = await Brief.findOne().sort({ date: -1 }).lean();
@@ -315,7 +385,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true });
     }
 
-    if (text.startsWith("/cancel")) {
+    if (text.startsWith("/cancel") || normaliseChoice(text) === "cancel") {
       await TelegramSession.findOneAndUpdate({ chatId }, { state: "idle", draft: null, history: [] });
       await sendReportMenu(chatId, "Cancelled. Choose a new report type.");
       return NextResponse.json({ ok: true });
@@ -329,9 +399,29 @@ export async function POST(req: NextRequest) {
     const choice = REPORT_CHOICES[normaliseChoice(text)];
     if (choice) {
       await startReportDraft(session, choice);
-      await sendMessage(chatId, choice.question);
+      await sendInputTypeMenu(chatId, choice.label, choice.question);
       return NextResponse.json({ ok: true });
     }
+
+    if (normaliseChoice(text) === "change report") {
+      session.state = "idle";
+      session.draft = undefined;
+      session.history = [];
+      await session.save();
+      await sendReportMenu(chatId, "Choose the report section.");
+      return NextResponse.json({ ok: true });
+    }
+
+    const inputMode = inputModeFromText(text);
+    if (inputMode && session.state === "awaiting_input_type" && session.draft) {
+      session.state = "awaiting_metadata";
+      session.draft = { ...session.draft, inputMode };
+      session.markModified("draft");
+      await session.save();
+      await sendMessage(chatId, inputPrompt(inputMode, String(session.draft.prompt || "Send the report details.")));
+      return NextResponse.json({ ok: true });
+    }
+
     if (normaliseChoice(text) === "ask company question") {
       session.state = "idle";
       session.draft = undefined;
@@ -352,7 +442,8 @@ export async function POST(req: NextRequest) {
 
       const contentType = docIsImage ? msg.document.mime_type : "image/jpeg";
       const stored = await StoredFile.create({ data: downloaded.buffer, contentType, kind: "telegram_upload" });
-      const activeDraft = session.state === "awaiting_metadata" ? session.draft : undefined;
+      const activeDraft =
+        session.state === "awaiting_metadata" || session.state === "awaiting_input_type" ? session.draft : undefined;
       const extraction = await classifyIngestion({
         imageBase64: downloaded.buffer.toString("base64"),
         imageContentType: contentType,
@@ -374,6 +465,7 @@ export async function POST(req: NextRequest) {
       } else {
         session.state = "awaiting_metadata";
         session.draft = {
+          ...session.draft,
           docType: extraction.docType,
           fileId: String(stored._id),
           extracted: extraction.fields,
@@ -386,7 +478,12 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true });
     }
 
-    if (text && session.state === "awaiting_metadata" && session.draft) {
+    if (
+      text &&
+      (session.state === "awaiting_metadata" || session.state === "awaiting_input_type") &&
+      session.draft
+    ) {
+      session.state = "awaiting_metadata";
       session.history.push({ role: "user", content: text });
       const extraction = await classifyIngestion({
         text,
@@ -430,7 +527,12 @@ export async function POST(req: NextRequest) {
     await sendReportMenu(chatId);
   } catch (e) {
     console.error("telegram webhook error:", e);
-    await sendMessage(chatId, "Something went wrong. Please try again.").catch(() => {});
+    await sendMessage(
+      chatId,
+      isMongoAccessError(e)
+        ? "Database is not reachable from Vercel yet. Fix MongoDB Atlas Network Access, then try again."
+        : "Something went wrong. Please try again."
+    ).catch(() => {});
   }
 
   return NextResponse.json({ ok: true });

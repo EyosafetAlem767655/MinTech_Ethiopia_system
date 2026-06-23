@@ -9,3 +9,5 @@ out/
 next-env.d.ts
 public/icons/*.png
 .DS_Store
+
+.vercel

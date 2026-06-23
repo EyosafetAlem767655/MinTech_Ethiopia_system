@@ -9,7 +9,7 @@ import {
   pendingPurchaseRequests,
   receivablesAging,
 } from "@/lib/metrics";
-import { BagLot, DamageClaim, Invoice, Receipt, ShiftReport, StoneDelivery } from "@/lib/models";
+import { BagLot, Brief, DamageClaim, Invoice, PurchaseRequest, Receipt, ShiftReport, StoneDelivery } from "@/lib/models";
 
 /**
  * Company chatbot with full data access via tool-calling. The model decides
@@ -62,7 +62,16 @@ const tools: OpenAI.Chat.ChatCompletionTool[] = [
         properties: {
           collection: {
             type: "string",
-            enum: ["invoices", "stone_deliveries", "shift_reports", "receipts", "damage_claims"],
+            enum: [
+              "invoices",
+              "stone_deliveries",
+              "shift_reports",
+              "receipts",
+              "damage_claims",
+              "bag_lots",
+              "purchase_requests",
+              "briefs",
+            ],
           },
           client: { type: "string", description: "Filter invoices by client name (regex, optional)" },
           limit: { type: "number", default: 20 },
@@ -113,6 +122,12 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<unk
           return Receipt.find().sort({ createdAt: -1 }).limit(limit).lean();
         case "damage_claims":
           return DamageClaim.find().select("-photos.exifCheck").sort({ createdAt: -1 }).limit(limit).lean();
+        case "bag_lots":
+          return BagLot.find().select("-photoIds").sort({ receivedAt: -1 }).limit(limit).lean();
+        case "purchase_requests":
+          return PurchaseRequest.find().sort({ createdAt: -1 }).limit(limit).lean();
+        case "briefs":
+          return Brief.find().sort({ createdAt: -1 }).limit(limit).lean();
       }
       return { error: "unknown collection" };
     }

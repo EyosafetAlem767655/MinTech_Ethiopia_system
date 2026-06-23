@@ -60,12 +60,38 @@ export async function sendBriefMessage(chatId: string | number, text: string, da
   });
 }
 
+export const REPORT_BUTTONS = {
+  damage: "🛡️ Damage bags",
+  receipt: "🧾 Receipt",
+  purchase: "🛒 Purchase request",
+  wht: "📄 WHT receipt",
+  sales: "💵 Sales/payment",
+  truck: "🚚 Truck delivery",
+  shift: "🏭 Shift report",
+  question: "🤖 Ask company question",
+} as const;
+
 export const REPORT_KEYBOARD = {
   keyboard: [
-    [{ text: "Report damaged bags" }, { text: "Send receipt" }],
-    [{ text: "Purchase request" }, { text: "WHT receipt" }],
-    [{ text: "Sales/payment report" }, { text: "Truck delivery" }],
-    [{ text: "Shift report" }, { text: "Ask company question" }],
+    [{ text: REPORT_BUTTONS.damage }],
+    [{ text: REPORT_BUTTONS.receipt }],
+    [{ text: REPORT_BUTTONS.purchase }],
+    [{ text: REPORT_BUTTONS.wht }],
+    [{ text: REPORT_BUTTONS.sales }],
+    [{ text: REPORT_BUTTONS.truck }],
+    [{ text: REPORT_BUTTONS.shift }],
+    [{ text: REPORT_BUTTONS.question }],
+  ],
+  resize_keyboard: true,
+  one_time_keyboard: false,
+};
+
+export const INPUT_TYPE_KEYBOARD = {
+  keyboard: [
+    [{ text: "📝 Type details" }],
+    [{ text: "📷 Send photo" }],
+    [{ text: "🖼️ Photo + caption" }],
+    [{ text: "⬅️ Change report" }, { text: "❌ Cancel" }],
   ],
   resize_keyboard: true,
   one_time_keyboard: false,
@@ -74,8 +100,16 @@ export const REPORT_KEYBOARD = {
 export async function sendReportMenu(chatId: string | number, text?: string) {
   return sendMessage(
     chatId,
-    text || "Choose what you want to report. Send text, a photo, or both; I will ask for any missing fields.",
+    text || "Choose the report section.",
     { reply_markup: REPORT_KEYBOARD }
+  );
+}
+
+export async function sendInputTypeMenu(chatId: string | number, reportLabel: string, hint?: string) {
+  return sendMessage(
+    chatId,
+    `<b>${reportLabel}</b>\nChoose how you want to submit it.` + (hint ? `\n\n${hint}` : ""),
+    { reply_markup: INPUT_TYPE_KEYBOARD }
   );
 }
 
