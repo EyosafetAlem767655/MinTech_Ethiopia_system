@@ -1,126 +1,66 @@
-# MinTech Ethiopia — Internal System
+# MinTech Ethiopia - Internal System
 
-Mobile-first internal PWA for **MinTech Ethiopia** (mining company), built to run entirely on
-**Vercel Hobby** + **MongoDB Atlas M0 (free)**. Brand: reddish brown & white.
+Mobile-first internal operating system for MinTech Ethiopia, built for Vercel + MongoDB Atlas.
 
-Two modules in one repo:
+## Modules
 
-1. **Owner's Daily Dashboard & Morning Brief** (Module 5) — for Mr. Anteneh, the CEO
-2. **PB Bag Control System** (Module 1) — claims-with-photo-proof bag tracking
+| # | Module | Solves | Main interface |
+|---|---|---|---|
+| M1 | Bag Inventory & Damage Evidence | Problem 1A - bag leakage, fraud, tax over-assessment | Android camera-first PWA + Telegram fallback |
+| M2 | Purchase Request Trust Loop | Problem 1B - worker/owner distrust on purchases | Telegram bot + owner dashboard |
+| M3 | Receivables & Withholding Tracker | Problem 2A - late payments, missing 3% WHT receipts | Accountant web panel + SMS gateway |
+| M4 | Receipt Inbox & Monthly Sales Report | Problem 2B - who paid, who didn't, monthly financials | Telegram bot (clients) + LLM receipt reading |
+| M5 | Owner's Daily Dashboard & Morning Brief | Problem 3 - daily production/sales visibility | Mobile web app (PWA) on Vercel + Telegram push |
+| M6 | Truck & Raw-Material Traceability | Problem 4 - which truck brought the bad stone | Gate check-in app + AI stone scoring |
 
----
+## Routes
 
-## What it does
+- `/` - M5 owner daily dashboard, trends, exceptions, morning brief and module launch cards.
+- `/modules` - six-module operating map matching the implementation table.
+- `/bags` and `/claims/new` - M1 bag lots, stock reconciliation, camera-first damage evidence, AI fraud checks and PDF damage register.
+- `/purchases` - M2 purchase request creation, Telegram intake visibility and owner approve/reject loop.
+- `/receivables` - M3 invoice aging, payments, missing withholding receipts and SMS reminders.
+- `/receipts` - M4 receipt inbox and monthly sales/cash/expense report.
+- `/gate` - M6 truck gate check-in, raw-material photo evidence and AI stone quality score.
+- `/shift` - production shift report that feeds M1 and M5.
+- `/chat` - company assistant over live production, sales, receivables, receipts, bag and traceability data.
 
-### ☀️ Morning Brief (6:30 AM Ethiopia time, every day)
-- One **Vercel Cron** run at `03:30 UTC` (= 06:30 EAT) — fits the Hobby tier's one-cron-per-day limit by design.
-- The job: recomputes every lot balance → pulls yesterday's numbers straight from MongoDB →
-  detects exceptions → asks the LLM for the narrative (**numbers come from queries; words come
-  from the model; figures are never hallucinated**) → sends a **Telegram message** to the CEO and a
-  **PWA push notification** to every subscribed device.
-- The message leads with **exceptions first** ("bag damage rate 3× the monthly average", "Client X
-  crossed 30 days overdue", "truck ET-3-A12345's load scored dark/weathered at the gate"), then
-  **yesterday in five lines**, then the AI narrative. Tapping it opens the dashboard.
+## Core Behavior
 
-### 📊 Dashboard (`/`)
-- Installable, mobile-first PWA — no app store, no updates to install, works on any phone.
-- Yesterday's numbers: truckloads received, sacks produced, sacks sold, revenue invoiced,
-  cash collected, damaged bags claimed & verified.
-- Trends with **Recharts**: 7/30/90-day charts for production, sales & collections,
-  best/worst days, month-on-month comparison.
-- Money: receivables aging, missing withholding receipts, purchase requests —
-  **Mr. Anteneh approves purchase requests right there**.
+- The Telegram bot classifies uploads as receipts, purchase requests, damage claims, stone deliveries or shift reports, extracts fields with the LLM, asks follow-up questions when data is missing, and stores the result in the right collection.
+- The daily Vercel cron runs at `03:30 UTC` (`06:30 EAT`), recomputes bag balances, detects exceptions, writes the morning brief, sends Telegram to the CEO and broadcasts PWA push notifications.
+- Claim photos are stored in MongoDB, watermarked client-side, checked with EXIF sanity checks, perceptual hashing and `gpt-4o-mini` image review.
+- Gate stone photos are scored by `gpt-4o-mini`; manual gate grades are still supported when no photo or model key is available.
+- SMS reminders are optional. If `SMS_GATEWAY_URL` is unset, reminder attempts are recorded as skipped.
 
-### ✈️ Telegram bot
-- Workers send photos of receipts, purchase requests, damaged bags, plus delivery/shift info.
-- The LLM classifies each upload, extracts fields, asks follow-up questions for missing
-  metadata, and files everything in the correct collection.
-- Any plain question becomes a **company chatbot** conversation with full data access
-  (same engine as `/chat` in the app).
-- `/brief` resends the latest morning brief; `/cancel` resets an in-progress upload.
+## Setup
 
-### 🛡 PB Bag Control (`/bags`, `/claims/new`)
-- Lot registration: supplier, quantity, bag type, photos of the stacked lot, delivery note №.
-- Running balance per lot: received / filled / damaged-with-proof / in stock — any gap is an
-  automatic **red flag** with the names of everyone who handled the lot.
-- Damage claims (`/claims/new`): **in-app camera only** (`capture="environment"`, no gallery),
-  GPS + timestamp + device id + worker identity recorded, **visible watermark** burned in.
-- Telegram-submitted claims are **auto-flagged for supervisor co-signing**.
-- Every claim photo goes to **gpt-4o-mini** with a structured prompt returning JSON:
-  bag visible? matches registered bag type? damage visible? severity? suspicious
-  (screenshot / photo of a screen / heavy blur)?
-- **Perceptual hash** (dHash) on every image, compared against **all prior claims** —
-  duplicates and resubmissions are caught. **EXIF/metadata sanity checks** run on every photo.
-- Daily job recomputes every lot balance; statistical **tripwires** by worker, shift and
-  supplier lot.
-- Verified damage requires a **disposal action**: returned to supplier / destroyed with photo /
-  sold as scrap with amount logged.
-- **PDF damage & loss register** export (timestamped, with lot, date, photo evidence refs,
-  AI verdict, supervisor sign-off) for the revenue authority — `/api/export/damage-register`.
+1. Create a MongoDB Atlas database and set `MONGODB_URI`.
+2. Create a Telegram bot and set `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CEO_CHAT_ID` and `TELEGRAM_WEBHOOK_SECRET`.
+3. Generate VAPID keys for PWA push notifications and set the `VAPID_*` variables.
+4. Copy `.env.example` to `.env.local` and fill in the values.
+5. Install and run:
 
-### 🏭 End-of-shift form (`/shift`)
-60-second form for the shift supervisor: filled sacks, downtime, notes. Closes the data gap the
-other modules don't cover.
-
----
-
-## Setup (15 minutes)
-
-### 1. MongoDB Atlas (free)
-Create an M0 cluster → Database Access user → Network Access `0.0.0.0/0` (Vercel has no fixed IP)
-→ copy the connection string.
-
-### 2. Telegram bot
-1. Message **@BotFather** → `/newbot` → copy the token.
-2. Message your new bot once, then open
-   `https://api.telegram.org/bot<TOKEN>/getUpdates` and copy `message.chat.id`
-   from Mr. Anteneh's chat → that's `TELEGRAM_CEO_CHAT_ID`.
-
-### 3. VAPID keys (web push)
 ```bash
-npx web-push generate-vapid-keys
+npm install
+npm run dev
 ```
 
-### 4. Environment variables
-Copy `.env.example` → fill in every value → add **all of them** in
-*Vercel → Project → Settings → Environment Variables*.
+Optional demo data:
 
-### 5. Deploy
-Push to GitHub and import the repo in Vercel. The `vercel.json` cron
-(`30 3 * * *` = 06:30 Ethiopia time) registers automatically.
+```bash
+npm run seed
+```
 
-### 6. Point Telegram at the deployment
+Deploy to Vercel and point Telegram at the deployed webhook:
+
 ```bash
 APP_URL=https://your-app.vercel.app npm run telegram:set-webhook
 ```
 
-### 7. (Optional) demo data
-```bash
-npm run seed          # 90 days of realistic data, exceptions included
-```
-Then trigger the first brief manually:
-```bash
-curl -H "Authorization: Bearer $CRON_SECRET" https://your-app.vercel.app/api/cron/daily-brief
-```
+## Architecture
 
-### Local development
-```bash
-npm install
-cp .env.example .env.local   # fill it in
-npm run dev
-```
-
----
-
-## Architecture notes
-
-- **Next.js 14 App Router**, TypeScript, Tailwind (brand: `clay` reddish-brown scale), Recharts.
-- **Mongoose** models: `BagLot`, `BagEvent`, `DamageClaim`, `StoneDelivery`, `ShiftReport`,
-  `Invoice`, `PurchaseRequest`, `Receipt`, `StoredFile`, `PushSubscription`, `Brief`,
-  `TelegramSession`.
-- Photos are stored in MongoDB (`StoredFile`) and served via `/api/files/:id` — no extra
-  storage service needed on the free tiers.
-- Auth: single shared password (`ADMIN_PASSWORD`) → HMAC cookie via middleware. Telegram and
-  cron routes authenticate with their own secrets.
-- LLM: OpenAI `gpt-4o-mini` for photo inspection, ingestion classification, the chatbot
-  (tool-calling over live aggregations) and the brief narrative.
+- Next.js App Router, TypeScript, Tailwind CSS and Recharts.
+- MongoDB/Mongoose models: `BagLot`, `BagEvent`, `DamageClaim`, `StoneDelivery`, `ShiftReport`, `Invoice`, `PurchaseRequest`, `Receipt`, `StoredFile`, `PushSubscription`, `Brief`, `TelegramSession`.
+- Stored files are served through `/api/files/:id`.
+- Auth is a single shared `ADMIN_PASSWORD` cookie for internal pages and APIs; Telegram and cron endpoints use their own secrets.

@@ -6,6 +6,7 @@ import CountUp from "@/components/CountUp";
 import TrendCharts, { type TrendPoint } from "@/components/TrendCharts";
 import AgingChart from "@/components/AgingChart";
 import { enablePushNotifications } from "@/components/PwaSetup";
+import { MINTECH_MODULES } from "@/lib/modules";
 
 interface DashboardData {
   yesterday: {
@@ -100,6 +101,22 @@ export default function OwnerDashboard() {
       </header>
 
       <div className="px-4 -mt-12 relative space-y-5">
+        <section className="grid grid-cols-2 gap-2 animate-scale-in">
+          {MINTECH_MODULES.map((module) => (
+            <Link
+              key={module.code}
+              href={module.href}
+              className="rounded-2xl border border-white/70 bg-white/95 p-3 shadow-[0_4px_24px_rgba(62,22,13,0.06)] transition active:scale-[0.98]"
+            >
+              <span className={`inline-flex rounded-md px-2 py-0.5 text-[10px] font-bold text-white ${module.accent}`}>
+                {module.code}
+              </span>
+              <p className="mt-2 text-xs font-bold leading-tight text-stone-900">{module.name}</p>
+              <p className="mt-1 line-clamp-2 text-[10px] leading-snug text-stone-400">{module.mainInterface}</p>
+            </Link>
+          ))}
+        </section>
+
         {error && (
           <div className="card p-4 text-sm text-red-700 bg-red-50 border-red-200">
             Could not load dashboard: {error}

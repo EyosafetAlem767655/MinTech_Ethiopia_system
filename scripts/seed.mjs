@@ -56,6 +56,13 @@ const lotIds = Object.values(lotRes.insertedIds);
 
 /* 90 days of operations */
 const clients = ["Derba Cement", "Habesha Construction", "Mugher Trading", "Zemen Builders", "Awash Agro"];
+const clientPhones = {
+  "Derba Cement": "+251911000101",
+  "Habesha Construction": "+251911000102",
+  "Mugher Trading": "+251911000103",
+  "Zemen Builders": "+251911000104",
+  "Awash Agro": "+251911000105",
+};
 const workers = ["Abel T.", "Kebede M.", "Sara G.", "Yonas A.", "Marta H."];
 const trucks = ["ET-3-A12345", "ET-3-B67890", "ET-1-C24680", "ET-3-D13579"];
 const invoices = [];
@@ -63,6 +70,7 @@ const stone = [];
 const shifts = [];
 const events = [];
 const claims = [];
+const receipts = [];
 
 for (let d = 90; d >= 1; d--) {
   if (rand(1, 10) <= 9) {
@@ -71,6 +79,10 @@ for (let d = 90; d >= 1; d--) {
     for (let i = 0; i < n; i++) {
       stone.push({
         truckPlate: pick(trucks),
+        supplier: pick(["Bishoftu Quarry", "Mojo Stone", "Adama Aggregates"]),
+        quarry: pick(["Bishoftu Ridge", "Mojo East Pit", "Adama North Face"]),
+        driverName: pick(["Tadesse", "Fikru", "Solomon", "Nati"]),
+        gateClerk: "Gate Clerk Amanuel",
         loads: 1,
         qualityGrade: d === 1 && i === 0 ? "dark/weathered" : rand(1, 20) === 1 ? "dark/weathered" : rand(1, 6) === 1 ? "fair" : "good",
         date: dayAt(d, rand(7, 16)),
@@ -104,6 +116,7 @@ for (let d = 90; d >= 1; d--) {
   }
   // invoices + payments
   if (rand(1, 10) <= 7) {
+    const client = pick(clients);
     const sacks = rand(300, 900);
     const amount = sacks * rand(380, 460);
     const invoicedAt = dayAt(d, 11);
@@ -111,7 +124,8 @@ for (let d = 90; d >= 1; d--) {
     const paid = rand(1, 10) <= 7;
     invoices.push({
       invoiceNumber: `INV-${2026}${String(1000 + invoices.length)}`,
-      client: pick(clients),
+      client,
+      clientPhone: clientPhones[client],
       sacks,
       amount,
       invoicedAt,
@@ -119,6 +133,20 @@ for (let d = 90; d >= 1; d--) {
       payments: paid ? [{ amount, date: new Date(invoicedAt.getTime() + rand(2, 25) * 86400000), method: "bank" }] : [],
       withholdingReceiptReceived: paid ? rand(1, 10) <= 8 : false,
       createdAt: invoicedAt,
+      updatedAt: new Date(),
+    });
+  }
+  // receipts and expense evidence for the monthly report
+  if (rand(1, 10) <= 5) {
+    receipts.push({
+      vendor: pick(["Fuel Station A", "Addis Spares", "Site Canteen", "Welding Shop", "Courier Office"]),
+      amount: rand(1200, 42000),
+      category: pick(["Fuel", "Maintenance", "Meals", "Transport", "Office"]),
+      receiptDate: dayAt(d, rand(8, 18)),
+      taxInvoiceNumber: `RCPT-${2026}${String(2000 + receipts.length)}`,
+      submittedBy: pick(["Telegram client", "Accountant Selam", "Site office"]),
+      source: rand(1, 3) === 1 ? "app" : "telegram",
+      createdAt: dayAt(d),
       updatedAt: new Date(),
     });
   }
@@ -152,6 +180,7 @@ for (let d = 90; d >= 1; d--) {
 invoices.push({
   invoiceNumber: "INV-20260042",
   client: "Habesha Construction",
+  clientPhone: clientPhones["Habesha Construction"],
   sacks: 600,
   amount: 600 * 420,
   invoicedAt: dayAt(60, 11),
@@ -167,6 +196,7 @@ await db.collection("shiftreports").insertMany(shifts);
 await db.collection("invoices").insertMany(invoices);
 await db.collection("damageclaims").insertMany(claims);
 await db.collection("bagevents").insertMany(events);
+if (receipts.length) await db.collection("receipts").insertMany(receipts);
 
 /* Pending purchase requests for the approval demo */
 await db.collection("purchaserequests").insertMany([
@@ -207,6 +237,6 @@ await db.collection("bagevents").insertOne({
   updatedAt: new Date(),
 });
 
-console.log(`✓ Seeded: ${stone.length} deliveries, ${shifts.length} shift reports, ${invoices.length} invoices, ${claims.length} claims, ${lots.length} lots.`);
+console.log(`✓ Seeded: ${stone.length} deliveries, ${shifts.length} shift reports, ${invoices.length} invoices, ${receipts.length} receipts, ${claims.length} claims, ${lots.length} lots.`);
 console.log("Tip: call GET /api/cron/daily-brief once (with the CRON_SECRET bearer) to generate the first brief.");
 await mongoose.disconnect();

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { dbConnect } from "@/lib/db";
 import { DamageClaim, StoredFile } from "@/lib/models";
+import { recomputeLotBalances } from "@/lib/metrics";
 
 export const dynamic = "force-dynamic";
 
@@ -85,5 +86,6 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
   }
 
   await claim.save();
+  await recomputeLotBalances();
   return NextResponse.json({ ok: true, status: claim.status, disposal: claim.disposal });
 }

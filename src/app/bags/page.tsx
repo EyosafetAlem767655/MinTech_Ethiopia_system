@@ -80,6 +80,20 @@ export default function BagControlPage() {
     load();
   };
 
+  const recordLotEvent = async (lotId: string, type: "filled" | "stock_count" | "adjustment") => {
+    const quantity = Number(window.prompt(type === "stock_count" ? "Physical stock count:" : "Quantity:") || 0);
+    if (!quantity) return;
+    const by = promptName();
+    setBusyId(lotId);
+    await fetch(`/api/lots/${lotId}/events`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type, quantity, by }),
+    });
+    setBusyId("");
+    load();
+  };
+
   return (
     <main className="max-w-lg mx-auto">
       <header className="hero-gradient text-white px-5 pt-10 pb-6 rounded-b-3xl">
@@ -162,6 +176,29 @@ export default function BagControlPage() {
                     </p>
                   )}
                   <p className="text-[11px] text-stone-400 mt-2">👤 Handled by: {lot.handlers.join(", ") || "—"}</p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button
+                      disabled={busyId === lot._id}
+                      onClick={() => recordLotEvent(lot._id, "filled")}
+                      className="rounded-full bg-clay-700 px-3 py-2 text-[11px] font-bold text-white disabled:opacity-50"
+                    >
+                      Record filled bags
+                    </button>
+                    <button
+                      disabled={busyId === lot._id}
+                      onClick={() => recordLotEvent(lot._id, "stock_count")}
+                      className="rounded-full bg-green-100 px-3 py-2 text-[11px] font-bold text-green-700 disabled:opacity-50"
+                    >
+                      Stock count
+                    </button>
+                    <button
+                      disabled={busyId === lot._id}
+                      onClick={() => recordLotEvent(lot._id, "adjustment")}
+                      className="rounded-full bg-stone-100 px-3 py-2 text-[11px] font-bold text-stone-700 disabled:opacity-50"
+                    >
+                      Adjustment
+                    </button>
+                  </div>
                 </div>
               );
             })}

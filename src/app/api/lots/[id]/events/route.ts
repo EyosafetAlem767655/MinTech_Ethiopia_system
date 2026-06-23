@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { dbConnect } from "@/lib/db";
 import { BagEvent, BagLot } from "@/lib/models";
+import { recomputeLotBalances } from "@/lib/metrics";
 
 export const dynamic = "force-dynamic";
 
@@ -28,5 +29,6 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     lot.handlers.push(String(body.by));
     await lot.save();
   }
+  await recomputeLotBalances();
   return NextResponse.json({ ok: true });
 }

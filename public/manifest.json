@@ -1,7 +1,7 @@
 {
   "name": "MinTech Ethiopia",
   "short_name": "MinTech",
-  "description": "Owner's Daily Dashboard, Morning Brief and PB Bag Control for MinTech Ethiopia",
+  "description": "Six-module internal operating system for MinTech Ethiopia",
   "id": "/",
   "start_url": "/",
   "scope": "/",

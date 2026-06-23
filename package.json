@@ -2,7 +2,7 @@
   "name": "mintech-ethiopia-system",
   "version": "1.0.0",
   "private": true,
-  "description": "MinTech Ethiopia internal system: Owner's Daily Dashboard & Morning Brief + PB Bag Control",
+  "description": "MinTech Ethiopia internal operating system: six modules for bags, purchases, receivables, receipts, dashboard and truck traceability",
   "scripts": {
     "dev": "next dev",
     "prebuild": "node scripts/generate-icons.mjs",

@@ -208,9 +208,22 @@ const DamageClaimSchema = new Schema<any>(
 /* ───────────────────── Operations data (Modules 3/4/6) ───────────────────── */
 
 export interface IStoneDelivery {
+  _id: mongoose.Types.ObjectId;
   truckPlate: string;
+  supplier?: string;
+  quarry?: string;
+  driverName?: string;
+  gateClerk?: string;
   loads: number;
   qualityGrade: "good" | "fair" | "dark/weathered";
+  photoFileId?: mongoose.Types.ObjectId;
+  aiScore?: {
+    visible_stone: boolean;
+    qualityGrade: "good" | "fair" | "dark/weathered";
+    confidence: number;
+    reasons: string[];
+    recommendation?: string;
+  };
   notes?: string;
   date: Date;
 }
@@ -218,8 +231,20 @@ export interface IStoneDelivery {
 const StoneDeliverySchema = new Schema<any>(
   {
     truckPlate: { type: String, required: true },
+    supplier: String,
+    quarry: String,
+    driverName: String,
+    gateClerk: String,
     loads: { type: Number, default: 1 },
     qualityGrade: { type: String, enum: ["good", "fair", "dark/weathered"], default: "good" },
+    photoFileId: { type: Schema.Types.ObjectId, ref: "StoredFile" },
+    aiScore: {
+      visible_stone: Boolean,
+      qualityGrade: { type: String, enum: ["good", "fair", "dark/weathered"] },
+      confidence: Number,
+      reasons: [String],
+      recommendation: String,
+    },
     notes: String,
     date: { type: Date, default: Date.now, index: true },
   },
@@ -253,12 +278,16 @@ export interface IInvoice {
   _id: mongoose.Types.ObjectId;
   invoiceNumber: string;
   client: string;
+  clientPhone?: string;
   sacks: number;
   amount: number; // ETB
   invoicedAt: Date;
   dueDate: Date;
   payments: { amount: number; date: Date; method?: string }[];
   withholdingReceiptReceived: boolean;
+  withholdingReceiptFileId?: mongoose.Types.ObjectId;
+  withholdingReceiptReceivedAt?: Date;
+  reminders?: { channel: "sms"; to: string; sentAt: Date; status: string }[];
   notes?: string;
 }
 
@@ -266,12 +295,16 @@ const InvoiceSchema = new Schema<any>(
   {
     invoiceNumber: { type: String, required: true },
     client: { type: String, required: true, index: true },
+    clientPhone: String,
     sacks: { type: Number, default: 0 },
     amount: { type: Number, required: true },
     invoicedAt: { type: Date, default: Date.now, index: true },
     dueDate: { type: Date, required: true },
     payments: [{ amount: Number, date: Date, method: String }],
     withholdingReceiptReceived: { type: Boolean, default: false },
+    withholdingReceiptFileId: { type: Schema.Types.ObjectId, ref: "StoredFile" },
+    withholdingReceiptReceivedAt: Date,
+    reminders: [{ channel: String, to: String, sentAt: Date, status: String }],
     notes: String,
   },
   opts
@@ -308,9 +341,11 @@ const PurchaseRequestSchema = new Schema<any>(
 
 export interface IReceipt {
   vendor: string;
+  client?: string;
   amount: number;
   category?: string;
   receiptDate?: Date;
+  taxInvoiceNumber?: string;
   photoFileId?: mongoose.Types.ObjectId;
   submittedBy: string;
   source: "app" | "telegram";
@@ -320,9 +355,11 @@ export interface IReceipt {
 const ReceiptSchema = new Schema<any>(
   {
     vendor: { type: String, required: true },
+    client: String,
     amount: { type: Number, required: true },
     category: String,
     receiptDate: Date,
+    taxInvoiceNumber: String,
     photoFileId: { type: Schema.Types.ObjectId, ref: "StoredFile" },
     submittedBy: String,
     source: { type: String, enum: ["app", "telegram"], default: "telegram" },

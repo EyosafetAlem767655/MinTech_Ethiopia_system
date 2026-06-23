@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { dbConnect } from "@/lib/db";
 import { BagLot, DamageClaim } from "@/lib/models";
 import { processClaimPhoto } from "@/lib/claims";
+import { recomputeLotBalances } from "@/lib/metrics";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -73,6 +74,7 @@ export async function POST(req: NextRequest) {
     lot.handlers.push(worker);
     await lot.save();
   }
+  await recomputeLotBalances();
 
   return NextResponse.json({
     ok: true,

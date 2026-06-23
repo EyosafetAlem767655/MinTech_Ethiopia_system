@@ -81,6 +81,65 @@ export async function checkClaimPhoto(
   }
 }
 
+/* ───────────────────────── Gate stone quality scoring ─────────────────────── */
+
+export interface StoneScore {
+  visible_stone: boolean;
+  qualityGrade: "good" | "fair" | "dark/weathered";
+  confidence: number;
+  reasons: string[];
+  recommendation: string;
+}
+
+const STONE_SCORE_FALLBACK: StoneScore = {
+  visible_stone: false,
+  qualityGrade: "fair",
+  confidence: 0,
+  reasons: ["ai_check_failed"],
+  recommendation: "Hold for manual gate review before unloading.",
+};
+
+export async function scoreStonePhoto(imageBase64: string, contentType: string): Promise<StoneScore> {
+  try {
+    const res = await openai().chat.completions.create({
+      model: VISION_MODEL,
+      response_format: { type: "json_object" },
+      max_tokens: 350,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You inspect raw stone arriving at a mining/crushing site gate. Return STRICT JSON with: " +
+            "visible_stone (boolean), qualityGrade ('good'|'fair'|'dark/weathered'), confidence (0 to 1), " +
+            "reasons (short string array), recommendation (short operational action). " +
+            "Mark dark/weathered when the load appears unusually dark, weathered, contaminated, wet, clay-heavy, or likely to produce bad product.",
+        },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Score this truckload of incoming raw stone for production suitability." },
+            { type: "image_url", image_url: { url: `data:${contentType};base64,${imageBase64}`, detail: "low" } },
+          ],
+        },
+      ],
+    });
+    const parsed = JSON.parse(res.choices[0]?.message?.content || "{}");
+    const qualityGrade = ["good", "fair", "dark/weathered"].includes(parsed.qualityGrade)
+      ? parsed.qualityGrade
+      : "fair";
+    return {
+      visible_stone: !!parsed.visible_stone,
+      qualityGrade,
+      confidence: Math.max(0, Math.min(1, Number(parsed.confidence) || 0)),
+      reasons: Array.isArray(parsed.reasons) ? parsed.reasons.map(String).slice(0, 6) : [],
+      recommendation: String(parsed.recommendation || ""),
+    };
+  } catch (e) {
+    console.error("scoreStonePhoto failed:", e);
+    return STONE_SCORE_FALLBACK;
+  }
+}
+
 /* ─────────────────────── Morning brief narrative writer ───────────────────── */
 
 export async function writeBriefNarrative(structured: Record<string, unknown>): Promise<string> {
@@ -129,10 +188,10 @@ const INGESTION_SCHEMA = `Return STRICT JSON:
   "complete": boolean
 }
 Required fields per type:
-- receipt: vendor, amount (number, ETB), category, receiptDate (YYYY-MM-DD)
+- receipt: vendor, amount (number, ETB), category, receiptDate (YYYY-MM-DD), client if visible
 - purchase_request: title, amount (number, ETB), justification
 - damage_claim: lotCode, quantity (number of damaged bags)
-- stone_delivery: truckPlate, loads (number), qualityGrade ("good"|"fair"|"dark/weathered")
+- stone_delivery: truckPlate, loads (number), qualityGrade ("good"|"fair"|"dark/weathered"), supplier, quarry, driverName if visible
 - shift_report: filledSacks (number), downtimeMinutes (number), shift ("day"|"night"), notes
 - other: summary`;
 

@@ -5,7 +5,7 @@ import BottomNav from "@/components/BottomNav";
 
 export const metadata: Metadata = {
   title: "MinTech Ethiopia",
-  description: "Owner's Daily Dashboard, Morning Brief and PB Bag Control",
+  description: "Six-module internal operating system for MinTech Ethiopia",
   manifest: "/manifest.json",
   icons: { apple: "/icons/apple-touch-icon.png" },
   appleWebApp: { capable: true, statusBarStyle: "black-translucent", title: "MinTech" },

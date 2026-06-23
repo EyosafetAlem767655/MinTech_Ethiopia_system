@@ -30,9 +30,11 @@ async function saveExtractedRecord(
     case "receipt": {
       await Receipt.create({
         vendor: String(f.vendor || "Unknown vendor"),
+        client: f.client ? String(f.client) : undefined,
         amount: Number(f.amount) || 0,
         category: f.category ? String(f.category) : undefined,
         receiptDate: f.receiptDate ? new Date(String(f.receiptDate)) : undefined,
+        taxInvoiceNumber: f.taxInvoiceNumber ? String(f.taxInvoiceNumber) : undefined,
         photoFileId: opts.fileId || undefined,
         submittedBy: opts.userName,
         source: "telegram",
@@ -92,8 +94,13 @@ async function saveExtractedRecord(
     case "stone_delivery": {
       await StoneDelivery.create({
         truckPlate: String(f.truckPlate || "UNKNOWN"),
+        supplier: f.supplier ? String(f.supplier) : undefined,
+        quarry: f.quarry ? String(f.quarry) : undefined,
+        driverName: f.driverName ? String(f.driverName) : undefined,
+        gateClerk: opts.userName,
         loads: Number(f.loads) || 1,
         qualityGrade: ["good", "fair", "dark/weathered"].includes(f.qualityGrade) ? f.qualityGrade : "good",
+        photoFileId: opts.fileId || undefined,
         notes: f.notes ? String(f.notes) : undefined,
         date: new Date(),
       });
