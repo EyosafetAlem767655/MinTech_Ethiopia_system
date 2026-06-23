@@ -40,9 +40,11 @@ Mobile-first internal operating system for MinTech Ethiopia, built for Vercel + 
 
 1. Create a MongoDB Atlas database and set `MONGODB_URI`.
 2. Create a Telegram bot and set `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CEO_CHAT_ID`, optional `TELEGRAM_REMINDER_CHAT_IDS` and `TELEGRAM_WEBHOOK_SECRET`.
-3. Generate VAPID keys for PWA push notifications and set the `VAPID_*` variables.
-4. Copy `.env.example` to `.env.local` and fill in the values.
-5. Install and run:
+3. Set `OPENAI_API_KEY`; this powers the dashboard chatbot, Telegram document reading, damaged-bag checks, stone scoring and morning brief narrative.
+4. Generate VAPID keys for PWA push notifications and set `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` and `NEXT_PUBLIC_VAPID_PUBLIC_KEY`.
+5. Set `CRON_SECRET`, `ADMIN_PASSWORD` and `APP_URL`.
+6. Copy `.env.example` to `.env.local` and fill in the values.
+7. Install and run:
 
 ```bash
 npm install
@@ -58,8 +60,21 @@ npm run seed
 Deploy to Vercel and point Telegram at the deployed webhook:
 
 ```bash
-APP_URL=https://your-app.vercel.app npm run telegram:set-webhook
+npx vercel link --project min-tech-ethiopia-system
+npx vercel env pull .env.local --environment=production
+npm run telegram:set-webhook
 ```
+
+Use `npx vercel link` if your Vercel project name is different. The webhook setup script registers both `message` and `callback_query` updates, so employee reports and owner approval buttons both reach the app. Run it against the Production `APP_URL`; a single Telegram bot can point at only one webhook at a time.
+
+After deployment, sign in to the dashboard and check:
+
+```text
+/api/integrations/status
+/api/integrations/status?live=1
+```
+
+The first endpoint checks that required Vercel env var names are present. The live check also pings MongoDB, OpenAI and Telegram without exposing secret values. If Vercel shows `CRON_SECRETVAPID_PUBLIC_KEY`, split it into two separate variables: `CRON_SECRET` and `VAPID_PUBLIC_KEY`.
 
 ## Architecture
 

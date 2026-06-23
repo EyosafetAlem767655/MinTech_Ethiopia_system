@@ -1,8 +1,19 @@
 import OpenAI from "openai";
+import { envValue, requireEnv } from "@/lib/env";
 
 let _client: OpenAI | null = null;
+let _clientKey = "";
+
+export function isOpenAIConfigured(): boolean {
+  return envValue("OPENAI_API_KEY").length > 0;
+}
+
 export function openai(): OpenAI {
-  if (!_client) _client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const apiKey = requireEnv("OPENAI_API_KEY", "AI chat, Telegram document reading, photo checks and morning brief generation");
+  if (!_client || _clientKey !== apiKey) {
+    _client = new OpenAI({ apiKey });
+    _clientKey = apiKey;
+  }
   return _client;
 }
 

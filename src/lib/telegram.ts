@@ -1,15 +1,41 @@
-const TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
-const API = `https://api.telegram.org/bot${TOKEN}`;
+import { envValue } from "@/lib/env";
 
-async function call(method: string, payload: Record<string, unknown>) {
-  const res = await fetch(`${API}/${method}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  const json = await res.json();
-  if (!json.ok) console.error(`Telegram ${method} failed:`, JSON.stringify(json));
-  return json;
+export interface TelegramApiResponse<T = unknown> {
+  ok: boolean;
+  result?: T;
+  description?: string;
+  error_code?: number;
+}
+
+function telegramToken() {
+  return envValue("TELEGRAM_BOT_TOKEN");
+}
+
+async function call<T = unknown>(
+  method: string,
+  payload: Record<string, unknown> = {}
+): Promise<TelegramApiResponse<T>> {
+  const token = telegramToken();
+  if (!token) {
+    const description = "TELEGRAM_BOT_TOKEN is not set.";
+    console.error(`Telegram ${method} failed: ${description}`);
+    return { ok: false, description };
+  }
+
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const json = (await res.json()) as TelegramApiResponse<T>;
+    if (!json.ok) console.error(`Telegram ${method} failed:`, JSON.stringify(json));
+    return json;
+  } catch (e) {
+    const description = e instanceof Error ? e.message : String(e);
+    console.error(`Telegram ${method} failed:`, description);
+    return { ok: false, description };
+  }
 }
 
 export async function sendMessage(
@@ -78,14 +104,36 @@ export async function sendPurchaseDecisionRequest(
   );
 }
 
+export async function getTelegramBotInfo() {
+  return call<{ id: number; is_bot: boolean; first_name: string; username?: string }>("getMe");
+}
+
+export async function getTelegramWebhookInfo() {
+  return call<{
+    url?: string;
+    has_custom_certificate?: boolean;
+    pending_update_count?: number;
+    last_error_date?: number;
+    last_error_message?: string;
+    max_connections?: number;
+    allowed_updates?: string[];
+  }>("getWebhookInfo");
+}
+
 /** Downloads a Telegram file (photo/document) and returns its bytes. */
 export async function downloadTelegramFile(
   fileId: string
 ): Promise<{ buffer: Buffer; path: string } | null> {
-  const info = await call("getFile", { file_id: fileId });
+  const token = telegramToken();
+  if (!token) {
+    console.error("downloadTelegramFile failed: TELEGRAM_BOT_TOKEN is not set.");
+    return null;
+  }
+
+  const info = await call<{ file_path?: string }>("getFile", { file_id: fileId });
   const path = info?.result?.file_path;
   if (!path) return null;
-  const res = await fetch(`https://api.telegram.org/file/bot${TOKEN}/${path}`);
+  const res = await fetch(`https://api.telegram.org/file/bot${token}/${path}`);
   if (!res.ok) return null;
   return { buffer: Buffer.from(await res.arrayBuffer()), path };
 }
