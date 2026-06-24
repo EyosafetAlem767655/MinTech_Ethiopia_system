@@ -68,7 +68,6 @@ export default function OwnerDashboard() {
   const [opsData, setOpsData] = useState<OpsData | null>(null);
   const [error, setError] = useState("");
   const [pushState, setPushState] = useState<string>("");
-  const [prDeciding, setPrDeciding] = useState<Record<string, boolean>>({});
 
   const load = useCallback(async () => {
     try {
@@ -86,20 +85,6 @@ export default function OwnerDashboard() {
 
   useEffect(() => {
     load();
-  }, [load]);
-
-  const decidePR = useCallback(async (id: string, action: string) => {
-    setPrDeciding((prev) => ({ ...prev, [id]: true }));
-    try {
-      await fetch(`/api/purchase-requests/${id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action }),
-      });
-      await load();
-    } finally {
-      setPrDeciding((prev) => ({ ...prev, [id]: false }));
-    }
   }, [load]);
 
   const today = new Date().toLocaleDateString("en-GB", {
@@ -294,61 +279,37 @@ export default function OwnerDashboard() {
                 </div>
               )}
 
-              <div className="card p-4 mt-3">
-                <p className="text-[11px] font-bold tracking-widest uppercase text-clay-500 mb-2">
-                  Purchase requests ({data.purchaseRequests.length})
-                </p>
-                {data.purchaseRequests.length === 0 && (
-                  <p className="text-xs text-stone-400">Nothing waiting for you. 🎉</p>
-                )}
-                {data.purchaseRequests.map((pr) => (
-                  <div key={pr._id} className="py-3 border-t border-clay-50 first:border-t-0">
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0 flex-1">
-                        <p className="text-sm font-semibold truncate">{pr.title}</p>
-                        <p className="text-xs text-stone-400">
-                          {fmtETB(pr.amount)} · by {pr.requestedBy}
-                        </p>
-                        {pr.justification && (
-                          <p className="text-xs text-stone-500 mt-0.5 line-clamp-2">{pr.justification}</p>
-                        )}
-                        {pr.legitimacy && (
-                          <LegitimacyBadge score={pr.legitimacy.score} reasoning={pr.legitimacy.reasoning} />
-                        )}
-                      </div>
-                      <StatusBadge status={pr.status} />
-                    </div>
-                    {(pr.status === "pending" || pr.status === "deferred") && (
-                      <div className="flex gap-1.5 mt-2 flex-wrap">
-                        <DecisionButton
-                          label="✓ Bought"
-                          color="green"
-                          loading={!!prDeciding[pr._id]}
-                          onClick={() => decidePR(pr._id, "bought")}
-                        />
-                        <DecisionButton
-                          label="✗ Disregard"
-                          color="red"
-                          loading={!!prDeciding[pr._id]}
-                          onClick={() => decidePR(pr._id, "disregarded")}
-                        />
-                        <DecisionButton
-                          label="⏸ Defer"
-                          color="amber"
-                          loading={!!prDeciding[pr._id]}
-                          onClick={() => decidePR(pr._id, "defer")}
-                        />
-                        <DecisionButton
-                          label="✓ Approve"
-                          color="blue"
-                          loading={!!prDeciding[pr._id]}
-                          onClick={() => decidePR(pr._id, "approve")}
-                        />
-                      </div>
+              <Link
+                href="/purchases"
+                className="block card p-4 mt-3 hover:bg-clay-50 transition"
+              >
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-[11px] font-bold tracking-widest uppercase text-clay-500">
+                      Purchase requests
+                    </p>
+                    {data.purchaseRequests.length === 0 ? (
+                      <p className="text-sm font-semibold text-green-700 mt-1">Nothing pending. 🎉</p>
+                    ) : (
+                      <p className="text-sm font-semibold text-amber-700 mt-1">
+                        {data.purchaseRequests.length} awaiting decision
+                      </p>
                     )}
+                    {data.purchaseRequests.slice(0, 2).map((pr) => (
+                      <div key={pr._id} className="mt-2 text-xs text-stone-600 flex items-center gap-2">
+                        <span className="truncate max-w-[180px]">{pr.title}</span>
+                        <span className="shrink-0 text-stone-400">{fmtETB(pr.amount)}</span>
+                        {pr.legitimacy && (
+                          <span className={`shrink-0 text-[10px] font-bold ${pr.legitimacy.score >= 75 ? "text-green-600" : pr.legitimacy.score >= 50 ? "text-amber-600" : "text-red-600"}`}>
+                            {pr.legitimacy.score}%
+                          </span>
+                        )}
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
+                  <span className="text-clay-400 text-lg">→</span>
+                </div>
+              </Link>
             </section>
 
             {/* ───────────── Operations Reports ───────────── */}
@@ -425,64 +386,3 @@ function Kpi({
   );
 }
 
-function LegitimacyBadge({ score, reasoning }: { score: number; reasoning: string }) {
-  const color =
-    score >= 75
-      ? "bg-green-100 text-green-800"
-      : score >= 50
-      ? "bg-amber-100 text-amber-800"
-      : "bg-red-100 text-red-700";
-  const icon = score >= 75 ? "✓" : score >= 50 ? "?" : "⚠";
-  return (
-    <span className={`inline-flex items-center gap-1 mt-1 rounded-full px-2 py-0.5 text-[10px] font-bold ${color}`} title={reasoning}>
-      {icon} AI legitimacy: {score}%
-    </span>
-  );
-}
-
-const STATUS_STYLES: Record<string, string> = {
-  pending: "bg-amber-100 text-amber-800",
-  approved: "bg-blue-100 text-blue-800",
-  rejected: "bg-red-100 text-red-700",
-  bought: "bg-green-100 text-green-800",
-  disregarded: "bg-stone-100 text-stone-500",
-  deferred: "bg-purple-100 text-purple-700",
-};
-
-function StatusBadge({ status }: { status: string }) {
-  const cls = STATUS_STYLES[status] || "bg-stone-100 text-stone-500";
-  return (
-    <span className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-bold capitalize whitespace-nowrap ${cls}`}>
-      {status}
-    </span>
-  );
-}
-
-const DECISION_COLORS: Record<string, string> = {
-  green: "bg-green-600 hover:bg-green-700 text-white",
-  red: "bg-red-600 hover:bg-red-700 text-white",
-  amber: "bg-amber-500 hover:bg-amber-600 text-white",
-  blue: "bg-blue-600 hover:bg-blue-700 text-white",
-};
-
-function DecisionButton({
-  label,
-  color,
-  loading,
-  onClick,
-}: {
-  label: string;
-  color: string;
-  loading: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      disabled={loading}
-      className={`rounded-full px-3 py-1.5 text-[11px] font-bold transition-all active:scale-95 disabled:opacity-50 ${DECISION_COLORS[color]}`}
-    >
-      {loading ? "…" : label}
-    </button>
-  );
-}

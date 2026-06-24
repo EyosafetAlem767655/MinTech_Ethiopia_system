@@ -97,7 +97,8 @@ function normaliseChoice(text: string) {
   return text
     .trim()
     .toLowerCase()
-    .replace(/^[^a-z0-9%]+/i, "")
+    // strip leading emoji, symbols, and whitespace
+    .replace(/^[\p{Emoji}\p{S}\p{P}\s]+/u, "")
     .trim();
 }
 
@@ -449,11 +450,8 @@ export async function POST(req: NextRequest) {
     session.userName = userName;
 
     // Ops report: skip input_type_menu and go straight to text paste
-    if (
-      normaliseChoice(text) === "daily ops report" ||
-      normaliseChoice(text) === "ops report" ||
-      normaliseChoice(text) === "📊 daily ops report"
-    ) {
+    const normText = normaliseChoice(text);
+    if (normText === "daily ops report" || normText === "ops report") {
       session.state = "awaiting_ops_report";
       session.draft = undefined;
       session.history = [];
@@ -486,14 +484,33 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true });
     }
 
-    const choice = REPORT_CHOICES[normaliseChoice(text)];
+    const choice = REPORT_CHOICES[normText];
     if (choice) {
-      await startReportDraft(session, choice);
-      await sendInputTypeMenu(chatId, choice.label, choice.question);
+      const textOnly = choice.docType === "shift_report";
+      session.state = "awaiting_metadata";
+      session.draft = {
+        docType: choice.docType,
+        reportLabel: choice.label,
+        prompt: choice.question,
+        inputMode: textOnly ? "text" : "photo_caption",
+        extracted: {},
+        missing: [],
+      };
+      session.history = [{ role: "assistant", content: choice.question }];
+      await session.save();
+      const msg2 = textOnly
+        ? `<b>${choice.label}</b>\n\n${choice.question}\n\nType the details in one message.`
+        : `<b>${choice.label}</b>\n\n${choice.question}\n\n📷 <b>Photo required.</b> Send the photo — add details in the caption.`;
+      await sendMessage(chatId, msg2, {
+        reply_markup: {
+          keyboard: [[{ text: "⬅️ Change report" }, { text: "❌ Cancel" }]],
+          resize_keyboard: true,
+        },
+      });
       return NextResponse.json({ ok: true });
     }
 
-    if (normaliseChoice(text) === "change report") {
+    if (normText === "change report") {
       session.state = "idle";
       session.draft = undefined;
       session.history = [];
@@ -502,17 +519,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true });
     }
 
-    const inputMode = inputModeFromText(text);
-    if (inputMode && session.state === "awaiting_input_type" && session.draft) {
-      session.state = "awaiting_metadata";
-      session.draft = { ...session.draft, inputMode };
-      session.markModified("draft");
-      await session.save();
-      await sendMessage(chatId, inputPrompt(inputMode, String(session.draft.prompt || "Send the report details.")));
-      return NextResponse.json({ ok: true });
-    }
-
-    if (normaliseChoice(text) === "ask company question") {
+    if (normText === "ask company question") {
       session.state = "idle";
       session.draft = undefined;
       await session.save();
@@ -573,6 +580,15 @@ export async function POST(req: NextRequest) {
       (session.state === "awaiting_metadata" || session.state === "awaiting_input_type") &&
       session.draft
     ) {
+      // Reject text-only for photo-required types
+      if (session.draft.inputMode === "photo_caption") {
+        await sendMessage(
+          chatId,
+          "📷 <b>A photo is required</b> for this report.\n\nPlease send the photo with details in the caption. Text-only submissions are not accepted."
+        );
+        return NextResponse.json({ ok: true });
+      }
+
       session.state = "awaiting_metadata";
       session.history.push({ role: "user", content: text });
       const extraction = await classifyIngestion({

@@ -1,0 +1,716 @@
+import { NextResponse } from "next/server";
+import { dbConnect } from "@/lib/db";
+import { ingestOpsReport } from "@/lib/ops-report";
+
+export const dynamic = "force-dynamic";
+export const maxDuration = 60;
+
+// Raw historical data provided by management (31 Mar – 2 May 2026)
+const HISTORICAL_DATA = `31/3/2026
+Delivered-
+ETL9=30,
+5EL=11,
+2EL=20
+3EL=17,
+EC15=5,
+1/4/2026
+Received-
+ETL9=29,
+2EL=30.875,
+Stock -
+ETL15=25.8,
+ETL9=59.64,
+ETL6=1.88,
+5EL=80.47,
+2EL=214.45,
+3EL=295.9,
+EC15=366.25,
+EC90=167.24,
+Talk=547.175
+25Kg Bag
+Yellow=82000,
+White=32500,
+Beige=5500,
+40Kg Bag
+Beige=63707, Yellow=46000,
+Green=300
+1/4/2026
+Delivered-
+ETL15=1,
+ETL9=39,
+2EL=50.5,
+3EL=4,
+2/4/2026
+Received-
+ETL9=44,
+2EL=39,
+Stock -
+ETL15=24.8,
+ETL9=64.64,
+ETL6=1.88,
+5EL=80.47,
+2EL=202.95,
+3EL=291.9,
+EC15=366.25,
+EC90=167.24,
+Talk=547.175
+25Kg Bag
+Yellow=82000,
+White=29500,
+Beige=5500,
+40Kg Bag
+Beige=63707, Yellow=46000,
+Green=300
+2/4/2026
+Delivered-
+ETL15=0.52,
+ETL9=25,
+2EL=120,
+3/4/2026
+Received-
+ETL9=33.6,
+2EL=28.6,
+Stock -
+ETL15=24.28,
+ETL9=73.24,
+ETL6=1.88,
+5EL=80.47,
+2EL=111.55,
+3EL=291.9,
+EC15=366.25,
+EC90=167.24,
+Talk=547.175
+25Kg Bag
+Yellow=82000,
+White=29500,
+Beige=5500,
+40Kg Bag
+Beige=60707, Yellow=46000,
+Green=300
+6/4/2026
+Delivered-
+ETL15=20,
+ETL9=22,
+2EL=0.85,
+EC90=19,
+7/4/2026
+Received-
+ETL9=17.56,
+2EL=19.25,
+Stock -
+ETL15=4.28,
+ETL9=72.4,
+ETL6=1.88,
+5EL=65.47,
+2EL=138.65,
+3EL=269.4,
+EC15=366.25,
+EC90=103.24,
+Talk=547.175
+25Kg Bag
+Yellow=82000,
+White=24500,
+Beige=5500,
+40Kg Bag
+Beige=57707, Yellow=46000,
+Green=300
+8/4/2026
+Delivered-
+ETL9=36,
+2EL=45,
+3EL=20,
+EC90=10,
+9/4/2026
+Received-
+ETL9=17.92,
+2EL=16.625,
+Stock -
+ETL15=4.28,
+ETL9=63.92,
+ETL6=1.88,
+5EL=65.47,
+2EL=130.025,
+3EL=229.4,
+EC15=366.25,
+EC90=57.24,
+Talk=547.175
+25Kg Bag
+Yellow=82000,
+White=24500,
+Beige=5500,
+40Kg Bag
+Beige=57707, Yellow=46000,
+Green=300
+9/4/2026
+Delivered-
+ETL9=38,
+2EL=61,
+EC15=1,
+EC90=6,
+10/4/2026
+Received-
+ETL9=18.6,
+2EL=17.5,
+Stock -
+ETL15=4.28,
+ETL9=44.52,
+ETL6=1.88,
+5EL=65.47,
+2EL=86.375,
+3EL=229.4,
+EC15=365.25,
+EC90=51.24,
+Talk=547.175
+25Kg Bag
+Yellow=82000,
+White=24500,
+Beige=5500,
+40Kg Bag
+Beige=57707, Yellow=46000,
+Green=300
+11/4/2026
+Stock -
+ETL15=4.28,
+ETL9=44.52,
+ETL6=1.88,
+5EL=65.47,
+2EL=86.375,
+3EL=229.4,
+EC15=365.25,
+EC90=51.24,
+Talk=547.175
+25Kg Bag
+Yellow=82000,
+White=24500,
+Beige=5500,
+40Kg Bag
+Beige=57707, Yellow=46000,
+Green=300
+11/4/2026
+Delivered-
+ETL9=30,
+5EL=38,
+2EL=60,
+EC15=5,
+12/4/2026
+Received-
+ETL9=16.28,
+2EL=14.125,
+Stock -
+ETL15=4.28,
+ETL9=30.8,
+ETL6=1.88,
+5EL=27.47,
+2EL=40.65,
+3EL=229.4,
+EC15=360.25,
+EC90=51.24,
+Talk=547.175
+25Kg Bag
+Yellow=82000,
+White=22500,
+Beige=5500,
+40Kg Bag
+Beige=57707, Yellow=46000,
+Green=300
+13-14/4/2026
+Stock -
+ETL15=4.28,
+ETL9=30.8,
+ETL6=1.88,
+5EL=27.47,
+2EL=40.65,
+3EL=229.4,
+EC15=360.25,
+EC90=51.24,
+Talk=547.175
+25Kg Bag
+Yellow=82000,
+White=22500,
+Beige=5500,
+40Kg Bag
+Beige=57707, Yellow=46000,
+Green=300
+14/4/2026
+Delivered-
+ETL9=20,
+2EL=10,
+EC15=5,
+15/4/2026
+Received-
+ETL9=12.96,
+2EL=15.375,
+Stock -
+ETL15=4.28,
+ETL9=23.76,
+ETL6=1.88,
+5EL=27.47,
+2EL=46.025,
+3EL=229.4,
+EC15=355.25,
+EC90=51.24,
+Talk=547.175
+25Kg Bag
+Yellow=82000,
+White=22500,
+Beige=5500,
+40Kg Bag
+Beige=57707, Yellow=46000,
+Green=300,
+15/4/2026
+Delivered-
+ETL9=17.52,
+2EL=5,
+3EL=5,
+EC15=25,
+EC90=2.52,
+16/4/2026
+Received-
+ETL9=21.8,
+2EL=8.225,
+Stock -
+ETL15=4.28,
+ETL9=28.04,
+ETL6=1.88,
+5EL=27.47,
+2EL=49.25,
+3EL=224.4,
+EC15=330.25,
+EC90=48.72,
+Talk=547.175
+25Kg Bag
+Yellow=82000,
+White=22500,
+Beige=5500,
+40Kg Bag
+Beige=57707, Yellow=46000,
+Green=300,
+16/4/2026
+Delivered-
+ETL9=24,
+2EL=30,
+3EL=46,
+EC15=5,
+EC90=1,
+17/4/2026
+Received-
+ETL9=23.8,
+2EL=13.25,
+Stock -
+ETL15=4.28,
+ETL9=27.84,
+ETL6=1.88,
+5EL=27.47,
+2EL=32.5,
+3EL=178.4,
+EC15=325.25,
+EC90=47.72,
+Talk=547.175
+25Kg Bag
+Yellow=82000,
+White=20500,
+Beige=5500,
+40Kg Bag
+Beige=54707, Yellow=46000,
+Green=300,
+17/4/2026
+Delivered-
+ETL15=2,
+ETL9=18,
+5EL=5,
+2EL=21,
+3EL=42,
+18/4/2026
+Received-
+ETL9=6.2,
+2EL=4.2,
+Stock -
+ETL15=2.28,
+ETL9=16.04,
+ETL6=1.88,
+5EL=22.47,
+2EL=15.7,
+3EL=136.4,
+EC15=325.25,
+EC90=47.72,
+Talk=547.175
+25Kg Bag
+Yellow=82000,
+White=20500,
+Beige=5500,
+40Kg Bag
+Beige=54707, Yellow=46000,
+Green=300,
+18/4/2026
+Delivered-
+ETL9=4,
+5EL=22,
+EC15=10.7
+EC90=2,
+19/4/2026
+Received-
+ETL15=18.72,
+ETL9=29.8,
+2EL=12.9,
+Stock -
+ETL15=21,
+ETL9=41.84,
+ETL6=1.88,
+5EL=0.47,
+2EL=28.6,
+3EL=136.4,
+EC15=314.55,
+EC90=45.72,
+Talk=547.175
+25Kg Bag
+Yellow=82000,
+White=20500,
+Beige=5500,
+40Kg Bag
+Beige=54707, Yellow=46000,
+Green=300,
+20/4/2026
+Stock -
+ETL15=21,
+ETL9=41.84,
+ETL6=1.88,
+5EL=0.47,
+2EL=28.6,
+3EL=136.4,
+EC15=314.55,
+EC90=45.72,
+Talk=547.175
+25Kg Bag
+Yellow=82000,
+White=20500,
+Beige=5500,
+40Kg Bag
+Beige=54707, Yellow=46000,
+Green=300,
+20/4/2026
+Delivered-
+ETL15=20
+ETL9=24,
+2EL=1,
+3EL=6,
+EC90=1,
+21/4/2026
+Received-
+ETL15=6.6,
+ETL9=26.92,
+Stock -
+ETL15=7.6,
+ETL9=44.76,
+ETL6=1.88,
+5EL=0.47,
+2EL=27.6,
+3EL=130.4,
+EC15=314.55,
+EC90=44.72,
+Talk=547.175
+25Kg Bag
+Yellow=82000,
+White=20500,
+Beige=5500,
+40Kg Bag
+Beige=54707, Yellow=46000,
+Green=300,
+21/4/2026
+Delivered-
+ETL9=15,
+2EL=20,
+EC15=25,
+22/4/2026
+Received-
+ETL9=4.36,
+Stock -
+ETL15=7.6,
+ETL9=44.12,
+ETL6=1.88,
+5EL=0.47,
+2EL=7.6,
+3EL=130.4,
+EC15=289.55,
+EC90=44.72,
+Talk=547.175
+25Kg Bag
+Yellow=82000,
+White=20500,
+Beige=5500,
+40Kg Bag
+Beige=54707, Yellow=46000,
+Green=300,
+22/4/2026
+Delivered-
+ETL9=14.72,
+3EL=1,
+EC15=5,
+EC90=10,
+23/4/2026
+Received-
+ETL9=10.2,
+ETL6=6.2,
+5EL=4.4,
+2EL=25.75,
+Stock -
+ETL15=7.6,
+ETL9=29.6,
+ETL6=8.08,
+5EL=4.87,
+2EL=33.35,
+3EL=129.4,
+EC15=284.55,
+EC90=34.72,
+Talk=547.175
+25Kg Bag
+Yellow=82000,
+White=20500,
+Beige=5500,
+40Kg Bag
+Beige=54707, Yellow=46000,
+Green=300,
+23/4/2026
+Delivered-
+ETL15=5,
+ETL9=10.52,
+ETL6=5,
+5EL=2,
+2EL=25,
+3EL=14,
+EC90=0.52,
+24/4/2026
+Received-
+ETL9=1.6,
+5EL=2.05,
+2EL=4.55,
+Stock -
+ETL15=2.6,
+ETL9=20.68,
+ETL6=3.08,
+5EL=4.92,
+2EL=12.9,
+3EL=115.4,
+EC15=284.55,
+EC90=34.2,
+Talk=547.175
+25Kg Bag
+Yellow=82000,
+White=17500,
+Beige=5500,
+40Kg Bag
+Beige=54707, Yellow=45000,
+Green=300,
+24/4/2026
+Delivered-
+3EL=0.85,
+25/4/2026
+Received-
+ETL15=30.12,
+ETL9=10,
+5EL=8.85,
+2EL=12.775,
+Stock -
+ETL15=32.72,
+ETL9=30.68,
+ETL6=3.08,
+5EL=13.77,
+2EL=25.675,
+3EL=114.55,
+EC15=284.55,
+EC90=34.2,
+Talk=547.175
+25Kg Bag
+Yellow=82000,
+White=17500,
+Beige=5500,
+40Kg Bag
+Beige=54707, Yellow=45000,
+Green=300,
+25/4/2026
+Delivered-
+ETL15=25,
+ETL9=10,
+5EL=5,
+26/4/2026
+Received-
+ETL15=29.36,
+ETL9=5.84,
+5EL=5.5,
+Stock -
+ETL15=37.08,
+ETL9=26.52,
+ETL6=3.08,
+5EL=14.27,
+2EL=25.675,
+3EL=114.55,
+EC15=284.55,
+EC90=34.2,
+Talk=547.175
+25Kg Bag
+Yellow=82000,
+White=17500,
+Beige=5500,
+40Kg Bag
+Beige=54707, Yellow=43000,
+Green=300,
+27/4/2026
+Stock -
+ETL15=37.08,
+ETL9=26.52,
+ETL6=3.08,
+5EL=14.27,
+2EL=25.675,
+3EL=114.55,
+EC15=284.55,
+EC90=34.2,
+Talk=547.175
+25Kg Bag
+Yellow=82000,
+White=17500,
+Beige=5500,
+40Kg Bag
+Beige=54707, Yellow=43000,
+Green=300,
+27/4/2026
+Delivered-
+ETL15=20,
+ETL9=24,
+5EL=1,
+2EL=2,
+3EL=5.5,
+EC90=7,
+28/4/2026
+Received-
+ETL15=0.8,
+ETL9=8,
+ETL6=1.08,
+5EL=15.65,
+2EL=8.375
+Stock -
+ETL15=17.88,
+ETL9=10.52,
+ETL6=4.16,
+5EL=28.92,
+2EL=32.05,
+3EL=109.05,
+EC15=284.55,
+EC90=27.2,
+Talk=547.175
+25Kg Bag
+Yellow=82000,
+White=17500,
+Beige=5500,
+40Kg Bag
+Beige=54707, Yellow=43000,
+Green=300,
+28/4/2026
+Delivered-
+ETL9=16,
+5EL=20,
+EC90=5,
+29/4/2026
+Received-
+ETL9=14.2,
+ETL6=22.08,
+5EL=3.625,
+2EL=10.775
+Stock -
+ETL15=17.88,
+ETL9=8.72,
+ETL6=26.24,
+5EL=12.545,
+2EL=42.825,
+3EL=109.05,
+EC15=284.55,
+EC90=22.2,
+Talk=547.175
+25Kg Bag
+Yellow=82000,
+White=17500,
+Beige=5500,
+40Kg Bag
+Beige=51707, Yellow=43000,
+Green=300,
+29/4/2026
+Delivered-
+ETL9=5,
+ETL6=5
+3EL=42,
+30/4/2026
+Received-
+ETL9=19.2,
+ETL6=17.92,
+5EL=1.5,
+2EL=13.95
+Stock -
+ETL15=57.88,
+ETL9=22.92,
+ETL6=39.16,
+5EL=14.045,
+2EL=56.775,
+3EL=67.05,
+EC15=284.55,
+EC90=22.2,
+Talk=547.175
+25Kg Bag
+Yellow=82000,
+White=17500,
+Beige=5500,
+40Kg Bag
+Beige=51707, Yellow=41000,
+Green=300,
+30/4/2026
+Delivered-
+ETL9=25,
+2EL=0.7,
+3EL=7.85,
+1/5/2026
+Received-
+ETL9=16.24,
+2EL=32.85
+Stock -
+ETL15=57.88,
+ETL9=14.16,
+ETL6=39.16,
+5EL=14.045,
+2EL=88.925,
+3EL=59.2,
+EC15=284.55,
+EC90=22.2,
+Talk=547.175
+25Kg Bag
+Yellow=82000,
+White=17500,
+Beige=5500,
+40Kg Bag
+Beige=51707, Yellow=41000,
+Green=300,
+2/5/2026
+Stock -
+ETL15=57.88,
+ETL9=14.16,
+ETL6=39.16,
+5EL=14.045,
+2EL=88.925,
+3EL=59.2,
+EC15=284.55,
+EC90=22.2,
+Talk=547.175
+25Kg Bag
+Yellow=82000,
+White=17500,
+Beige=5500,
+40Kg Bag
+Beige=51707, Yellow=41000,
+Green=300,`;
+
+export async function GET() {
+  await dbConnect();
+  const result = await ingestOpsReport(HISTORICAL_DATA, "seed");
+  return NextResponse.json({
+    ok: true,
+    saved: result.saved,
+    updated: result.updated,
+    dates: result.entries.map((e) => e.dateLabel),
+  });
+}
