@@ -177,7 +177,10 @@ export async function missingWithholding() {
 }
 
 export async function pendingPurchaseRequests() {
-  return PurchaseRequest.find({ status: "pending" }).sort({ createdAt: 1 }).lean();
+  return PurchaseRequest.find({ status: { $in: ["pending", "deferred"] } })
+    .sort({ createdAt: 1 })
+    .select("title amount requestedBy justification status legitimacy photoFileId createdAt")
+    .lean();
 }
 
 /* ──────────────── Lot balance reconciliation (daily job + UI) ─────────────── */

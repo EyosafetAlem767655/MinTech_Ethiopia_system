@@ -4,18 +4,31 @@ import { PurchaseRequest } from "@/lib/models";
 
 export const dynamic = "force-dynamic";
 
-/** One-tap approve / reject from the CEO dashboard. */
+const VALID_ACTIONS = ["approve", "reject", "bought", "disregarded", "deferred"] as const;
+type Action = (typeof VALID_ACTIONS)[number];
+
+const ACTION_TO_STATUS: Record<Action, string> = {
+  approve: "approved",
+  reject: "rejected",
+  bought: "bought",
+  disregarded: "disregarded",
+  deferred: "deferred",
+};
+
 export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {
   await dbConnect();
   const body = await req.json();
-  const action = body.action as "approve" | "reject";
-  if (action !== "approve" && action !== "reject") {
-    return NextResponse.json({ error: "action must be approve or reject" }, { status: 400 });
+  const action = body.action as Action;
+  if (!VALID_ACTIONS.includes(action)) {
+    return NextResponse.json(
+      { error: `action must be one of: ${VALID_ACTIONS.join(", ")}` },
+      { status: 400 }
+    );
   }
   const pr = await PurchaseRequest.findByIdAndUpdate(
     params.id,
     {
-      status: action === "approve" ? "approved" : "rejected",
+      status: ACTION_TO_STATUS[action],
       decidedBy: body.decidedBy || "Mr. Anteneh",
       decidedAt: new Date(),
     },

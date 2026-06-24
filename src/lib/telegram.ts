@@ -68,6 +68,7 @@ export const REPORT_BUTTONS = {
   sales: "💵 Sales/payment",
   truck: "🚚 Truck delivery",
   shift: "🏭 Shift report",
+  ops: "📊 Daily ops report",
   question: "🤖 Ask company question",
 } as const;
 
@@ -80,6 +81,7 @@ export const REPORT_KEYBOARD = {
     [{ text: REPORT_BUTTONS.sales }],
     [{ text: REPORT_BUTTONS.truck }],
     [{ text: REPORT_BUTTONS.shift }],
+    [{ text: REPORT_BUTTONS.ops }],
     [{ text: REPORT_BUTTONS.question }],
   ],
   resize_keyboard: true,

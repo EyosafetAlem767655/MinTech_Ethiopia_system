@@ -12,7 +12,7 @@ import {
   StoredFile,
   TelegramSession,
 } from "@/lib/models";
-import { classifyIngestion, scoreStonePhoto, type IngestionExtraction } from "@/lib/llm";
+import { classifyIngestion, scoreStonePhoto, verifyRequestLegitimacy, type IngestionExtraction } from "@/lib/llm";
 import {
   answerCallbackQuery,
   downloadTelegramFile,
@@ -25,6 +25,7 @@ import {
 import { processClaimPhoto } from "@/lib/claims";
 import { companyChat } from "@/lib/chat";
 import { recomputeLotBalances } from "@/lib/metrics";
+import { ingestOpsReport, isOpsReportText } from "@/lib/ops-report";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -80,6 +81,16 @@ const REPORT_CHOICES: Record<string, { docType: IngestionExtraction["docType"]; 
     label: REPORT_BUTTONS.shift,
     question: "Type filled sacks, downtime minutes, shift and any notes.",
   },
+  "daily ops report": {
+    docType: "other" as IngestionExtraction["docType"],
+    label: REPORT_BUTTONS.ops,
+    question: "Paste the daily operations report text (dates, Delivered/Received/Stock sections).",
+  },
+  "ops report": {
+    docType: "other" as IngestionExtraction["docType"],
+    label: REPORT_BUTTONS.ops,
+    question: "Paste the daily operations report text (dates, Delivered/Received/Stock sections).",
+  },
 };
 
 function normaliseChoice(text: string) {
@@ -125,17 +136,25 @@ function isMongoAccessError(e: unknown) {
   return message.includes("MongoDB Atlas") || message.includes("IP") || message.includes("whitelist");
 }
 
+const PR_ACTION_STATUS: Record<string, string> = {
+  approve: "approved",
+  reject: "rejected",
+  bought: "bought",
+  disregard: "disregarded",
+  defer: "deferred",
+};
+
 async function handlePurchaseCallback(data: string, callbackId: string, chatId: string, userName: string) {
   const [, rawAction, id] = data.split(":");
-  const action = rawAction === "approve" ? "approved" : rawAction === "reject" ? "rejected" : "";
-  if (!action || !id) {
+  const status = PR_ACTION_STATUS[rawAction] || "";
+  if (!status || !id) {
     await answerCallbackQuery(callbackId, "Invalid action");
     return;
   }
 
   const pr = await PurchaseRequest.findByIdAndUpdate(
     id,
-    { status: action, decidedBy: userName, decidedAt: new Date() },
+    { status, decidedBy: userName, decidedAt: new Date() },
     { new: true }
   );
   if (!pr) {
@@ -143,8 +162,17 @@ async function handlePurchaseCallback(data: string, callbackId: string, chatId: 
     return;
   }
 
-  await answerCallbackQuery(callbackId, `Request ${action}`);
-  await sendMessage(chatId, `Purchase request <b>${pr.title}</b> marked <b>${action}</b> by ${userName}.`);
+  await answerCallbackQuery(callbackId, `Marked ${status}`);
+  await sendMessage(chatId, `Purchase request <b>${pr.title}</b> marked <b>${status}</b> by ${userName}.`);
+}
+
+async function getPhotoBase64(fileId: string): Promise<{ base64: string; contentType: string } | null> {
+  const file = await StoredFile.findById(fileId);
+  if (!file) return null;
+  return {
+    base64: Buffer.from(file.data as unknown as Uint8Array).toString("base64"),
+    contentType: file.contentType,
+  };
 }
 
 async function saveExtractedRecord(extraction: IngestionExtraction, opts: { fileId?: string; userName: string }) {
@@ -152,6 +180,16 @@ async function saveExtractedRecord(extraction: IngestionExtraction, opts: { file
 
   switch (extraction.docType) {
     case "receipt": {
+      let legitimacy;
+      if (opts.fileId) {
+        const photo = await getPhotoBase64(opts.fileId);
+        if (photo) {
+          legitimacy = await verifyRequestLegitimacy(
+            photo.base64, photo.contentType, "receipt",
+            f.vendor ? `vendor: ${f.vendor}, amount: ${f.amount}` : undefined
+          ).catch(() => undefined);
+        }
+      }
       const receipt = await Receipt.create({
         vendor: String(f.vendor || "Unknown vendor"),
         client: f.client ? String(f.client) : undefined,
@@ -162,12 +200,24 @@ async function saveExtractedRecord(extraction: IngestionExtraction, opts: { file
         photoFileId: opts.fileId || undefined,
         submittedBy: opts.userName,
         source: "telegram",
+        legitimacy,
         meta: f,
       });
-      return `Receipt saved: <b>${receipt.vendor}</b> - ETB ${Number(receipt.amount).toLocaleString()}.`;
+      const legitimacyNote = legitimacy ? ` · legitimacy: ${legitimacy.score}%` : "";
+      return `Receipt saved: <b>${receipt.vendor}</b> - ETB ${Number(receipt.amount).toLocaleString()}${legitimacyNote}.`;
     }
 
     case "purchase_request": {
+      let legitimacy;
+      if (opts.fileId) {
+        const photo = await getPhotoBase64(opts.fileId);
+        if (photo) {
+          legitimacy = await verifyRequestLegitimacy(
+            photo.base64, photo.contentType, "purchase_request",
+            f.title ? `item: ${f.title}, amount: ${f.amount}` : undefined
+          ).catch(() => undefined);
+        }
+      }
       const pr = await PurchaseRequest.create({
         title: String(f.title || "Purchase request"),
         amount: Number(f.amount) || 0,
@@ -176,6 +226,7 @@ async function saveExtractedRecord(extraction: IngestionExtraction, opts: { file
         photoFileId: opts.fileId || undefined,
         source: "telegram",
         status: "pending",
+        legitimacy,
       });
       if (process.env.TELEGRAM_CEO_CHAT_ID) {
         await sendPurchaseDecisionRequest(process.env.TELEGRAM_CEO_CHAT_ID, {
@@ -186,7 +237,8 @@ async function saveExtractedRecord(extraction: IngestionExtraction, opts: { file
           justification: pr.justification,
         }).catch(() => {});
       }
-      return `Purchase request submitted: <b>${pr.title}</b> - ETB ${Number(pr.amount).toLocaleString()}. The owner has been notified in Telegram.`;
+      const legitimacyNote = legitimacy ? ` · legitimacy: ${legitimacy.score}%` : "";
+      return `Purchase request submitted: <b>${pr.title}</b> - ETB ${Number(pr.amount).toLocaleString()}${legitimacyNote}. The owner has been notified.`;
     }
 
     case "damage_claim": {
@@ -396,6 +448,44 @@ export async function POST(req: NextRequest) {
       (await TelegramSession.create({ chatId, userName, state: "idle", history: [] }));
     session.userName = userName;
 
+    // Ops report: skip input_type_menu and go straight to text paste
+    if (
+      normaliseChoice(text) === "daily ops report" ||
+      normaliseChoice(text) === "ops report" ||
+      normaliseChoice(text) === "📊 daily ops report"
+    ) {
+      session.state = "awaiting_ops_report";
+      session.draft = undefined;
+      session.history = [];
+      await session.save();
+      await sendMessage(
+        chatId,
+        "📊 <b>Daily Ops Report</b>\n\nPaste the report text now.\nInclude the dates, Delivered / Received / Stock sections and bag counts."
+      );
+      return NextResponse.json({ ok: true });
+    }
+
+    // Handle ops report text submission
+    if (session.state === "awaiting_ops_report" && text) {
+      if (!isOpsReportText(text)) {
+        await sendMessage(
+          chatId,
+          "That doesn't look like an ops report. It should contain dates (e.g. 31/3/2026) and Delivered/Received/Stock sections.\n\nTry again or press ❌ Cancel."
+        );
+        return NextResponse.json({ ok: true });
+      }
+      const result = await ingestOpsReport(text, userName);
+      session.state = "idle";
+      session.draft = undefined;
+      await session.save();
+      await sendMessage(
+        chatId,
+        `✅ Ops report ingested: <b>${result.saved}</b> new day(s) saved, <b>${result.updated}</b> updated.\n\nDates: ${result.entries.map((e) => e.dateLabel).join(", ")}`
+      );
+      await sendReportMenu(chatId);
+      return NextResponse.json({ ok: true });
+    }
+
     const choice = REPORT_CHOICES[normaliseChoice(text)];
     if (choice) {
       await startReportDraft(session, choice);
@@ -515,6 +605,16 @@ export async function POST(req: NextRequest) {
         await session.save();
         await sendMessage(chatId, extraction.question);
       }
+      return NextResponse.json({ ok: true });
+    }
+
+    if (text && isOpsReportText(text)) {
+      const result = await ingestOpsReport(text, userName);
+      await sendMessage(
+        chatId,
+        `✅ Ops report detected and ingested: <b>${result.saved}</b> new day(s) saved, <b>${result.updated}</b> updated.\n\nDates: ${result.entries.map((e) => e.dateLabel).join(", ")}`
+      );
+      await sendReportMenu(chatId);
       return NextResponse.json({ ok: true });
     }
 

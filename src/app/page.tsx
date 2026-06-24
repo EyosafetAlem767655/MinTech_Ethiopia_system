@@ -5,8 +5,25 @@ import Link from "next/link";
 import CountUp from "@/components/CountUp";
 import TrendCharts, { type TrendPoint } from "@/components/TrendCharts";
 import AgingChart from "@/components/AgingChart";
+import OpsReportCharts, { type OpsReport } from "@/components/OpsReportCharts";
 import { enablePushNotifications } from "@/components/PwaSetup";
 import { MINTECH_MODULES } from "@/lib/modules";
+
+interface LegitimacyInfo {
+  score: number;
+  flags: string[];
+  reasoning: string;
+}
+
+interface PurchaseRequestItem {
+  _id: string;
+  title: string;
+  amount: number;
+  requestedBy: string;
+  justification?: string;
+  status: string;
+  legitimacy?: LegitimacyInfo;
+}
 
 interface DashboardData {
   yesterday: {
@@ -32,24 +49,36 @@ interface DashboardData {
     overdueClients: { client: string; invoiceNumber: string; outstanding: number; daysOverdue: number }[];
   };
   missingWithholding: { _id: string; invoiceNumber: string; client: string; amount: number }[];
-  purchaseRequests: { _id: string; title: string; amount: number; requestedBy: string; justification?: string }[];
+  purchaseRequests: PurchaseRequestItem[];
   brief: { date: string; narrative: string; fiveLines: string[] } | null;
   flaggedLots: { _id: string; lotCode: string; supplier: string; balance?: { gap: number }; handlers: string[] }[];
   pendingClaims: number;
+}
+
+interface OpsData {
+  reports: OpsReport[];
+  products: string[];
+  latest: OpsReport | null;
 }
 
 const fmtETB = (n: number) => `ETB ${Math.round(n).toLocaleString()}`;
 
 export default function OwnerDashboard() {
   const [data, setData] = useState<DashboardData | null>(null);
+  const [opsData, setOpsData] = useState<OpsData | null>(null);
   const [error, setError] = useState("");
   const [pushState, setPushState] = useState<string>("");
+  const [prDeciding, setPrDeciding] = useState<Record<string, boolean>>({});
 
   const load = useCallback(async () => {
     try {
-      const res = await fetch("/api/dashboard");
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      setData(await res.json());
+      const [dashRes, opsRes] = await Promise.all([
+        fetch("/api/dashboard"),
+        fetch("/api/ops-reports"),
+      ]);
+      if (!dashRes.ok) throw new Error(`Dashboard HTTP ${dashRes.status}`);
+      setData(await dashRes.json());
+      if (opsRes.ok) setOpsData(await opsRes.json());
     } catch (e) {
       setError(String(e));
     }
@@ -57,6 +86,20 @@ export default function OwnerDashboard() {
 
   useEffect(() => {
     load();
+  }, [load]);
+
+  const decidePR = useCallback(async (id: string, action: string) => {
+    setPrDeciding((prev) => ({ ...prev, [id]: true }));
+    try {
+      await fetch(`/api/purchase-requests/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+      await load();
+    } finally {
+      setPrDeciding((prev) => ({ ...prev, [id]: false }));
+    }
   }, [load]);
 
   const today = new Date().toLocaleDateString("en-GB", {
@@ -253,29 +296,72 @@ export default function OwnerDashboard() {
 
               <div className="card p-4 mt-3">
                 <p className="text-[11px] font-bold tracking-widest uppercase text-clay-500 mb-2">
-                  Purchase requests awaiting approval ({data.purchaseRequests.length})
+                  Purchase requests ({data.purchaseRequests.length})
                 </p>
                 {data.purchaseRequests.length === 0 && (
                   <p className="text-xs text-stone-400">Nothing waiting for you. 🎉</p>
                 )}
                 {data.purchaseRequests.map((pr) => (
                   <div key={pr._id} className="py-3 border-t border-clay-50 first:border-t-0">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <p className="text-sm font-semibold">{pr.title}</p>
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-semibold truncate">{pr.title}</p>
                         <p className="text-xs text-stone-400">
                           {fmtETB(pr.amount)} · by {pr.requestedBy}
                         </p>
-                        {pr.justification && <p className="text-xs text-stone-500 mt-0.5">{pr.justification}</p>}
+                        {pr.justification && (
+                          <p className="text-xs text-stone-500 mt-0.5 line-clamp-2">{pr.justification}</p>
+                        )}
+                        {pr.legitimacy && (
+                          <LegitimacyBadge score={pr.legitimacy.score} reasoning={pr.legitimacy.reasoning} />
+                        )}
                       </div>
-                      <span className="shrink-0 rounded-full bg-amber-100 px-2.5 py-1 text-[10px] font-bold text-amber-800">
-                        pending
-                      </span>
+                      <StatusBadge status={pr.status} />
                     </div>
+                    {(pr.status === "pending" || pr.status === "deferred") && (
+                      <div className="flex gap-1.5 mt-2 flex-wrap">
+                        <DecisionButton
+                          label="✓ Bought"
+                          color="green"
+                          loading={!!prDeciding[pr._id]}
+                          onClick={() => decidePR(pr._id, "bought")}
+                        />
+                        <DecisionButton
+                          label="✗ Disregard"
+                          color="red"
+                          loading={!!prDeciding[pr._id]}
+                          onClick={() => decidePR(pr._id, "disregarded")}
+                        />
+                        <DecisionButton
+                          label="⏸ Defer"
+                          color="amber"
+                          loading={!!prDeciding[pr._id]}
+                          onClick={() => decidePR(pr._id, "defer")}
+                        />
+                        <DecisionButton
+                          label="✓ Approve"
+                          color="blue"
+                          loading={!!prDeciding[pr._id]}
+                          onClick={() => decidePR(pr._id, "approve")}
+                        />
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
             </section>
+
+            {/* ───────────── Operations Reports ───────────── */}
+            {opsData && (
+              <section className="animate-fade-up">
+                <h2 className="font-display font-bold text-lg mb-2.5 px-1">Operations data</h2>
+                <OpsReportCharts
+                  reports={opsData.reports}
+                  products={opsData.products}
+                  latest={opsData.latest}
+                />
+              </section>
+            )}
 
             {/* ───────────── Bag control snapshot ───────────── */}
             <section className="animate-fade-up pb-6">
@@ -336,5 +422,67 @@ function Kpi({
       </p>
       <p className="text-[11px] text-stone-400 font-medium mt-0.5 leading-tight">{label}</p>
     </div>
+  );
+}
+
+function LegitimacyBadge({ score, reasoning }: { score: number; reasoning: string }) {
+  const color =
+    score >= 75
+      ? "bg-green-100 text-green-800"
+      : score >= 50
+      ? "bg-amber-100 text-amber-800"
+      : "bg-red-100 text-red-700";
+  const icon = score >= 75 ? "✓" : score >= 50 ? "?" : "⚠";
+  return (
+    <span className={`inline-flex items-center gap-1 mt-1 rounded-full px-2 py-0.5 text-[10px] font-bold ${color}`} title={reasoning}>
+      {icon} AI legitimacy: {score}%
+    </span>
+  );
+}
+
+const STATUS_STYLES: Record<string, string> = {
+  pending: "bg-amber-100 text-amber-800",
+  approved: "bg-blue-100 text-blue-800",
+  rejected: "bg-red-100 text-red-700",
+  bought: "bg-green-100 text-green-800",
+  disregarded: "bg-stone-100 text-stone-500",
+  deferred: "bg-purple-100 text-purple-700",
+};
+
+function StatusBadge({ status }: { status: string }) {
+  const cls = STATUS_STYLES[status] || "bg-stone-100 text-stone-500";
+  return (
+    <span className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-bold capitalize whitespace-nowrap ${cls}`}>
+      {status}
+    </span>
+  );
+}
+
+const DECISION_COLORS: Record<string, string> = {
+  green: "bg-green-600 hover:bg-green-700 text-white",
+  red: "bg-red-600 hover:bg-red-700 text-white",
+  amber: "bg-amber-500 hover:bg-amber-600 text-white",
+  blue: "bg-blue-600 hover:bg-blue-700 text-white",
+};
+
+function DecisionButton({
+  label,
+  color,
+  loading,
+  onClick,
+}: {
+  label: string;
+  color: string;
+  loading: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={loading}
+      className={`rounded-full px-3 py-1.5 text-[11px] font-bold transition-all active:scale-95 disabled:opacity-50 ${DECISION_COLORS[color]}`}
+    >
+      {loading ? "…" : label}
+    </button>
   );
 }

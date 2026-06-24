@@ -180,6 +180,76 @@ export async function writeBriefNarrative(structured: Record<string, unknown>): 
   }
 }
 
+/* ─────────────────── General request legitimacy scoring ───────────────────── */
+
+export interface LegitimacyVerdict {
+  score: number; // 0-100
+  flags: string[];
+  reasoning: string;
+}
+
+const LEGITIMACY_FALLBACK: LegitimacyVerdict = {
+  score: 50,
+  flags: ["ai_check_failed"],
+  reasoning: "Automatic legitimacy check failed; manual review required.",
+};
+
+export async function verifyRequestLegitimacy(
+  imageBase64: string,
+  contentType: string,
+  docType: string,
+  context?: string
+): Promise<LegitimacyVerdict> {
+  const typeDescriptions: Record<string, string> = {
+    receipt: "a payment receipt or invoice from a vendor",
+    purchase_request: "supporting evidence for a purchase request (item photo, quotation, or related document)",
+    damage_claim: "a photo showing bag damage at a factory or warehouse",
+    stone_delivery: "a truck delivering raw stone to a gate",
+    other: "a business document",
+  };
+  const docDesc = typeDescriptions[docType] || typeDescriptions.other;
+
+  try {
+    const res = await openai().chat.completions.create({
+      model: VISION_MODEL,
+      response_format: { type: "json_object" },
+      max_tokens: 400,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a fraud-detection analyst for an Ethiopian mining company. " +
+            "Inspect the submitted photo and score its legitimacy as a business document. " +
+            "Return STRICT JSON: " +
+            '{ "score": 0-100, "flags": string[], "reasoning": "one short sentence" }. ' +
+            "Score 90-100: clearly genuine. 65-89: likely genuine, minor concerns. 35-64: suspicious, needs review. 0-34: likely fraudulent. " +
+            "Flags (use any that apply): screenshot, photo_of_screen, heavy_blur, appears_edited, unrelated_content, " +
+            "no_document_visible, inconsistent_amounts, stock_photo, low_lighting, partial_crop.",
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: `This photo was submitted as: ${docDesc}.${context ? ` Context: ${context}` : ""} Score its legitimacy.`,
+            },
+            { type: "image_url", image_url: { url: `data:${contentType};base64,${imageBase64}`, detail: "low" } },
+          ],
+        },
+      ],
+    });
+    const parsed = JSON.parse(res.choices[0]?.message?.content || "{}");
+    return {
+      score: Math.max(0, Math.min(100, Math.round(Number(parsed.score) || 50))),
+      flags: Array.isArray(parsed.flags) ? parsed.flags.map(String).slice(0, 8) : [],
+      reasoning: String(parsed.reasoning || ""),
+    };
+  } catch (e) {
+    console.error("verifyRequestLegitimacy failed:", e);
+    return LEGITIMACY_FALLBACK;
+  }
+}
+
 /* ──────────────── Telegram ingestion: classify & extract docs ──────────────── */
 
 export interface IngestionExtraction {

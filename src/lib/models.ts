@@ -318,9 +318,10 @@ export interface IPurchaseRequest {
   justification?: string;
   photoFileId?: mongoose.Types.ObjectId;
   source: "app" | "telegram";
-  status: "pending" | "approved" | "rejected";
+  status: "pending" | "approved" | "rejected" | "bought" | "disregarded" | "deferred";
   decidedBy?: string;
   decidedAt?: Date;
+  legitimacy?: { score: number; flags: string[]; reasoning: string };
   createdAt: Date;
 }
 
@@ -332,9 +333,15 @@ const PurchaseRequestSchema = new Schema<any>(
     justification: String,
     photoFileId: { type: Schema.Types.ObjectId, ref: "StoredFile" },
     source: { type: String, enum: ["app", "telegram"], default: "app" },
-    status: { type: String, enum: ["pending", "approved", "rejected"], default: "pending", index: true },
+    status: {
+      type: String,
+      enum: ["pending", "approved", "rejected", "bought", "disregarded", "deferred"],
+      default: "pending",
+      index: true,
+    },
     decidedBy: String,
     decidedAt: Date,
+    legitimacy: { score: Number, flags: [String], reasoning: String },
   },
   opts
 );
@@ -349,6 +356,7 @@ export interface IReceipt {
   photoFileId?: mongoose.Types.ObjectId;
   submittedBy: string;
   source: "app" | "telegram";
+  legitimacy?: { score: number; flags: string[]; reasoning: string };
   meta?: Record<string, unknown>;
 }
 
@@ -363,10 +371,46 @@ const ReceiptSchema = new Schema<any>(
     photoFileId: { type: Schema.Types.ObjectId, ref: "StoredFile" },
     submittedBy: String,
     source: { type: String, enum: ["app", "telegram"], default: "telegram" },
+    legitimacy: { score: Number, flags: [String], reasoning: String },
     meta: Schema.Types.Mixed,
   },
   opts
 );
+
+/* ────────────────────────── Daily Operations Report ──────────────────────── */
+
+export interface IDailyOpsReport {
+  _id: mongoose.Types.ObjectId;
+  dateLabel: string; // original "31/3/2026"
+  date: Date; // normalized UTC midnight
+  reportedBy: string;
+  delivered?: Record<string, number>;
+  received?: Record<string, number>;
+  stock?: Record<string, number>;
+  bags?: {
+    kg25?: Record<string, number>;
+    kg40?: Record<string, number>;
+  };
+  rawText?: string;
+  source: "telegram" | "app";
+  createdAt: Date;
+}
+
+const DailyOpsReportSchema = new Schema<any>(
+  {
+    dateLabel: { type: String, required: true },
+    date: { type: Date, required: true, index: true },
+    reportedBy: { type: String, required: true },
+    delivered: Schema.Types.Mixed,
+    received: Schema.Types.Mixed,
+    stock: Schema.Types.Mixed,
+    bags: { kg25: Schema.Types.Mixed, kg40: Schema.Types.Mixed },
+    rawText: String,
+    source: { type: String, enum: ["telegram", "app"], default: "telegram" },
+  },
+  opts
+);
+DailyOpsReportSchema.index({ dateLabel: 1 }, { unique: true });
 
 /* ─────────────────────────── Brief / infrastructure ──────────────────────── */
 
@@ -413,7 +457,7 @@ const BriefSchema = new Schema<any>(
 export interface ITelegramSession {
   chatId: string;
   userName?: string;
-  state: "idle" | "awaiting_input_type" | "awaiting_metadata";
+  state: "idle" | "awaiting_input_type" | "awaiting_metadata" | "awaiting_ops_report";
   draft?: {
     docType?: string; // receipt | purchase_request | damage_claim | stone_delivery | other
     fileId?: string;
@@ -449,6 +493,7 @@ export const ShiftReport = getModel<IShiftReport>("ShiftReport", ShiftReportSche
 export const Invoice = getModel<IInvoice>("Invoice", InvoiceSchema);
 export const PurchaseRequest = getModel<IPurchaseRequest>("PurchaseRequest", PurchaseRequestSchema);
 export const Receipt = getModel<IReceipt>("Receipt", ReceiptSchema);
+export const DailyOpsReport = getModel<IDailyOpsReport>("DailyOpsReport", DailyOpsReportSchema);
 export const PushSubscription = getModel<IPushSubscription>("PushSubscription", PushSubscriptionSchema);
 export const Brief = getModel<IBrief>("Brief", BriefSchema);
 export const TelegramSession = getModel<ITelegramSession>("TelegramSession", TelegramSessionSchema);
