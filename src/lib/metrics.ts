@@ -14,8 +14,8 @@ import { addDays, daysBetween, eatDateLabel, eatDayStart, yesterdayRange } from 
 export interface DayNumbers {
   date: string;
   truckloads: number;
-  sacksProduced: number;
-  sacksSold: number;
+  tonsProduced: number;
+  tonsSold: number;
   revenueInvoiced: number;
   cashCollected: number;
   damagedClaimed: number;
@@ -25,12 +25,25 @@ export interface DayNumbers {
 export async function getDayNumbers(start: Date, end: Date): Promise<DayNumbers> {
   const dateMatch = { $gte: start, $lt: end };
 
+  const tonsExpr = (sacksField: string, weightField: string) => ({
+    $sum: {
+      $cond: [
+        { $gt: [`$${weightField}`, 0] },
+        { $multiply: [`$${sacksField}`, { $divide: [`$${weightField}`, 1000] }] },
+        0,
+      ],
+    },
+  });
+
   const [trucks, produced, sold, collected, claimed, verified] = await Promise.all([
     StoneDelivery.aggregate([{ $match: { date: dateMatch } }, { $group: { _id: null, n: { $sum: "$loads" } } }]),
-    ShiftReport.aggregate([{ $match: { date: dateMatch } }, { $group: { _id: null, n: { $sum: "$filledSacks" } } }]),
+    ShiftReport.aggregate([
+      { $match: { date: dateMatch } },
+      { $group: { _id: null, n: tonsExpr("filledSacks", "bagWeightKg") } },
+    ]),
     Invoice.aggregate([
       { $match: { invoicedAt: dateMatch } },
-      { $group: { _id: null, sacks: { $sum: "$sacks" }, amount: { $sum: "$amount" } } },
+      { $group: { _id: null, tons: tonsExpr("sacks", "bagWeightKg"), amount: { $sum: "$amount" } } },
     ]),
     Invoice.aggregate([
       { $unwind: "$payments" },
@@ -47,8 +60,8 @@ export async function getDayNumbers(start: Date, end: Date): Promise<DayNumbers>
   return {
     date: eatDateLabel(start),
     truckloads: trucks[0]?.n || 0,
-    sacksProduced: produced[0]?.n || 0,
-    sacksSold: sold[0]?.sacks || 0,
+    tonsProduced: Math.round((produced[0]?.n || 0) * 1000) / 1000,
+    tonsSold: Math.round((sold[0]?.tons || 0) * 1000) / 1000,
     revenueInvoiced: sold[0]?.amount || 0,
     cashCollected: collected[0]?.n || 0,
     damagedClaimed: claimed[0]?.n || 0,
@@ -82,7 +95,20 @@ export async function getDailySeries(days: number, now = new Date()): Promise<Tr
   const [production, sales, collections] = await Promise.all([
     ShiftReport.aggregate([
       { $match: { date: { $gte: start, $lt: end } } },
-      { $group: { _id: keyed("date"), n: { $sum: "$filledSacks" } } },
+      {
+        $group: {
+          _id: keyed("date"),
+          n: {
+            $sum: {
+              $cond: [
+                { $gt: ["$bagWeightKg", 0] },
+                { $multiply: ["$filledSacks", { $divide: ["$bagWeightKg", 1000] }] },
+                0,
+              ],
+            },
+          },
+        },
+      },
     ]),
     Invoice.aggregate([
       { $match: { invoicedAt: { $gte: start, $lt: end } } },

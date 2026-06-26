@@ -29,8 +29,8 @@ interface DashboardData {
   yesterday: {
     date: string;
     truckloads: number;
-    sacksProduced: number;
-    sacksSold: number;
+    tonsProduced: number;
+    tonsSold: number;
     revenueInvoiced: number;
     cashCollected: number;
     damagedClaimed: number;
@@ -187,8 +187,8 @@ export default function OwnerDashboard() {
               <h2 className="font-display font-bold text-lg mb-2.5 px-1">Yesterday&apos;s numbers</h2>
               <div className="grid grid-cols-2 gap-3 stagger">
                 <Kpi icon="🪨" label="Truckloads received" value={data.yesterday.truckloads} />
-                <Kpi icon="🏭" label="Sacks produced" value={data.yesterday.sacksProduced} />
-                <Kpi icon="🤝" label="Sacks sold" value={data.yesterday.sacksSold} />
+                <Kpi icon="🏭" label="Tons produced" value={data.yesterday.tonsProduced} suffix=" t" decimals={2} />
+                <Kpi icon="🤝" label="Tons sold" value={data.yesterday.tonsSold} suffix=" t" decimals={2} />
                 <Kpi icon="🧾" label="Revenue invoiced" value={data.yesterday.revenueInvoiced} prefix="ETB " />
                 <Kpi icon="💵" label="Cash collected" value={data.yesterday.cashCollected} prefix="ETB " />
                 <Kpi
@@ -209,7 +209,7 @@ export default function OwnerDashboard() {
                 {(["production", "sales", "collections"] as const).map((k) => {
                   const bw = data.bestWorst[k];
                   if (!bw) return null;
-                  const unit = k === "production" ? "sacks" : "ETB";
+                  const unit = k === "production" ? "t" : "ETB";
                   return (
                     <div key={k} className="card px-4 py-3 flex items-center justify-between text-xs">
                       <span className="font-bold capitalize text-clay-800">{k} (30d)</span>
@@ -368,18 +368,20 @@ function Kpi({
   value,
   prefix = "",
   suffix = "",
+  decimals = 0,
 }: {
   icon: string;
   label: string;
   value: number;
   prefix?: string;
   suffix?: string;
+  decimals?: number;
 }) {
   return (
     <div className="card p-4 hover:-translate-y-0.5 transition-transform duration-300">
       <span className="text-xl">{icon}</span>
       <p className="font-display text-xl font-bold mt-1.5 text-clay-900 tabular-nums">
-        <CountUp value={value} prefix={prefix} suffix={suffix} />
+        <CountUp value={value} prefix={prefix} suffix={suffix} decimals={decimals} />
       </p>
       <p className="text-[11px] text-stone-400 font-medium mt-0.5 leading-tight">{label}</p>
     </div>

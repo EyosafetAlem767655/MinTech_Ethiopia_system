@@ -50,11 +50,13 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "invoiceNumber, client, amount and dueDate are required" }, { status: 400 });
   }
 
+  const bagWeightKg = [25, 40].includes(Number(body.bagWeightKg)) ? Number(body.bagWeightKg) : undefined;
   const invoice = await Invoice.create({
     invoiceNumber: String(body.invoiceNumber),
     client: String(body.client),
     clientPhone: body.clientPhone ? String(body.clientPhone) : undefined,
     sacks: Number(body.sacks) || 0,
+    bagWeightKg,
     amount: Number(body.amount),
     invoicedAt: body.invoicedAt ? new Date(String(body.invoicedAt)) : new Date(),
     dueDate: new Date(String(body.dueDate)),

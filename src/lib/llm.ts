@@ -282,8 +282,8 @@ Required fields per type:
 - purchase_request: title, amount (number, ETB), justification
 - damage_claim: lotCode, quantity (number of damaged bags)
 - stone_delivery: truckPlate, loads (number), qualityGrade ("good"|"fair"|"dark/weathered"), supplier, quarry, driverName if visible
-- shift_report: filledSacks (number), downtimeMinutes (number), shift ("day"|"night"), notes
-- invoice: invoiceNumber, client, amount (number, ETB), sacks, dueDate (YYYY-MM-DD), clientPhone
+- shift_report: filledSacks (number), bagWeightKg (25 or 40 — the weight in kg of each filled sack), downtimeMinutes (number), shift ("day"|"night"), notes
+- invoice: invoiceNumber, client, amount (number, ETB), sacks, bagWeightKg (25 or 40 — the weight in kg of each sold sack), dueDate (YYYY-MM-DD), clientPhone
 - payment: invoiceNumber, client, amount (number, ETB), paymentDate (YYYY-MM-DD), method
 - withholding_receipt: invoiceNumber, client, amount (number, ETB), receiptDate (YYYY-MM-DD)
 - other: summary`;

@@ -256,6 +256,7 @@ export interface IShiftReport {
   shift: "day" | "night";
   supervisor: string;
   filledSacks: number;
+  bagWeightKg?: 25 | 40;
   downtimeMinutes: number;
   notes?: string;
   lotId?: mongoose.Types.ObjectId;
@@ -267,6 +268,7 @@ const ShiftReportSchema = new Schema<any>(
     shift: { type: String, enum: ["day", "night"], default: "day" },
     supervisor: { type: String, required: true },
     filledSacks: { type: Number, required: true },
+    bagWeightKg: { type: Number, enum: [25, 40] },
     downtimeMinutes: { type: Number, default: 0 },
     notes: String,
     lotId: { type: Schema.Types.ObjectId, ref: "BagLot" },
@@ -280,6 +282,7 @@ export interface IInvoice {
   client: string;
   clientPhone?: string;
   sacks: number;
+  bagWeightKg?: 25 | 40;
   amount: number; // ETB
   invoicedAt: Date;
   dueDate: Date;
@@ -297,6 +300,7 @@ const InvoiceSchema = new Schema<any>(
     client: { type: String, required: true, index: true },
     clientPhone: String,
     sacks: { type: Number, default: 0 },
+    bagWeightKg: { type: Number, enum: [25, 40] },
     amount: { type: Number, required: true },
     invoicedAt: { type: Date, default: Date.now, index: true },
     dueDate: { type: Date, required: true },

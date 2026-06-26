@@ -55,21 +55,21 @@ export async function sendMessage(
 export async function sendBriefMessage(chatId: string | number, text: string, dashboardUrl: string) {
   return sendMessage(chatId, text, {
     reply_markup: {
-      inline_keyboard: [[{ text: "📊 Open Dashboard", url: dashboardUrl }]],
+      inline_keyboard: [[{ text: "📊 ዳሽቦርድ ክፈት", url: dashboardUrl }]],
     },
   });
 }
 
 export const REPORT_BUTTONS = {
-  damage: "🛡️ Damage bags",
-  receipt: "🧾 Receipt",
-  purchase: "🛒 Purchase request",
-  wht: "📄 WHT receipt",
-  sales: "💵 Sales/payment",
-  truck: "🚚 Truck delivery",
-  shift: "🏭 Shift report",
-  ops: "📊 Daily ops report",
-  question: "🤖 Ask company question",
+  damage: "🛡️ የተበላሸ ከረጢት",
+  receipt: "🧾 ደረሰኝ",
+  purchase: "🛒 የግዢ ጥያቄ",
+  wht: "📄 ቀረጥ ደረሰኝ",
+  sales: "💵 ሽያጭ/ክፍያ",
+  truck: "🚚 የትራክ ማቅረቢያ",
+  shift: "🏭 የሺፍት ሪፖርት",
+  ops: "📊 የዕለት ሥራ ሪፖርት",
+  question: "🤖 የኩባንያ ጥያቄ",
 } as const;
 
 export const REPORT_KEYBOARD = {
@@ -90,10 +90,10 @@ export const REPORT_KEYBOARD = {
 
 export const INPUT_TYPE_KEYBOARD = {
   keyboard: [
-    [{ text: "📝 Type details" }],
-    [{ text: "📷 Send photo" }],
-    [{ text: "🖼️ Photo + caption" }],
-    [{ text: "⬅️ Change report" }, { text: "❌ Cancel" }],
+    [{ text: "📝 ዝርዝሩን ይጻፉ" }],
+    [{ text: "📷 ፎቶ ይላኩ" }],
+    [{ text: "🖼️ ፎቶ + መግለጫ" }],
+    [{ text: "⬅️ ሪፖርቱን ይቀይሩ" }, { text: "❌ ሰርዝ" }],
   ],
   resize_keyboard: true,
   one_time_keyboard: false,
@@ -102,7 +102,7 @@ export const INPUT_TYPE_KEYBOARD = {
 export async function sendReportMenu(chatId: string | number, text?: string) {
   return sendMessage(
     chatId,
-    text || "Choose the report section.",
+    text || "የሪፖርቱ ዓይነት ይምረጡ።",
     { reply_markup: REPORT_KEYBOARD }
   );
 }
@@ -110,7 +110,7 @@ export async function sendReportMenu(chatId: string | number, text?: string) {
 export async function sendInputTypeMenu(chatId: string | number, reportLabel: string, hint?: string) {
   return sendMessage(
     chatId,
-    `<b>${reportLabel}</b>\nChoose how you want to submit it.` + (hint ? `\n\n${hint}` : ""),
+    `<b>${reportLabel}</b>\nምርጫዎን ይምረጡ።` + (hint ? `\n\n${hint}` : ""),
     { reply_markup: INPUT_TYPE_KEYBOARD }
   );
 }
@@ -125,14 +125,14 @@ export async function sendPurchaseDecisionRequest(
 ) {
   return sendMessage(
     chatId,
-    `Purchase request pending\n\n<b>${request.title}</b>\nETB ${Math.round(request.amount).toLocaleString()} by ${request.requestedBy}` +
+    `የግዢ ጥያቄ ጠበቃ\n\n<b>${request.title}</b>\nብር ${Math.round(request.amount).toLocaleString()} — ${request.requestedBy}` +
       (request.justification ? `\n${request.justification}` : ""),
     {
       reply_markup: {
         inline_keyboard: [
           [
-            { text: "Approve", callback_data: `pr:approve:${request.id}` },
-            { text: "Reject", callback_data: `pr:reject:${request.id}` },
+            { text: "ፍቀድ", callback_data: `pr:approve:${request.id}` },
+            { text: "አትፍቀድ", callback_data: `pr:reject:${request.id}` },
           ],
         ],
       },

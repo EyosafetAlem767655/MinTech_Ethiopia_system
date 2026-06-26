@@ -8,11 +8,13 @@ export default function CountUp({
   prefix = "",
   suffix = "",
   duration = 1100,
+  decimals = 0,
 }: {
   value: number;
   prefix?: string;
   suffix?: string;
   duration?: number;
+  decimals?: number;
 }) {
   const [display, setDisplay] = useState(0);
   const ref = useRef<HTMLSpanElement>(null);
@@ -26,10 +28,11 @@ export default function CountUp({
         if (!entries[0].isIntersecting || started.current) return;
         started.current = true;
         const t0 = performance.now();
+        const factor = Math.pow(10, decimals);
         const tick = (t: number) => {
           const p = Math.min((t - t0) / duration, 1);
           const eased = 1 - Math.pow(1 - p, 3);
-          setDisplay(Math.round(value * eased));
+          setDisplay(Math.round(value * eased * factor) / factor);
           if (p < 1) requestAnimationFrame(tick);
         };
         requestAnimationFrame(tick);
@@ -38,12 +41,12 @@ export default function CountUp({
     );
     observer.observe(el);
     return () => observer.disconnect();
-  }, [value, duration]);
+  }, [value, duration, decimals]);
 
   return (
     <span ref={ref}>
       {prefix}
-      {display.toLocaleString()}
+      {decimals > 0 ? display.toFixed(decimals) : display.toLocaleString()}
       {suffix}
     </span>
   );

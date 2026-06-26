@@ -31,65 +31,45 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 const REPORT_CHOICES: Record<string, { docType: IngestionExtraction["docType"]; label: string; question: string }> = {
-  "damage bags": {
+  "የተበላሸ ከረጢት": {
     docType: "damage_claim",
     label: REPORT_BUTTONS.damage,
-    question: "Send a damaged bag photo with the lot code and damaged bag quantity.",
+    question: "የተበላሸ ከረጢት ፎቶ ከሎት ኮዱ እና ከተበላሸ ከረጢት ብዛት ጋር ይላኩ።",
   },
-  "report damaged bags": {
-    docType: "damage_claim",
-    label: REPORT_BUTTONS.damage,
-    question: "Send a damaged bag photo with the lot code and damaged bag quantity.",
-  },
-  receipt: {
+  "ደረሰኝ": {
     docType: "receipt",
     label: REPORT_BUTTONS.receipt,
-    question: "Send the receipt photo or type vendor, amount, category and date.",
+    question: "የደረሰኝ ፎቶ ይላኩ ወይም ሻጭ፣ መጠን፣ ዓይነት እና ቀን ይጻፉ።",
   },
-  "send receipt": {
-    docType: "receipt",
-    label: REPORT_BUTTONS.receipt,
-    question: "Send the receipt photo or type vendor, amount, category and date.",
-  },
-  "purchase request": {
+  "የግዢ ጥያቄ": {
     docType: "purchase_request",
     label: REPORT_BUTTONS.purchase,
-    question: "Type the item or service, amount and reason. Add a photo if there is supporting evidence.",
+    question: "ዕቃውን ወይም አገልግሎቱን፣ መጠኑን እና ምክንያቱን ይጻፉ። ማስረጃ ካለ ፎቶ ያክሉ።",
   },
-  "wht receipt": {
+  "ቀረጥ ደረሰኝ": {
     docType: "withholding_receipt",
     label: REPORT_BUTTONS.wht,
-    question: "Send the 3% WHT receipt photo with invoice number, client and amount.",
+    question: "3% ቀረጥ ደረሰኝ ፎቶ ከክፍያ ሰነድ ቁጥር፣ ደንበኛ እና መጠን ጋር ይላኩ።",
   },
-  "sales/payment": {
+  "ሽያጭ/ክፍያ": {
     docType: "payment",
     label: REPORT_BUTTONS.sales,
-    question: "Send payment evidence or type invoice number, client, amount, payment date and method.",
+    question: "የክፍያ ማስረጃ ይላኩ ወይም የደረሰኝ ቁጥር፣ ደንበኛ፣ መጠን፣ የክፍያ ቀን እና ዘዴ ይጻፉ።",
   },
-  "sales/payment report": {
-    docType: "payment",
-    label: REPORT_BUTTONS.sales,
-    question: "Send payment evidence or type invoice number, client, amount, payment date and method.",
-  },
-  "truck delivery": {
+  "የትራክ ማቅረቢያ": {
     docType: "stone_delivery",
     label: REPORT_BUTTONS.truck,
-    question: "Send a truck/stone photo with plate number, loads, source quarry and driver if known.",
+    question: "የትራክ/ድንጋይ ፎቶ ከሰሌዳ ቁጥር፣ ጭነት፣ ምንጭ ቦታ እና ሹፌር (ካወቁ) ጋር ይላኩ።",
   },
-  "shift report": {
+  "የሺፍት ሪፖርት": {
     docType: "shift_report",
     label: REPORT_BUTTONS.shift,
-    question: "Type filled sacks, downtime minutes, shift and any notes.",
+    question: "የሞሉ ከረጢቶች ብዛት፣ የከረጢት ክብደት (25 ወይም 40 ኪ.ግ)፣ ሥራ-ቋርጥ ደቂቃዎች፣ ሺፍት እና ማስታወሻ ይጻፉ።",
   },
-  "daily ops report": {
+  "የዕለት ሥራ ሪፖርት": {
     docType: "other" as IngestionExtraction["docType"],
     label: REPORT_BUTTONS.ops,
-    question: "Paste the daily operations report text (dates, Delivered/Received/Stock sections).",
-  },
-  "ops report": {
-    docType: "other" as IngestionExtraction["docType"],
-    label: REPORT_BUTTONS.ops,
-    question: "Paste the daily operations report text (dates, Delivered/Received/Stock sections).",
+    question: "የዕለት ሥራ ሪፖርቱን ይለጥፉ (ቀኖች፣ የደረሰ/የወጣ/ክምችት ክፍሎች ጨምሮ)።",
   },
 };
 
@@ -120,9 +100,9 @@ async function startReportDraft(
 
 function inputModeFromText(text: string): "text" | "photo" | "photo_caption" | null {
   const choice = normaliseChoice(text);
-  if (choice === "type details") return "text";
-  if (choice === "send photo") return "photo";
-  if (choice === "photo + caption") return "photo_caption";
+  if (choice === "ዝርዝሩን ይጻፉ") return "text";
+  if (choice === "ፎቶ ይላኩ") return "photo";
+  if (choice === "ፎቶ + መግለጫ") return "photo_caption";
   return null;
 }
 
@@ -149,7 +129,7 @@ async function handlePurchaseCallback(data: string, callbackId: string, chatId: 
   const [, rawAction, id] = data.split(":");
   const status = PR_ACTION_STATUS[rawAction] || "";
   if (!status || !id) {
-    await answerCallbackQuery(callbackId, "Invalid action");
+    await answerCallbackQuery(callbackId, "ልክ ያልሆነ ድርጊት");
     return;
   }
 
@@ -159,12 +139,12 @@ async function handlePurchaseCallback(data: string, callbackId: string, chatId: 
     { new: true }
   );
   if (!pr) {
-    await answerCallbackQuery(callbackId, "Request not found");
+    await answerCallbackQuery(callbackId, "ጥያቄ አልተገኘም");
     return;
   }
 
-  await answerCallbackQuery(callbackId, `Marked ${status}`);
-  await sendMessage(chatId, `Purchase request <b>${pr.title}</b> marked <b>${status}</b> by ${userName}.`);
+  await answerCallbackQuery(callbackId, `${status} ተምልክቷል`);
+  await sendMessage(chatId, `የ<b>${pr.title}</b> ጥያቄ <b>${status}</b> ተምልክቷል — ${userName}።`);
 }
 
 async function getPhotoBase64(fileId: string): Promise<{ base64: string; contentType: string } | null> {
@@ -204,8 +184,8 @@ async function saveExtractedRecord(extraction: IngestionExtraction, opts: { file
         legitimacy,
         meta: f,
       });
-      const legitimacyNote = legitimacy ? ` · legitimacy: ${legitimacy.score}%` : "";
-      return `Receipt saved: <b>${receipt.vendor}</b> - ETB ${Number(receipt.amount).toLocaleString()}${legitimacyNote}.`;
+      const legitimacyNote = legitimacy ? ` · ትክክለኛነት: ${legitimacy.score}%` : "";
+      return `ደረሰኝ ተቀምጧል: <b>${receipt.vendor}</b> - ብር ${Number(receipt.amount).toLocaleString()}${legitimacyNote}።`;
     }
 
     case "purchase_request": {
@@ -238,23 +218,23 @@ async function saveExtractedRecord(extraction: IngestionExtraction, opts: { file
           justification: pr.justification,
         }).catch(() => {});
       }
-      const legitimacyNote = legitimacy ? ` · legitimacy: ${legitimacy.score}%` : "";
-      return `Purchase request submitted: <b>${pr.title}</b> - ETB ${Number(pr.amount).toLocaleString()}${legitimacyNote}. The owner has been notified.`;
+      const legitimacyNote = legitimacy ? ` · ትክክለኛነት: ${legitimacy.score}%` : "";
+      return `የግዢ ጥያቄ ተቀምጧል: <b>${pr.title}</b> - ብር ${Number(pr.amount).toLocaleString()}${legitimacyNote}። ባለቤቱ ተነግሯቸዋል።`;
     }
 
     case "damage_claim": {
-      if (!opts.fileId) return "Damage reports need a photo. Send the damaged bag photo with lot code and quantity.";
+      if (!opts.fileId) return "የጉዳት ሪፖርቶች ፎቶ ያስፈልጋቸዋል። የተበላሸ ከረጢት ፎቶ ከሎት ኮዱ እና ብዛቱ ጋር ይላኩ።";
 
       const lot = await BagLot.findOne({
         lotCode: { $regex: `^${String(f.lotCode || "").trim()}$`, $options: "i" },
       });
       if (!lot) {
         const lots = await BagLot.find().select("lotCode").sort({ receivedAt: -1 }).limit(5).lean();
-        return `I could not find lot <b>${f.lotCode || ""}</b>. Recent lots: ${lots.map((l) => l.lotCode).join(", ")}.`;
+        return `ሎት <b>${f.lotCode || ""}</b> አልተገኘም። የቅርብ ጊዜ ሎቶች: ${lots.map((l) => l.lotCode).join(", ")}።`;
       }
 
       const file = await StoredFile.findById(opts.fileId);
-      if (!file) return "I could not find the uploaded damage photo. Please resend it.";
+      if (!file) return "የጉዳት ፎቶ አልተገኘም። እባክዎ እንደገና ይላኩ።";
 
       const processed = await processClaimPhoto(
         Buffer.from(file.data as unknown as Uint8Array),
@@ -275,7 +255,7 @@ async function saveExtractedRecord(extraction: IngestionExtraction, opts: { file
       });
       await recomputeLotBalances();
 
-      return `Damage claim recorded for lot <b>${lot.lotCode}</b> (${Number(f.quantity) || 1} bags). It needs supervisor co-signing.`;
+      return `ለሎት <b>${lot.lotCode}</b> (${Number(f.quantity) || 1} ከረጢቶች) የጉዳት ጥያቄ ተቀምጧል። የሱፐርቫይዘር ፊርማ ያስፈልጋል።`;
     }
 
     case "stone_delivery": {
@@ -300,27 +280,35 @@ async function saveExtractedRecord(extraction: IngestionExtraction, opts: { file
         notes: f.notes ? String(f.notes) : aiScore?.recommendation,
         date: new Date(),
       });
-      return `Truck delivery logged: <b>${f.truckPlate || "UNKNOWN"}</b>, ${Number(f.loads) || 1} load(s), grade: ${qualityGrade}.`;
+      return `የትራክ ማቅረቢያ ተቀምጧል: <b>${f.truckPlate || "UNKNOWN"}</b>, ${Number(f.loads) || 1} ጭነት, ጥራት: ${qualityGrade}።`;
     }
 
     case "shift_report": {
+      const bagWeightKg = [25, 40].includes(Number(f.bagWeightKg)) ? Number(f.bagWeightKg) : undefined;
+      const filledSacks = Number(f.filledSacks) || 0;
       await ShiftReport.create({
         supervisor: opts.userName,
-        filledSacks: Number(f.filledSacks) || 0,
+        filledSacks,
+        bagWeightKg,
         downtimeMinutes: Number(f.downtimeMinutes) || 0,
         shift: f.shift === "night" ? "night" : "day",
         notes: f.notes ? String(f.notes) : undefined,
         date: new Date(),
       });
-      return `Shift report saved: ${Number(f.filledSacks) || 0} sacks filled, ${Number(f.downtimeMinutes) || 0} min downtime.`;
+      const tonsStr = bagWeightKg
+        ? ` (${(filledSacks * bagWeightKg / 1000).toFixed(2)} ቶን)`
+        : "";
+      return `የሺፍት ሪፖርት ተቀምጧል: ${filledSacks} ከረጢቶች${tonsStr}, ${Number(f.downtimeMinutes) || 0} ደቂቃ ቆምቷል።`;
     }
 
     case "invoice": {
+      const bagWeightKg = [25, 40].includes(Number(f.bagWeightKg)) ? Number(f.bagWeightKg) : undefined;
       const invoice = await Invoice.create({
         invoiceNumber: String(f.invoiceNumber || `TG-${Date.now()}`),
         client: String(f.client || "Unknown client"),
         clientPhone: f.clientPhone ? String(f.clientPhone) : undefined,
         sacks: Number(f.sacks) || 0,
+        bagWeightKg,
         amount: Number(f.amount) || 0,
         invoicedAt: f.invoiceDate ? new Date(String(f.invoiceDate)) : new Date(),
         dueDate: f.dueDate ? new Date(String(f.dueDate)) : new Date(Date.now() + 30 * 86400000),
@@ -328,15 +316,15 @@ async function saveExtractedRecord(extraction: IngestionExtraction, opts: { file
         withholdingReceiptReceived: false,
         notes: f.notes ? String(f.notes) : undefined,
       });
-      return `Sales invoice saved: <b>${invoice.invoiceNumber}</b> - ${invoice.client} - ETB ${Number(invoice.amount).toLocaleString()}.`;
+      return `የሽያጭ ደረሰኝ ተቀምጧል: <b>${invoice.invoiceNumber}</b> - ${invoice.client} - ብር ${Number(invoice.amount).toLocaleString()}།`;
     }
 
     case "payment": {
       const invoiceNumber = String(f.invoiceNumber || "").trim();
-      if (!invoiceNumber) return "Please include the invoice number for this payment.";
+      if (!invoiceNumber) return "የክፍያ ደረሰኝ ቁጥር ያካትቱ።";
 
       const invoice = await Invoice.findOne({ invoiceNumber: { $regex: `^${invoiceNumber}$`, $options: "i" } });
-      if (!invoice) return `I could not find invoice <b>${invoiceNumber}</b>. Send the sales invoice first or correct the number.`;
+      if (!invoice) return `ደረሰኝ <b>${invoiceNumber}</b> አልተገኘም። መጀመሪያ ደረሰኙን ይላኩ ወይም ቁጥሩን ያርሙ።`;
 
       invoice.payments = invoice.payments || [];
       invoice.payments.push({
@@ -345,25 +333,25 @@ async function saveExtractedRecord(extraction: IngestionExtraction, opts: { file
         method: f.method ? String(f.method) : "telegram",
       });
       await invoice.save();
-      return `Payment saved for <b>${invoice.invoiceNumber}</b>: ETB ${Number(f.amount || 0).toLocaleString()}.`;
+      return `ለ<b>${invoice.invoiceNumber}</b> ክፍያ ተቀምጧል: ብር ${Number(f.amount || 0).toLocaleString()}།`;
     }
 
     case "withholding_receipt": {
       const invoiceNumber = String(f.invoiceNumber || "").trim();
-      if (!invoiceNumber) return "Please include the invoice number shown on the WHT receipt.";
+      if (!invoiceNumber) return "የደረሰኝ ቁጥር ያካትቱ።";
 
       const invoice = await Invoice.findOne({ invoiceNumber: { $regex: `^${invoiceNumber}$`, $options: "i" } });
-      if (!invoice) return `I could not find invoice <b>${invoiceNumber}</b>. Please send the correct invoice number.`;
+      if (!invoice) return `ደረሰኝ <b>${invoiceNumber}</b> አልተገኘም። ትክክለኛ ቁጥሩን ይላኩ።`;
 
       invoice.withholdingReceiptReceived = true;
       invoice.withholdingReceiptReceivedAt = f.receiptDate ? new Date(String(f.receiptDate)) : new Date();
       invoice.withholdingReceiptFileId = opts.fileId as any;
       await invoice.save();
-      return `WHT receipt saved for <b>${invoice.invoiceNumber}</b> (${invoice.client}).`;
+      return `ለ<b>${invoice.invoiceNumber}</b> (${invoice.client}) ቀረጥ ደረሰኝ ተቀምጧል།`;
     }
 
     default:
-      return "Noted. Choose a report type from the menu or describe what you want to file.";
+      return "ታይቷል። ከምናሌው ሪፖርት ዓይነት ይምረጡ።";
   }
 }
 
@@ -389,7 +377,7 @@ export async function POST(req: NextRequest) {
       }
     } catch (e) {
       console.error("telegram callback error:", e);
-      await answerCallbackQuery(String(cb.id), "Database is not reachable. Try again after Atlas Network Access is fixed.");
+      await answerCallbackQuery(String(cb.id), "የውሂብ ጎታ አልተደረሰም። MongoDB Atlas ሲስተካከል እንደገና ይሞክሩ።");
     }
     return NextResponse.json({ ok: true });
   }
@@ -402,7 +390,7 @@ export async function POST(req: NextRequest) {
   const text: string = msg.text || msg.caption || "";
 
   if (text.startsWith("/start") || text.startsWith("/report")) {
-    await sendReportMenu(chatId, `Welcome, ${userName}. Choose the report section.`);
+    await sendReportMenu(chatId, `እንኳን ደህና መጡ, ${userName}። የሪፖርቱ ዓይነት ይምረጡ።`);
     try {
       await dbConnect();
       const session =
@@ -415,7 +403,7 @@ export async function POST(req: NextRequest) {
       console.error("telegram start session save failed:", e);
       await sendMessage(
         chatId,
-        "Telegram is connected, but the database is not reachable yet. Reports cannot be saved until MongoDB Atlas Network Access allows this Vercel app."
+        "ቴሌግራም ተገናኝቷል፣ ግን ውሂብ ጎታ አልተደረሰም። MongoDB Atlas ሲስተካከል ሪፖርቶቹ ይቀመጣሉ።"
       ).catch(() => {});
     }
     return NextResponse.json({ ok: true });
@@ -427,20 +415,20 @@ export async function POST(req: NextRequest) {
     if (text.startsWith("/brief")) {
       const brief = await Brief.findOne().sort({ date: -1 }).lean();
       if (!brief) {
-        await sendMessage(chatId, "No brief has been generated yet.");
+        await sendMessage(chatId, "ገና ምንም ሪፖርት አልተዘጋጀም።");
       } else {
         const ex =
           brief.exceptions.length > 0
-            ? `<b>Exceptions</b>\n${brief.exceptions.map((e: string) => `- ${e}`).join("\n")}\n\n`
-            : "No exceptions.\n\n";
-        await sendMessage(chatId, `<b>Morning Brief - ${brief.date}</b>\n\n${ex}${brief.fiveLines.join("\n")}\n\n<i>${brief.narrative}</i>`);
+            ? `<b>ልዩ ሁኔታዎች</b>\n${brief.exceptions.map((e: string) => `- ${e}`).join("\n")}\n\n`
+            : "ምንም ልዩ ሁኔታ የለም።\n\n";
+        await sendMessage(chatId, `<b>የጠዋት ሪፖርት - ${brief.date}</b>\n\n${ex}${brief.fiveLines.join("\n")}\n\n<i>${brief.narrative}</i>`);
       }
       return NextResponse.json({ ok: true });
     }
 
-    if (text.startsWith("/cancel") || normaliseChoice(text) === "cancel") {
+    if (text.startsWith("/cancel") || normaliseChoice(text) === "ሰርዝ") {
       await TelegramSession.findOneAndUpdate({ chatId }, { state: "idle", draft: null, history: [] });
-      await sendReportMenu(chatId, "Cancelled. Choose a new report type.");
+      await sendReportMenu(chatId, "ተሰርዟል። አዲስ ሪፖርት ዓይነት ይምረጡ።");
       return NextResponse.json({ ok: true });
     }
 
@@ -451,14 +439,14 @@ export async function POST(req: NextRequest) {
 
     // Ops report: skip input_type_menu and go straight to text paste
     const normText = normaliseChoice(text);
-    if (normText === "daily ops report" || normText === "ops report") {
+    if (normText === "የዕለት ሥራ ሪፖርት") {
       session.state = "awaiting_ops_report";
       session.draft = undefined;
       session.history = [];
       await session.save();
       await sendMessage(
         chatId,
-        "📊 <b>Daily Ops Report</b>\n\nPaste the report text now.\nInclude the dates, Delivered / Received / Stock sections and bag counts."
+        "📊 <b>የዕለት ሥራ ሪፖርት</b>\n\nሪፖርቱን አሁን ይለጥፉ።\nቀኖች፣ የደረሰ/የወጣ/ክምችት ክፍሎች እና ከረጢት ቆጠራ ይጨምሩ።"
       );
       return NextResponse.json({ ok: true });
     }
@@ -468,7 +456,7 @@ export async function POST(req: NextRequest) {
       if (!isOpsReportText(text)) {
         await sendMessage(
           chatId,
-          "That doesn't look like an ops report. It should contain dates (e.g. 31/3/2026) and Delivered/Received/Stock sections.\n\nTry again or press ❌ Cancel."
+          "ይህ እንደ ሥራ ሪፖርት አይመስልም። ቀኖች (ለምሳሌ 31/3/2026) እና የደረሰ/የወጣ/ክምችት ክፍሎች ሊኖሩ ይገባል።\n\nደግሞ ይሞክሩ ወይም ❌ ሰርዝ ይጫኑ።"
         );
         return NextResponse.json({ ok: true });
       }
@@ -478,7 +466,7 @@ export async function POST(req: NextRequest) {
       await session.save();
       await sendMessage(
         chatId,
-        `✅ Ops report ingested: <b>${result.saved}</b> new day(s) saved, <b>${result.updated}</b> updated.\n\nDates: ${result.entries.map((e) => e.dateLabel).join(", ")}`
+        `✅ ሪፖርት ተቀምጧል: <b>${result.saved}</b> አዲስ ቀን, <b>${result.updated}</b> ዝምናዊ።\n\nቀኖች: ${result.entries.map((e) => e.dateLabel).join(", ")}`
       );
       await sendReportMenu(chatId);
       return NextResponse.json({ ok: true });
@@ -499,31 +487,31 @@ export async function POST(req: NextRequest) {
       session.history = [{ role: "assistant", content: choice.question }];
       await session.save();
       const msg2 = textOnly
-        ? `<b>${choice.label}</b>\n\n${choice.question}\n\nType the details in one message.`
-        : `<b>${choice.label}</b>\n\n${choice.question}\n\n📷 <b>Photo required.</b> Send the photo — add details in the caption.`;
+        ? `<b>${choice.label}</b>\n\n${choice.question}\n\nዝርዝሩን በአንድ መልዕክት ይጻፉ።`
+        : `<b>${choice.label}</b>\n\n${choice.question}\n\n📷 <b>ፎቶ ያስፈልጋል።</b> ፎቶውን ይላኩ — ዝርዝሩን በካፕሽን ያክሉ።`;
       await sendMessage(chatId, msg2, {
         reply_markup: {
-          keyboard: [[{ text: "⬅️ Change report" }, { text: "❌ Cancel" }]],
+          keyboard: [[{ text: "⬅️ ሪፖርቱን ይቀይሩ" }, { text: "❌ ሰርዝ" }]],
           resize_keyboard: true,
         },
       });
       return NextResponse.json({ ok: true });
     }
 
-    if (normText === "change report") {
+    if (normText === "ሪፖርቱን ይቀይሩ") {
       session.state = "idle";
       session.draft = undefined;
       session.history = [];
       await session.save();
-      await sendReportMenu(chatId, "Choose the report section.");
+      await sendReportMenu(chatId, "የሪፖርቱ ዓይነት ይምረጡ።");
       return NextResponse.json({ ok: true });
     }
 
-    if (normText === "ask company question") {
+    if (normText === "የኩባንያ ጥያቄ") {
       session.state = "idle";
       session.draft = undefined;
       await session.save();
-      await sendMessage(chatId, "Ask your company-data question in one message.");
+      await sendMessage(chatId, "የኩባንያ ጥያቄዎን በአንድ መልዕክት ይጠይቁ።");
       return NextResponse.json({ ok: true });
     }
 
@@ -533,7 +521,7 @@ export async function POST(req: NextRequest) {
       const tgFileId = docIsImage ? msg.document.file_id : photoSizes![photoSizes!.length - 1].file_id;
       const downloaded = await downloadTelegramFile(tgFileId);
       if (!downloaded) {
-        await sendMessage(chatId, "I could not download that file. Please try again.");
+        await sendMessage(chatId, "ፋይሉን ማውረድ አልተቻለም። እባክዎ እንደገና ይሞክሩ።");
         return NextResponse.json({ ok: true });
       }
 
@@ -584,7 +572,7 @@ export async function POST(req: NextRequest) {
       if (session.draft.inputMode === "photo_caption") {
         await sendMessage(
           chatId,
-          "📷 <b>A photo is required</b> for this report.\n\nPlease send the photo with details in the caption. Text-only submissions are not accepted."
+          "📷 <b>ፎቶ ያስፈልጋል</b> ለዚህ ሪፖርት።\n\nፎቶውን ከዝርዝሩ ጋር ይላኩ። ጽሑፍ ብቻ አይቀበልም።"
         );
         return NextResponse.json({ ok: true });
       }
@@ -628,7 +616,7 @@ export async function POST(req: NextRequest) {
       const result = await ingestOpsReport(text, userName);
       await sendMessage(
         chatId,
-        `✅ Ops report detected and ingested: <b>${result.saved}</b> new day(s) saved, <b>${result.updated}</b> updated.\n\nDates: ${result.entries.map((e) => e.dateLabel).join(", ")}`
+        `✅ ሪፖርት ተቀምጧል: <b>${result.saved}</b> አዲስ ቀን, <b>${result.updated}</b> ዝምናዊ።\n\nቀኖች: ${result.entries.map((e) => e.dateLabel).join(", ")}`
       );
       await sendReportMenu(chatId);
       return NextResponse.json({ ok: true });
@@ -646,8 +634,8 @@ export async function POST(req: NextRequest) {
     await sendMessage(
       chatId,
       isMongoAccessError(e)
-        ? "Database is not reachable from Vercel yet. Fix MongoDB Atlas Network Access, then try again."
-        : "Something went wrong. Please try again."
+        ? "የውሂብ ጎታ አልተደረሰም። MongoDB Atlas ሲስተካከል እንደገና ይሞክሩ።"
+        : "ስህተት ተፈጥሯል። እባክዎ እንደገና ይሞክሩ።"
     ).catch(() => {});
   }
 

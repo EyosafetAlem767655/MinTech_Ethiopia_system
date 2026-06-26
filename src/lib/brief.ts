@@ -35,11 +35,11 @@ export async function assembleAndSendBrief(now = new Date()) {
 
   // "Yesterday in five lines" — figures rendered from queries, never the LLM.
   const fiveLines = [
-    `🪨 ${numbers.truckloads} truckloads of stone received`,
-    `🏭 ${numbers.sacksProduced} sacks produced`,
-    `🤝 ${numbers.sacksSold} sacks sold · ${etb(numbers.revenueInvoiced)} invoiced`,
-    `💵 ${etb(numbers.cashCollected)} cash collected`,
-    `🛡 ${numbers.damagedClaimed} bags claimed damaged · ${numbers.damagedVerified} verified`,
+    `🪨 ${numbers.truckloads} ጭነቶች ድንጋይ ደርሷል`,
+    `🏭 ${numbers.tonsProduced.toFixed(2)} ቶን ተሰርቷል`,
+    `🤝 ${numbers.tonsSold.toFixed(2)} ቶን ተሸጧል · ${etb(numbers.revenueInvoiced)} ብር ደረሰኝ ተቋቁሟል`,
+    `💵 ${etb(numbers.cashCollected)} ብር ተሰብስቧል`,
+    `🛡 ${numbers.damagedClaimed} ከረጢቶች ጉዳት ተጠይቋል · ${numbers.damagedVerified} ተረጋግጧል`,
   ];
 
   const totalOverdue = aging.overdueClients.reduce((a, c) => a + c.outstanding, 0);
@@ -57,12 +57,12 @@ export async function assembleAndSendBrief(now = new Date()) {
   // Telegram message: exceptions first, then the five lines, then narrative.
   const exceptionBlock =
     exceptions.length > 0
-      ? `🚨 <b>Exceptions</b>\n${exceptions.map((e) => `• ${e}`).join("\n")}\n\n`
-      : "✅ No exceptions yesterday.\n\n";
+      ? `🚨 <b>ልዩ ሁኔታዎች</b>\n${exceptions.map((e) => `• ${e}`).join("\n")}\n\n`
+      : "✅ ትናንት ምንም ልዩ ሁኔታ አልነበረም።\n\n";
   const tg =
-    `☀️ <b>Morning Brief — ${dateLabel}</b>\n\n` +
+    `☀️ <b>የጠዋት ሪፖርት — ${dateLabel}</b>\n\n` +
     exceptionBlock +
-    `<b>Yesterday in five lines</b>\n${fiveLines.join("\n")}` +
+    `<b>ትናንት በአምስት ዓረፍተ ነገሮች</b>\n${fiveLines.join("\n")}` +
     (narrative ? `\n\n<i>${narrative}</i>` : "");
 
   let sentTelegram = false;
@@ -73,11 +73,11 @@ export async function assembleAndSendBrief(now = new Date()) {
   }
 
   const pushRes = await broadcastPush({
-    title: `☀️ Morning Brief — ${dateLabel}`,
+    title: `☀️ የጠዋት ሪፖርት — ${dateLabel}`,
     body:
       exceptions.length > 0
         ? `🚨 ${exceptions[0]}`
-        : `${numbers.sacksProduced} sacks produced · ${etb(numbers.cashCollected)} collected. Tap for the full brief.`,
+        : `${numbers.tonsProduced.toFixed(2)} ቶን ተሰርቷል · ${etb(numbers.cashCollected)} ብር ተሰብስቧል። ሙሉ ሪፖርቱን ለማየት ይጫኑ።`,
     url: "/",
     tag: `brief-${dateLabel}`,
   });

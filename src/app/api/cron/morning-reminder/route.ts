@@ -30,7 +30,7 @@ export async function GET(req: NextRequest) {
       try {
         const res = await sendReportMenu(
           chatId,
-          "8:00 AM EAT reminder: submit today's company reports from the menu."
+          "ጠዋት 8:00 (ምሥራቅ አፍሪካ ሰዓት) ማሳሰቢያ: ዛሬ የኩባንያ ሪፖርቶቹን ከምናሌው ያቅርቡ።"
         );
         if (res?.ok) sent += 1;
         else failed.push({ chatId, error: JSON.stringify(res) });

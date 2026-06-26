@@ -19,7 +19,7 @@ export interface TrendPoint {
 }
 
 const METRICS = [
-  { key: "production", label: "Production", unit: "sacks", color: "#c64d30" },
+  { key: "production", label: "Production", unit: "t", color: "#c64d30" },
   { key: "sales", label: "Sales", unit: "ETB", color: "#8a3622" },
   { key: "collections", label: "Collections", unit: "ETB", color: "#da674c" },
 ] as const;
@@ -91,7 +91,13 @@ export default function TrendCharts({
             />
             <YAxis
               tick={{ fontSize: 10, fill: "#a8a29e" }}
-              tickFormatter={(v: number) => (v >= 1000 ? `${Math.round(v / 1000)}k` : String(v))}
+              tickFormatter={(v: number) =>
+                metric.unit === "t"
+                  ? Number(v).toFixed(1)
+                  : v >= 1000
+                  ? `${Math.round(v / 1000)}k`
+                  : String(v)
+              }
               tickLine={false}
               axisLine={false}
               width={36}
@@ -103,7 +109,12 @@ export default function TrendCharts({
                 fontSize: 12,
                 boxShadow: "0 8px 24px rgba(62,22,13,0.12)",
               }}
-              formatter={(v: number) => [`${v.toLocaleString()} ${metric.unit}`, metric.label]}
+              formatter={(v: number) => [
+                metric.unit === "t"
+                  ? `${Number(v).toFixed(2)} ${metric.unit}`
+                  : `${v.toLocaleString()} ${metric.unit}`,
+                metric.label,
+              ]}
             />
             <Area
               type="monotone"

@@ -12,9 +12,11 @@ export async function POST(req: NextRequest) {
   if (!body.supervisor || body.filledSacks == null) {
     return NextResponse.json({ error: "supervisor and filledSacks are required" }, { status: 400 });
   }
+  const bagWeightKg = [25, 40].includes(Number(body.bagWeightKg)) ? Number(body.bagWeightKg) : undefined;
   const report = await ShiftReport.create({
     supervisor: String(body.supervisor),
     filledSacks: Number(body.filledSacks),
+    bagWeightKg,
     downtimeMinutes: Number(body.downtimeMinutes) || 0,
     shift: body.shift === "night" ? "night" : "day",
     notes: body.notes ? String(body.notes) : undefined,
