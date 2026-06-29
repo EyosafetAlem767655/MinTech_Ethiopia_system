@@ -55,21 +55,21 @@ export async function sendMessage(
 export async function sendBriefMessage(chatId: string | number, text: string, dashboardUrl: string) {
   return sendMessage(chatId, text, {
     reply_markup: {
-      inline_keyboard: [[{ text: "📊 ዳሽቦርድ ክፈት", url: dashboardUrl }]],
+      inline_keyboard: [[{ text: "📊 ዳሽቦርዱን ክፈት", url: dashboardUrl }]],
     },
   });
 }
 
 export const REPORT_BUTTONS = {
-  damage: "🛡️ የተበላሸ ከረጢት",
-  receipt: "🧾 ደረሰኝ",
+  damage:   "🛡️ የተበላሹ ጆንያዎች",
+  receipt:  "🧾 ደረሰኝ",
   purchase: "🛒 የግዢ ጥያቄ",
-  wht: "📄 ቀረጥ ደረሰኝ",
-  sales: "💵 ሽያጭ/ክፍያ",
-  truck: "🚚 የትራክ ማቅረቢያ",
-  shift: "🏭 የሺፍት ሪፖርት",
-  ops: "📊 የዕለት ሥራ ሪፖርት",
-  question: "🤖 የኩባንያ ጥያቄ",
+  wht:      "📄 WHT ደረሰኝ",
+  sales:    "💵 ሽያጭ / ክፍያ",
+  truck:    "🚚 የጭነት መኪና ሁኔታ",
+  shift:    "🏭 የፈረቃ ሪፖርት",
+  ops:      "📊 የዕለታዊ ክንውን ሪፖርት",
+  question: "🤖 የድርጅት ጥያቄ",
 } as const;
 
 export const REPORT_KEYBOARD = {
@@ -90,11 +90,17 @@ export const REPORT_KEYBOARD = {
 
 export const INPUT_TYPE_KEYBOARD = {
   keyboard: [
-    [{ text: "📝 ዝርዝሩን ይጻፉ" }],
+    [{ text: "📝 ዝርዝሩን ይፃፉ" }],
     [{ text: "📷 ፎቶ ይላኩ" }],
-    [{ text: "🖼️ ፎቶ + መግለጫ" }],
-    [{ text: "⬅️ ሪፖርቱን ይቀይሩ" }, { text: "❌ ሰርዝ" }],
+    [{ text: "🖼️ ፎቶ + የጽሁፍ ማብራሪያ" }],
+    [{ text: "⬅️ የሪፖርት ዓይነት ይቀይሩ" }, { text: "❌ ሰርዝ" }],
   ],
+  resize_keyboard: true,
+  one_time_keyboard: false,
+};
+
+export const CHANGE_CANCEL_KEYBOARD = {
+  keyboard: [[{ text: "⬅️ የሪፖርት ዓይነት ይቀይሩ" }, { text: "❌ ሰርዝ" }]],
   resize_keyboard: true,
   one_time_keyboard: false,
 };
@@ -102,7 +108,7 @@ export const INPUT_TYPE_KEYBOARD = {
 export async function sendReportMenu(chatId: string | number, text?: string) {
   return sendMessage(
     chatId,
-    text || "የሪፖርቱ ዓይነት ይምረጡ።",
+    text || "➡️ የሪፖርት ዓይነት ይምረጡ።",
     { reply_markup: REPORT_KEYBOARD }
   );
 }
@@ -125,14 +131,14 @@ export async function sendPurchaseDecisionRequest(
 ) {
   return sendMessage(
     chatId,
-    `የግዢ ጥያቄ ጠበቃ\n\n<b>${request.title}</b>\nብር ${Math.round(request.amount).toLocaleString()} — ${request.requestedBy}` +
+    `🛒 በመጠባበቅ ላይ ያለ የግዢ ጥያቄ፦\n\n<b>${request.title}</b>\n${Math.round(request.amount).toLocaleString()} ETB — ${request.requestedBy}` +
       (request.justification ? `\n${request.justification}` : ""),
     {
       reply_markup: {
         inline_keyboard: [
           [
-            { text: "ፍቀድ", callback_data: `pr:approve:${request.id}` },
-            { text: "አትፍቀድ", callback_data: `pr:reject:${request.id}` },
+            { text: "✅ አጽድቅ", callback_data: `pr:approve:${request.id}` },
+            { text: "❌ ውድቅ አድርግ", callback_data: `pr:reject:${request.id}` },
           ],
         ],
       },

@@ -30,6 +30,7 @@ export interface PhotoVerdict {
   suspicious: boolean;
   suspicion_reasons: string[];
   notes: string;
+  aiCountedBags: number | null;
 }
 
 const PHOTO_VERDICT_FALLBACK: PhotoVerdict = {
@@ -40,6 +41,7 @@ const PHOTO_VERDICT_FALLBACK: PhotoVerdict = {
   suspicious: true,
   suspicion_reasons: ["ai_check_failed"],
   notes: "Automatic check failed; manual review required.",
+  aiCountedBags: null,
 };
 
 export async function checkClaimPhoto(
@@ -51,7 +53,7 @@ export async function checkClaimPhoto(
     const res = await openai().chat.completions.create({
       model: VISION_MODEL,
       response_format: { type: "json_object" },
-      max_tokens: 400,
+      max_tokens: 500,
       messages: [
         {
           role: "system",
@@ -61,20 +63,22 @@ export async function checkClaimPhoto(
             "bag_visible (boolean), matches_bag_type (boolean — does the bag look like the registered type?), " +
             "damage_visible (boolean), damage_severity ('none'|'minor'|'moderate'|'severe'), " +
             "suspicious (boolean), suspicion_reasons (array of strings from: 'screenshot', 'photo_of_screen', " +
-            "'heavy_blur', 'stock_photo_look', 'no_bag', 'other'), notes (short string). " +
+            "'heavy_blur', 'stock_photo_look', 'no_bag', 'other'), notes (short string), " +
+            "counted_bags (integer — count of visibly damaged/torn bags in the image; null if the image is too unclear to count). " +
             "Mark suspicious=true if the image looks like a screenshot (UI elements, status bars, crops), " +
             "a photo of another screen (moiré patterns, glare, pixels), or is too blurred to verify damage.",
         },
         {
           role: "user",
           content: [
-            { type: "text", text: `Registered bag type for this lot: "${bagType}". Inspect this damage-claim photo.` },
-            { type: "image_url", image_url: { url: `data:${contentType};base64,${imageBase64}`, detail: "low" } },
+            { type: "text", text: `Bag type for this claim: "${bagType}". Count the damaged bags and inspect this damage-claim photo.` },
+            { type: "image_url", image_url: { url: `data:${contentType};base64,${imageBase64}`, detail: "high" } },
           ],
         },
       ],
     });
     const parsed = JSON.parse(res.choices[0]?.message?.content || "{}");
+    const rawCount = parsed.counted_bags;
     return {
       bag_visible: !!parsed.bag_visible,
       matches_bag_type: !!parsed.matches_bag_type,
@@ -85,6 +89,7 @@ export async function checkClaimPhoto(
       suspicious: !!parsed.suspicious,
       suspicion_reasons: Array.isArray(parsed.suspicion_reasons) ? parsed.suspicion_reasons.map(String) : [],
       notes: String(parsed.notes || ""),
+      aiCountedBags: rawCount !== null && rawCount !== undefined && !isNaN(Number(rawCount)) ? Math.round(Number(rawCount)) : null,
     };
   } catch (e) {
     console.error("checkClaimPhoto failed:", e);
@@ -280,7 +285,7 @@ const INGESTION_SCHEMA = `Return STRICT JSON:
 Required fields per type:
 - receipt: vendor, amount (number, ETB), category, receiptDate (YYYY-MM-DD), client if visible
 - purchase_request: title, amount (number, ETB), justification
-- damage_claim: lotCode, quantity (number of damaged bags)
+- damage_claim: quantity (number of damaged bags reported by worker; lotCode only if visible in image or caption)
 - stone_delivery: truckPlate, loads (number), qualityGrade ("good"|"fair"|"dark/weathered"), supplier, quarry, driverName if visible
 - shift_report: filledSacks (number), bagWeightKg (25 or 40 — the weight in kg of each filled sack), downtimeMinutes (number), shift ("day"|"night"), notes
 - invoice: invoiceNumber, client, amount (number, ETB), sacks, bagWeightKg (25 or 40 — the weight in kg of each sold sack), dueDate (YYYY-MM-DD), clientPhone

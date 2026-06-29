@@ -124,6 +124,7 @@ export interface IClaimPhoto {
     suspicious: boolean;
     suspicion_reasons: string[]; // screenshot | photo_of_screen | heavy_blur | ...
     notes?: string;
+    aiCountedBags?: number | null;
   };
   exifCheck?: {
     hasExif: boolean;
@@ -133,7 +134,7 @@ export interface IClaimPhoto {
 
 export interface IDamageClaim {
   _id: mongoose.Types.ObjectId;
-  lotId: mongoose.Types.ObjectId;
+  lotId?: mongoose.Types.ObjectId;
   quantity: number;
   source: "app" | "telegram";
   worker: string;
@@ -142,8 +143,10 @@ export interface IDamageClaim {
   deviceId?: string;
   capturedAt?: Date;
   photos: IClaimPhoto[];
-  flags: string[]; // duplicate_photo | suspicious_image | telegram_needs_cosign | exif_issue
+  flags: string[]; // duplicate_photo | suspicious_image | telegram_needs_cosign | exif_issue | count_mismatch
   status: "pending" | "cosign_required" | "verified" | "rejected";
+  trustScore?: number;    // 0–100 AI trust analysis
+  aiCountedBags?: number; // bags counted by AI in the photo
   cosignedBy?: string;
   reviewedBy?: string;
   reviewedAt?: Date;
@@ -159,7 +162,7 @@ export interface IDamageClaim {
 
 const DamageClaimSchema = new Schema<any>(
   {
-    lotId: { type: Schema.Types.ObjectId, ref: "BagLot", required: true, index: true },
+    lotId: { type: Schema.Types.ObjectId, ref: "BagLot", index: true },
     quantity: { type: Number, required: true },
     source: { type: String, enum: ["app", "telegram"], required: true },
     worker: { type: String, required: true },
@@ -180,6 +183,7 @@ const DamageClaimSchema = new Schema<any>(
           suspicious: Boolean,
           suspicion_reasons: [String],
           notes: String,
+          aiCountedBags: Number,
         },
         exifCheck: { hasExif: Boolean, issues: [String] },
       },
@@ -191,6 +195,8 @@ const DamageClaimSchema = new Schema<any>(
       default: "pending",
       index: true,
     },
+    trustScore: Number,
+    aiCountedBags: Number,
     cosignedBy: String,
     reviewedBy: String,
     reviewedAt: Date,
