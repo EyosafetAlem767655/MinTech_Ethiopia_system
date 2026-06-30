@@ -463,7 +463,8 @@ export async function POST(req: NextRequest) {
       await session.save();
       await sendMessage(
         chatId,
-        "📊 <b>የዕለታዊ ክንውን ሪፖርት</b>\n\nእባክዎ ሪፖርቱን አሁን ይለጥፉ (paste)።\nቀናትን፣ የገቡ/የወጡ/የቀሩ ዕቃዎችን ክፍሎች እና የከረጢት ብዛትን ያካትቱ።"
+        "📊 <b>የዕለታዊ ክንውን ሪፖርት</b>\n\nእባክዎ ሪፖርቱን አሁን ይለጥፉ (paste)።\nቀናትን፣ የገቡ/የወጡ/የቀሩ ዕቃዎችን ክፍሎች እና የከረጢት ብዛትን ያካትቱ።",
+        { reply_markup: CHANGE_CANCEL_KEYBOARD }
       );
       return NextResponse.json({ ok: true });
     }
@@ -473,7 +474,8 @@ export async function POST(req: NextRequest) {
       if (!isOpsReportText(text)) {
         await sendMessage(
           chatId,
-          "⚠️ ይህ የክንውን ሪፖርት አይመስልም። ሪፖርቱ ቀናትን (ምሳሌ፦ 31/3/2026) እና የገቡ/የወጡ/የቀሩ ዕቃዎችን ክፍሎች መያዝ አለበት።\n\nእባክዎ ድጋሚ ይሞክሩ ወይም ❌ ሰርዝ የሚለውን ይጫኑ።"
+          "⚠️ ይህ የክንውን ሪፖርት አይመስልም። ሪፖርቱ ቀናትን (ምሳሌ፦ 31/3/2026) እና የገቡ/የወጡ/የቀሩ ዕቃዎችን ክፍሎች መያዝ አለበት።\n\nእባክዎ ድጋሚ ይሞክሩ ወይም ❌ ሰርዝ የሚለውን ይጫኑ።",
+          { reply_markup: CHANGE_CANCEL_KEYBOARD }
         );
         return NextResponse.json({ ok: true });
       }
