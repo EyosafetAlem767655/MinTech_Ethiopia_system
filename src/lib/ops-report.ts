@@ -36,11 +36,12 @@ function parseDateLabel(raw: string): { label: string; date: Date } | null {
 
 function extractKV(line: string): [string, number][] {
   const pairs: [string, number][] = [];
-  // Match patterns like: ETL9=30, White =32500, 2EL=30.875
-  const re = /([A-Za-z][A-Za-z0-9]*)\s*=\s*([\d.]+)/g;
+  // Match digit-prefixed codes (2EL, 3EL, 5EL) AND standard codes (ETL9, EC15, White)
+  const re = /([A-Za-z0-9]+)\s*=\s*([\d.]+)/g;
   let m;
   while ((m = re.exec(line)) !== null) {
     const key = m[1].trim();
+    if (!/[A-Za-z]/.test(key)) continue; // skip pure-numeric keys
     const val = parseFloat(m[2]);
     if (!isNaN(val)) pairs.push([key, val]);
   }
@@ -104,7 +105,7 @@ export function parseOpsReportText(text: string): ParsedDayEntry[] {
 export function isOpsReportText(text: string): boolean {
   const hasDate = /\b\d{1,2}\/\d{1,2}\/\d{4}\b/.test(text);
   const hasSection = /\b(Delivered|Received|Stock)\s*[-–]?/i.test(text);
-  const hasProduct = /\b(ETL|EL|EC|Talk)\w*\s*=/i.test(text);
+  const hasProduct = /(?:\b|\d)(ETL|EL|EC|Talk)\w*\s*=/i.test(text);
   return hasDate && (hasSection || hasProduct);
 }
 
