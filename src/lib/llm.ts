@@ -97,6 +97,56 @@ export async function checkClaimPhoto(
   }
 }
 
+/* ───────────────────────── Receipt QR-code check ───────────────────────────── */
+
+export interface QRCheckResult {
+  hasQRCode: boolean;
+  confidence: number; // 0–1
+  notes: string;
+}
+
+export async function checkReceiptQRCode(
+  imageBase64: string,
+  contentType: string
+): Promise<QRCheckResult> {
+  try {
+    const res = await openai().chat.completions.create({
+      model: VISION_MODEL,
+      response_format: { type: "json_object" },
+      max_tokens: 200,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You inspect receipt photos submitted to an Ethiopian mining company's accounting system. " +
+            "Return STRICT JSON: { \"hasQRCode\": boolean, \"confidence\": 0-1, \"notes\": \"one short sentence\" }. " +
+            "Set hasQRCode=true ONLY if a QR code (square matrix barcode with dark squares on a white background) " +
+            "is clearly visible anywhere on the receipt. " +
+            "Ethiopian ERCA tax receipts always include a QR code — that is the standard to check against. " +
+            "Do NOT confuse regular barcodes, logos, stamps, or decorative patterns for QR codes.",
+        },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Does this receipt contain a QR code? Inspect every part of the image carefully." },
+            { type: "image_url", image_url: { url: `data:${contentType};base64,${imageBase64}`, detail: "high" } },
+          ],
+        },
+      ],
+    });
+    const parsed = JSON.parse(res.choices[0]?.message?.content || "{}");
+    return {
+      hasQRCode: !!parsed.hasQRCode,
+      confidence: Math.max(0, Math.min(1, Number(parsed.confidence) || 0.5)),
+      notes: String(parsed.notes || ""),
+    };
+  } catch (e) {
+    console.error("checkReceiptQRCode failed:", e);
+    // On AI failure, do not block a legitimate receipt — assume QR present
+    return { hasQRCode: true, confidence: 0, notes: "check_failed" };
+  }
+}
+
 /* ───────────────────────── Gate stone quality scoring ─────────────────────── */
 
 export interface StoneScore {

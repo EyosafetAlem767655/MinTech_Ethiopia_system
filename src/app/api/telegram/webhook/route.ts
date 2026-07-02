@@ -12,7 +12,7 @@ import {
   StoredFile,
   TelegramSession,
 } from "@/lib/models";
-import { classifyIngestion, scoreStonePhoto, verifyRequestLegitimacy, type IngestionExtraction } from "@/lib/llm";
+import { checkReceiptQRCode, classifyIngestion, scoreStonePhoto, verifyRequestLegitimacy, type IngestionExtraction } from "@/lib/llm";
 import {
   answerCallbackQuery,
   CHANGE_CANCEL_KEYBOARD,
@@ -42,7 +42,7 @@ const REPORT_CHOICES: Record<string, { docType: IngestionExtraction["docType"]; 
   "ደረሰኝ": {
     docType: "receipt",
     label: REPORT_BUTTONS.receipt,
-    question: "🧾 የደረሰኙን ፎቶ ይላኩ፣ ወይም የአቅራቢውን ስም፣ የገንዘቡን መጠን፣ ምድቡን እና ቀኑን ይፃፉ።",
+    question: "🧾 QR ኮድ ያለው ኦፊሴላዊ ደረሰኝ ፎቶ ይላኩ። ያለ QR ኮድ ደረሰኝ ተቀባይነት የለውም።",
   },
   "የግዢ ጥያቄ": {
     docType: "purchase_request",
@@ -157,16 +157,30 @@ async function saveExtractedRecord(extraction: IngestionExtraction, opts: { file
 
   switch (extraction.docType) {
     case "receipt": {
-      let legitimacy;
-      if (opts.fileId) {
-        const photo = await getPhotoBase64(opts.fileId);
-        if (photo) {
-          legitimacy = await verifyRequestLegitimacy(
-            photo.base64, photo.contentType, "receipt",
-            f.vendor ? `vendor: ${f.vendor}, amount: ${f.amount}` : undefined
-          ).catch(() => undefined);
-        }
+      // Receipts must be photos — text-only is already blocked by photo_caption inputMode,
+      // but guard here too for any path that reaches saveExtractedRecord without a file.
+      if (!opts.fileId) {
+        return "📷 ደረሰኝ ፎቶ ያስፈልጋል። QR ኮድ ያለው ኦፊሴላዊ ደረሰኝ ፎቶ ይላኩ።";
       }
+
+      const photo = await getPhotoBase64(opts.fileId);
+      if (!photo) {
+        return "📷 ፎቶ አልተገኘም። እባክዎ ድጋሚ ይሞክሩ።";
+      }
+
+      // Run QR check and legitimacy check in parallel
+      const [qrCheck, legitimacy] = await Promise.all([
+        checkReceiptQRCode(photo.base64, photo.contentType).catch(() => ({ hasQRCode: true, confidence: 0, notes: "check_failed" })),
+        verifyRequestLegitimacy(
+          photo.base64, photo.contentType, "receipt",
+          f.vendor ? `vendor: ${f.vendor}, amount: ${f.amount}` : undefined
+        ).catch(() => undefined),
+      ]);
+
+      if (!qrCheck.hasQRCode) {
+        return "❌ ፎቶው ላይ QR ኮድ አልተገኘም። እባክዎ QR ኮድ ያለው ኦፊሴላዊ ደረሰኝ ፎቶ ይላኩ።";
+      }
+
       const receipt = await Receipt.create({
         vendor: String(f.vendor || "Unknown vendor"),
         client: f.client ? String(f.client) : undefined,
@@ -180,10 +194,9 @@ async function saveExtractedRecord(extraction: IngestionExtraction, opts: { file
         legitimacy,
         meta: f,
       });
-      const legitimacyNote = legitimacy ? ` · ተዓማኒነት፦ ${legitimacy.score}%` : "";
+      const legitimacyNote = legitimacy ? ` · ተዓማኒነ፦ ${legitimacy.score}%` : "";
       return `🧾 ደረሰኝ ተቀምጧል፦ <b>${receipt.vendor}</b> — ${Number(receipt.amount).toLocaleString()} ETB${legitimacyNote}`;
     }
-
     case "purchase_request": {
       let legitimacy;
       if (opts.fileId) {
