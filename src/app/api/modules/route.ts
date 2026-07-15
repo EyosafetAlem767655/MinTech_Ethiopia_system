@@ -1,35 +1,33 @@
 import { NextResponse } from "next/server";
-import { dbConnect } from "@/lib/db";
+import sql from "@/lib/sql";
 import { MINTECH_MODULES } from "@/lib/modules";
 import { monthlySalesReport } from "@/lib/reports";
-import {
-  BagLot,
-  DamageClaim,
-  Brief,
-  PurchaseRequest,
-  Receipt,
-  StoneDelivery,
-} from "@/lib/models";
+import { latestBrief } from "@/lib/brief";
 import { missingWithholding, receivablesAging } from "@/lib/metrics";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
-  await dbConnect();
+const count = (rows: { n: string }[]) => Number(rows[0]?.n) || 0;
 
-  const [lots, pendingClaims, pendingPurchases, aging, wht, receipts, monthly, brief, recentBadStone] =
+export async function GET() {
+  const [lotsR, pendingClaimsR, pendingPurchasesR, aging, wht, receiptsR, monthly, brief, recentBadStoneR] =
     await Promise.all([
-      BagLot.countDocuments(),
-      DamageClaim.countDocuments({ status: { $in: ["pending", "cosign_required"] } }),
-      PurchaseRequest.countDocuments({ status: "pending" }),
+      sql<{ n: string }[]>`select count(*) as n from bag_lots`,
+      sql<{ n: string }[]>`select count(*) as n from damage_claims where status in ('pending','cosign_required')`,
+      sql<{ n: string }[]>`select count(*) as n from purchase_requests where status = 'pending'`,
       receivablesAging(),
       missingWithholding(),
-      Receipt.countDocuments(),
+      sql<{ n: string }[]>`select count(*) as n from receipts`,
       monthlySalesReport(),
-      Brief.findOne().sort({ date: -1 }).lean(),
-      StoneDelivery.countDocuments({ qualityGrade: "dark/weathered" }),
+      latestBrief(),
+      sql<{ n: string }[]>`select count(*) as n from stone_deliveries where quality_grade = 'dark/weathered'`,
     ]);
 
+  const lots = count(lotsR);
+  const pendingClaims = count(pendingClaimsR);
+  const pendingPurchases = count(pendingPurchasesR);
+  const receipts = count(receiptsR);
+  const recentBadStone = count(recentBadStoneR);
   const overdueTotal = aging.overdueClients.reduce((sum, row) => sum + row.outstanding, 0);
 
   return NextResponse.json({

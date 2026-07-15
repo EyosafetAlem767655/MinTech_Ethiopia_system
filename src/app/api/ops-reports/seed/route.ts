@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import { dbConnect } from "@/lib/db";
 import { ingestOpsReport } from "@/lib/ops-report";
 
 export const dynamic = "force-dynamic";
@@ -705,7 +704,6 @@ Beige=51707, Yellow=41000,
 Green=300,`;
 
 export async function GET() {
-  await dbConnect();
   const result = await ingestOpsReport(HISTORICAL_DATA, "seed");
   return NextResponse.json({
     ok: true,

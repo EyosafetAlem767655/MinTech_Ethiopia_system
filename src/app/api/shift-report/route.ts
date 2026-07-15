@@ -1,45 +1,42 @@
 import { NextRequest, NextResponse } from "next/server";
-import { dbConnect } from "@/lib/db";
-import { BagEvent, ShiftReport } from "@/lib/models";
-import { recomputeLotBalances } from "@/lib/metrics";
+import sql, { isUuid } from "@/lib/sql";
 
 export const dynamic = "force-dynamic";
 
 /** The 60-second end-of-shift form: filled sacks, downtime, notes. */
 export async function POST(req: NextRequest) {
-  await dbConnect();
   const body = await req.json();
   if (!body.supervisor || body.filledSacks == null) {
     return NextResponse.json({ error: "supervisor and filledSacks are required" }, { status: 400 });
   }
-  const bagWeightKg = [25, 40].includes(Number(body.bagWeightKg)) ? Number(body.bagWeightKg) : undefined;
-  const report = await ShiftReport.create({
-    supervisor: String(body.supervisor),
-    filledSacks: Number(body.filledSacks),
-    bagWeightKg,
-    downtimeMinutes: Number(body.downtimeMinutes) || 0,
-    shift: body.shift === "night" ? "night" : "day",
-    notes: body.notes ? String(body.notes) : undefined,
-    lotId: body.lotId || undefined,
-    date: new Date(),
-  });
-  // Filling sacks consumes bags from the lot — feeds the lot balance.
-  if (body.lotId && Number(body.filledSacks) > 0) {
-    await BagEvent.create({
-      lotId: body.lotId,
-      type: "filled",
-      quantity: Number(body.filledSacks),
-      by: String(body.supervisor),
-      shift: report.shift,
-      note: "end-of-shift form",
-    });
-    await recomputeLotBalances();
+  const bagWeightKg = [25, 40].includes(Number(body.bagWeightKg)) ? Number(body.bagWeightKg) : null;
+  const shift = body.shift === "night" ? "night" : "day";
+  const lotId = body.lotId && isUuid(String(body.lotId)) ? String(body.lotId) : null;
+
+  const [report] = await sql<{ id: string }[]>`
+    insert into shift_reports (supervisor, filled_sacks, bag_weight_kg, downtime_minutes, shift, notes, lot_id)
+    values (${String(body.supervisor)}, ${Number(body.filledSacks)}, ${bagWeightKg},
+            ${Number(body.downtimeMinutes) || 0}, ${shift}, ${body.notes ? String(body.notes) : null}, ${lotId})
+    returning id
+  `;
+
+  // Filling sacks consumes bags from the lot — feeds the derived lot balance.
+  if (lotId && Number(body.filledSacks) > 0) {
+    await sql`
+      insert into bag_events (lot_id, type, quantity, by_user, shift, note)
+      values (${lotId}, 'filled', ${Number(body.filledSacks)}, ${String(body.supervisor)}, ${shift}, 'end-of-shift form')
+    `;
   }
-  return NextResponse.json({ ok: true, id: report._id });
+  return NextResponse.json({ ok: true, id: report.id });
 }
 
 export async function GET() {
-  await dbConnect();
-  const reports = await ShiftReport.find().sort({ date: -1 }).limit(30).lean();
+  const reports = await sql`
+    select id as _id, date, shift, supervisor, filled_sacks as "filledSacks",
+           bag_weight_kg as "bagWeightKg", downtime_minutes as "downtimeMinutes", notes, lot_id as "lotId"
+      from shift_reports
+     order by date desc
+     limit 30
+  `;
   return NextResponse.json(reports);
 }

@@ -60,65 +60,75 @@ export async function sendBriefMessage(chatId: string | number, text: string, da
   });
 }
 
-export const REPORT_BUTTONS = {
-  damage:   "🛡️ የተበላሹ ጆንያዎች",
-  receipt:  "🧾 ደረሰኝ",
-  purchase: "🛒 የግዢ ጥያቄ",
-  wht:      "📄 WHT ደረሰኝ",
-  sales:    "💵 ሽያጭ / ክፍያ",
-  truck:    "🚚 የጭነት መኪና ሁኔታ",
-  shift:    "🏭 የፈረቃ ሪፖርት",
-  ops:      "📊 የዕለታዊ ክንውን ሪፖርት",
-  question: "🤖 የድርጅት ጥያቄ",
+/* ─────────────────────────────── Button labels ───────────────────────────── */
+
+export const ENTRY_BUTTONS = {
+  receipt: "🧾 ደረሰኝ ያስገቡ",
+  internal: "🔐 ለውስጥ ሰራተኛ",
 } as const;
 
-export const REPORT_KEYBOARD = {
-  keyboard: [
-    [{ text: REPORT_BUTTONS.damage }],
-    [{ text: REPORT_BUTTONS.receipt }],
-    [{ text: REPORT_BUTTONS.purchase }],
-    [{ text: REPORT_BUTTONS.wht }],
-    [{ text: REPORT_BUTTONS.sales }],
-    [{ text: REPORT_BUTTONS.truck }],
-    [{ text: REPORT_BUTTONS.shift }],
-    [{ text: REPORT_BUTTONS.ops }],
-    [{ text: REPORT_BUTTONS.question }],
-  ],
+export const NAV_BUTTONS = {
+  cancel: "❌ ሰርዝ",
+  changeReport: "⬅️ የሪፖርት ዓይነት ይቀይሩ",
+  back: "⬅️ ተመለስ",
+  logout: "🚪 ውጣ",
+} as const;
+
+/** First screen after /start — the only two doors into the bot. */
+export const ENTRY_KEYBOARD = {
+  keyboard: [[{ text: ENTRY_BUTTONS.receipt }], [{ text: ENTRY_BUTTONS.internal }]],
   resize_keyboard: true,
   one_time_keyboard: false,
 };
 
-export const INPUT_TYPE_KEYBOARD = {
-  keyboard: [
-    [{ text: "📝 ዝርዝሩን ይፃፉ" }],
-    [{ text: "📷 ፎቶ ይላኩ" }],
-    [{ text: "🖼️ ፎቶ + የጽሁፍ ማብራሪያ" }],
-    [{ text: "⬅️ የሪፖርት ዓይነት ይቀይሩ" }, { text: "❌ ሰርዝ" }],
-  ],
+export const BACK_KEYBOARD = {
+  keyboard: [[{ text: NAV_BUTTONS.back }]],
   resize_keyboard: true,
   one_time_keyboard: false,
 };
 
 export const CHANGE_CANCEL_KEYBOARD = {
-  keyboard: [[{ text: "⬅️ የሪፖርት ዓይነት ይቀይሩ" }, { text: "❌ ሰርዝ" }]],
+  keyboard: [[{ text: NAV_BUTTONS.changeReport }, { text: NAV_BUTTONS.cancel }]],
   resize_keyboard: true,
   one_time_keyboard: false,
 };
 
-export async function sendReportMenu(chatId: string | number, text?: string) {
-  return sendMessage(
-    chatId,
-    text || "➡️ የሪፖርት ዓይነት ይምረጡ።",
-    { reply_markup: REPORT_KEYBOARD }
-  );
+/** Reply keyboard built from the capabilities the signed-in user actually has. */
+export function reportKeyboardFor(buttons: string[]) {
+  return {
+    keyboard: [...buttons.map((text) => [{ text }]), [{ text: NAV_BUTTONS.logout }]],
+    resize_keyboard: true,
+    one_time_keyboard: false,
+  };
 }
 
-export async function sendInputTypeMenu(chatId: string | number, reportLabel: string, hint?: string) {
-  return sendMessage(
-    chatId,
-    `<b>${reportLabel}</b>\nምርጫዎን ይምረጡ።` + (hint ? `\n\n${hint}` : ""),
-    { reply_markup: INPUT_TYPE_KEYBOARD }
-  );
+export const EXTERNAL_KEYBOARD = {
+  keyboard: [[{ text: ENTRY_BUTTONS.receipt }], [{ text: NAV_BUTTONS.back }]],
+  resize_keyboard: true,
+  one_time_keyboard: false,
+};
+
+export async function sendEntryMenu(chatId: string | number, text?: string) {
+  return sendMessage(chatId, text || "👋 እንኳን ደህና መጡ! ምን ማድረግ ይፈልጋሉ?", {
+    reply_markup: ENTRY_KEYBOARD,
+  });
+}
+
+export async function sendExternalMenu(chatId: string | number, text?: string) {
+  return sendMessage(chatId, text || "🧾 ደረሰኝ ለማስገባት የታችኛውን ቁልፍ ይጫኑ።", {
+    reply_markup: EXTERNAL_KEYBOARD,
+  });
+}
+
+export async function sendReportMenu(chatId: string | number, buttons: string[], text?: string) {
+  return sendMessage(chatId, text || "➡️ የሪፖርት ዓይነት ይምረጡ።", {
+    reply_markup: reportKeyboardFor(buttons),
+  });
+}
+
+/** Removes the message that carried the user's password from the chat history. */
+export async function deleteMessage(chatId: string | number, messageId: number) {
+  return call("deleteMessage", { chat_id: chatId, message_id: messageId });
 }
 
 export async function answerCallbackQuery(callbackQueryId: string, text: string) {

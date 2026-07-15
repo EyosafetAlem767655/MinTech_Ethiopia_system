@@ -1,18 +1,10 @@
 import { NextResponse } from "next/server";
-import { dbConnect } from "@/lib/db";
-import { DailyOpsReport } from "@/lib/models";
+import { recentOpsReports } from "@/lib/ops-report";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  await dbConnect();
-
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - 90);
-
-  const reports = await DailyOpsReport.find({ date: { $gte: cutoff } })
-    .sort({ date: 1 })
-    .lean();
+  const reports = (await recentOpsReports(90)) as any[];
 
   // Collect all product names seen across all reports
   const productSet = new Set<string>();
@@ -21,10 +13,7 @@ export async function GET() {
     for (const key of Object.keys(r.received || {})) productSet.add(key);
     for (const key of Object.keys(r.stock || {})) productSet.add(key);
   }
-
   const products = Array.from(productSet).sort();
-
-  // Latest report for current stock snapshot
   const latest = reports.length > 0 ? reports[reports.length - 1] : null;
 
   return NextResponse.json({ reports, products, latest });

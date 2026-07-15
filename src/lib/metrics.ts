@@ -1,13 +1,19 @@
-import {
-  BagEvent,
-  BagLot,
-  DamageClaim,
-  Invoice,
-  PurchaseRequest,
-  ShiftReport,
-  StoneDelivery,
-} from "@/lib/models";
+import sql from "@/lib/sql";
 import { addDays, daysBetween, eatDateLabel, eatDayStart, yesterdayRange } from "@/lib/dates";
+
+/**
+ * All dashboard numbers. Previously 10 MongoDB aggregation pipelines; now SQL.
+ *
+ * Two behaviours are preserved deliberately and must not drift:
+ *   1. Tons = sacks × (bagWeightKg / 1000), but ONLY when a bag weight is
+ *      recorded. Records predating the tons migration have no weight and must
+ *      contribute 0 — not be treated as some default. `bag_weight_kg` is
+ *      nullable and `null > 0` is null (falsy) in the CASE, so they fall to 0.
+ *   2. Day boundaries are Ethiopian (EAT, UTC+3). Mongo faked this by adding
+ *      3h of milliseconds before formatting; Postgres has the real timezone.
+ */
+
+const EAT = "Africa/Addis_Ababa";
 
 /* ─────────────────────────── Yesterday's numbers ──────────────────────────── */
 
@@ -23,49 +29,57 @@ export interface DayNumbers {
 }
 
 export async function getDayNumbers(start: Date, end: Date): Promise<DayNumbers> {
-  const dateMatch = { $gte: start, $lt: end };
+  // Six separate Mongo aggregates collapse into one round trip.
+  const [r] = await sql<
+    {
+      truckloads: string;
+      tons_produced: string;
+      tons_sold: string;
+      revenue_invoiced: string;
+      cash_collected: string;
+      damaged_claimed: string;
+      damaged_verified: string;
+    }[]
+  >`
+    select
+      (select coalesce(sum(loads), 0)
+         from stone_deliveries where date >= ${start} and date < ${end})            as truckloads,
 
-  const tonsExpr = (sacksField: string, weightField: string) => ({
-    $sum: {
-      $cond: [
-        { $gt: [`$${weightField}`, 0] },
-        { $multiply: [`$${sacksField}`, { $divide: [`$${weightField}`, 1000] }] },
-        0,
-      ],
-    },
-  });
+      (select coalesce(sum(case when bag_weight_kg > 0
+                                then filled_sacks * bag_weight_kg / 1000.0
+                                else 0 end), 0)
+         from shift_reports where date >= ${start} and date < ${end})               as tons_produced,
 
-  const [trucks, produced, sold, collected, claimed, verified] = await Promise.all([
-    StoneDelivery.aggregate([{ $match: { date: dateMatch } }, { $group: { _id: null, n: { $sum: "$loads" } } }]),
-    ShiftReport.aggregate([
-      { $match: { date: dateMatch } },
-      { $group: { _id: null, n: tonsExpr("filledSacks", "bagWeightKg") } },
-    ]),
-    Invoice.aggregate([
-      { $match: { invoicedAt: dateMatch } },
-      { $group: { _id: null, tons: tonsExpr("sacks", "bagWeightKg"), amount: { $sum: "$amount" } } },
-    ]),
-    Invoice.aggregate([
-      { $unwind: "$payments" },
-      { $match: { "payments.date": dateMatch } },
-      { $group: { _id: null, n: { $sum: "$payments.amount" } } },
-    ]),
-    DamageClaim.aggregate([{ $match: { createdAt: dateMatch } }, { $group: { _id: null, n: { $sum: "$quantity" } } }]),
-    DamageClaim.aggregate([
-      { $match: { reviewedAt: dateMatch, status: "verified" } },
-      { $group: { _id: null, n: { $sum: "$quantity" } } },
-    ]),
-  ]);
+      (select coalesce(sum(case when bag_weight_kg > 0
+                                then sacks * bag_weight_kg / 1000.0
+                                else 0 end), 0)
+         from invoices where invoiced_at >= ${start} and invoiced_at < ${end})      as tons_sold,
+
+      (select coalesce(sum(amount), 0)
+         from invoices where invoiced_at >= ${start} and invoiced_at < ${end})      as revenue_invoiced,
+
+      -- payments is a real table now, so no $unwind
+      (select coalesce(sum(amount), 0)
+         from payments where date >= ${start} and date < ${end})                    as cash_collected,
+
+      (select coalesce(sum(quantity), 0)
+         from damage_claims where created_at >= ${start} and created_at < ${end})   as damaged_claimed,
+
+      (select coalesce(sum(quantity), 0)
+         from damage_claims
+        where reviewed_at >= ${start} and reviewed_at < ${end}
+          and status = 'verified')                                                  as damaged_verified
+  `;
 
   return {
     date: eatDateLabel(start),
-    truckloads: trucks[0]?.n || 0,
-    tonsProduced: Math.round((produced[0]?.n || 0) * 1000) / 1000,
-    tonsSold: Math.round((sold[0]?.tons || 0) * 1000) / 1000,
-    revenueInvoiced: sold[0]?.amount || 0,
-    cashCollected: collected[0]?.n || 0,
-    damagedClaimed: claimed[0]?.n || 0,
-    damagedVerified: verified[0]?.n || 0,
+    truckloads: Number(r.truckloads) || 0,
+    tonsProduced: Math.round(Number(r.tons_produced) * 1000) / 1000,
+    tonsSold: Math.round(Number(r.tons_sold) * 1000) / 1000,
+    revenueInvoiced: Number(r.revenue_invoiced) || 0,
+    cashCollected: Number(r.cash_collected) || 0,
+    damagedClaimed: Number(r.damaged_claimed) || 0,
+    damagedVerified: Number(r.damaged_verified) || 0,
   };
 }
 
@@ -87,49 +101,54 @@ export async function getDailySeries(days: number, now = new Date()): Promise<Tr
   const end = eatDayStart(now);
   const start = addDays(end, -days);
 
-  // Shift by +3h so the day boundary matches Ethiopia time (EAT, UTC+3).
-  const keyed = (field: string) => ({
-    $dateToString: { format: "%Y-%m-%d", date: { $add: [`$${field}`, 3 * 3600 * 1000] } },
-  });
+  // generate_series does the zero-fill that used to be a JS Map loop, so a day
+  // with no activity is guaranteed to appear as 0 rather than go missing.
+  const rows = await sql<{ date: string; production: string; sales: string; collections: string }[]>`
+    with days as (
+      select generate_series(
+        (${start}::timestamptz at time zone ${EAT})::date,
+        (${end}::timestamptz   at time zone ${EAT})::date - 1,
+        interval '1 day'
+      )::date as d
+    ),
+    prod as (
+      select (date at time zone ${EAT})::date as d,
+             sum(case when bag_weight_kg > 0
+                      then filled_sacks * bag_weight_kg / 1000.0
+                      else 0 end) as n
+        from shift_reports
+       where date >= ${start} and date < ${end}
+       group by 1
+    ),
+    sales as (
+      select (invoiced_at at time zone ${EAT})::date as d, sum(amount) as n
+        from invoices
+       where invoiced_at >= ${start} and invoiced_at < ${end}
+       group by 1
+    ),
+    coll as (
+      select (date at time zone ${EAT})::date as d, sum(amount) as n
+        from payments
+       where date >= ${start} and date < ${end}
+       group by 1
+    )
+    select to_char(days.d, 'YYYY-MM-DD') as date,
+           coalesce(prod.n,  0) as production,
+           coalesce(sales.n, 0) as sales,
+           coalesce(coll.n,  0) as collections
+      from days
+      left join prod  on prod.d  = days.d
+      left join sales on sales.d = days.d
+      left join coll  on coll.d  = days.d
+     order by days.d
+  `;
 
-  const [production, sales, collections] = await Promise.all([
-    ShiftReport.aggregate([
-      { $match: { date: { $gte: start, $lt: end } } },
-      {
-        $group: {
-          _id: keyed("date"),
-          n: {
-            $sum: {
-              $cond: [
-                { $gt: ["$bagWeightKg", 0] },
-                { $multiply: ["$filledSacks", { $divide: ["$bagWeightKg", 1000] }] },
-                0,
-              ],
-            },
-          },
-        },
-      },
-    ]),
-    Invoice.aggregate([
-      { $match: { invoicedAt: { $gte: start, $lt: end } } },
-      { $group: { _id: keyed("invoicedAt"), n: { $sum: "$amount" } } },
-    ]),
-    Invoice.aggregate([
-      { $unwind: "$payments" },
-      { $match: { "payments.date": { $gte: start, $lt: end } } },
-      { $group: { _id: keyed("payments.date"), n: { $sum: "$payments.amount" } } },
-    ]),
-  ]);
-
-  const map = new Map<string, TrendPoint>();
-  for (let i = 0; i < days; i++) {
-    const d = eatDateLabel(addDays(start, i));
-    map.set(d, { date: d, production: 0, sales: 0, collections: 0 });
-  }
-  for (const row of production) if (map.has(row._id)) map.get(row._id)!.production = row.n;
-  for (const row of sales) if (map.has(row._id)) map.get(row._id)!.sales = row.n;
-  for (const row of collections) if (map.has(row._id)) map.get(row._id)!.collections = row.n;
-  return Array.from(map.values());
+  return rows.map((r) => ({
+    date: r.date,
+    production: Number(r.production) || 0,
+    sales: Number(r.sales) || 0,
+    collections: Number(r.collections) || 0,
+  }));
 }
 
 export function bestAndWorstDays(series: TrendPoint[], key: keyof Omit<TrendPoint, "date">) {
@@ -143,10 +162,20 @@ export function bestAndWorstDays(series: TrendPoint[], key: keyof Omit<TrendPoin
   return { best: { date: best.date, value: best[key] }, worst: { date: worst.date, value: worst[key] } };
 }
 
+/**
+ * BEHAVIOUR CHANGE (bug fix). The Mongo version built the comparison window as
+ * `getDailySeries(60, todayStart-30).slice(0, 30)`, which takes the *first* 30
+ * days of a 60-day window — i.e. days 60–90 ago — and skips days 30–60
+ * entirely. "Previous 30 days" now means the 30 days immediately before the
+ * current window, which is what the name and the UI both claim.
+ *
+ * Month-on-month percentages will therefore differ from the old dashboard.
+ * That is intended: the old ones were comparing against the wrong month.
+ */
 export async function monthOnMonth(now = new Date()) {
   const todayStart = eatDayStart(now);
-  const last30 = await getDailySeries(30, now);
-  const prev30 = await getDailySeries(60, addDays(todayStart, -30));
+  const last30 = await getDailySeries(30, now);          // [T-30, T)
+  const prev30 = await getDailySeries(30, addDays(todayStart, -30)); // [T-60, T-30)
   const sum = (s: TrendPoint[], k: keyof Omit<TrendPoint, "date">) => s.reduce((a, p) => a + p[k], 0);
   const pct = (cur: number, prev: number) => (prev === 0 ? null : Math.round(((cur - prev) / prev) * 1000) / 10);
   const cur = {
@@ -155,9 +184,9 @@ export async function monthOnMonth(now = new Date()) {
     collections: sum(last30, "collections"),
   };
   const prev = {
-    production: sum(prev30.slice(0, 30), "production"),
-    sales: sum(prev30.slice(0, 30), "sales"),
-    collections: sum(prev30.slice(0, 30), "collections"),
+    production: sum(prev30, "production"),
+    sales: sum(prev30, "sales"),
+    collections: sum(prev30, "collections"),
   };
   return {
     current: cur,
@@ -172,23 +201,53 @@ export async function monthOnMonth(now = new Date()) {
 
 /* ─────────────────────────────── Money section ────────────────────────────── */
 
-export async function receivablesAging(now = new Date()) {
-  const invoices = await Invoice.find().lean();
-  const buckets = { current: 0, d1_30: 0, d31_60: 0, d61_90: 0, d90_plus: 0 };
-  const overdueClients: { client: string; invoiceNumber: string; outstanding: number; daysOverdue: number }[] = [];
+export interface AgingBuckets {
+  current: number;
+  d1_30: number;
+  d31_60: number;
+  d61_90: number;
+  d90_plus: number;
+}
 
-  for (const inv of invoices) {
-    const paid = (inv.payments || []).reduce((a, p) => a + (p.amount || 0), 0);
-    const outstanding = inv.amount - paid;
-    if (outstanding <= 0) continue;
-    const overdue = daysBetween(new Date(inv.dueDate), now);
+export interface OverdueClient {
+  client: string;
+  invoiceNumber: string;
+  outstanding: number;
+  daysOverdue: number;
+}
+
+export async function receivablesAging(now = new Date()) {
+  // The Mongo version pulled EVERY invoice into Node and bucketed in JS — an
+  // unbounded scan that grew with the business. Net the payments off in SQL and
+  // return only what is actually outstanding.
+  const rows = await sql<{ client: string; invoice_number: string; outstanding: string; due_date: Date }[]>`
+    select i.client,
+           i.invoice_number,
+           i.due_date,
+           i.amount - coalesce((select sum(p.amount) from payments p where p.invoice_id = i.id), 0) as outstanding
+      from invoices i
+     where i.amount - coalesce((select sum(p.amount) from payments p where p.invoice_id = i.id), 0) > 0
+  `;
+
+  const buckets: AgingBuckets = { current: 0, d1_30: 0, d31_60: 0, d61_90: 0, d90_plus: 0 };
+  const overdueClients: OverdueClient[] = [];
+
+  for (const r of rows) {
+    const outstanding = Number(r.outstanding);
+    const overdue = daysBetween(new Date(r.due_date), now);
     if (overdue <= 0) buckets.current += outstanding;
     else if (overdue <= 30) buckets.d1_30 += outstanding;
     else if (overdue <= 60) buckets.d31_60 += outstanding;
     else if (overdue <= 90) buckets.d61_90 += outstanding;
     else buckets.d90_plus += outstanding;
+
     if (overdue > 0) {
-      overdueClients.push({ client: inv.client, invoiceNumber: inv.invoiceNumber, outstanding, daysOverdue: overdue });
+      overdueClients.push({
+        client: r.client,
+        invoiceNumber: r.invoice_number,
+        outstanding,
+        daysOverdue: overdue,
+      });
     }
   }
   overdueClients.sort((a, b) => b.daysOverdue - a.daysOverdue);
@@ -196,87 +255,123 @@ export async function receivablesAging(now = new Date()) {
 }
 
 export async function missingWithholding() {
-  return Invoice.find({ withholdingReceiptReceived: false, "payments.0": { $exists: true } })
-    .select("invoiceNumber client amount invoicedAt")
-    .sort({ invoicedAt: -1 })
-    .lean();
+  const rows = await sql`
+    select i.id as _id, i.invoice_number as "invoiceNumber", i.client, i.amount, i.invoiced_at as "invoicedAt"
+      from invoices i
+     where i.withholding_receipt_received = false
+       and exists (select 1 from payments p where p.invoice_id = i.id)
+     order by i.invoiced_at desc
+  `;
+  return rows.map((r) => ({ ...r, amount: Number(r.amount) }));
 }
 
 export async function pendingPurchaseRequests() {
-  return PurchaseRequest.find({ status: { $in: ["pending", "deferred"] } })
-    .sort({ createdAt: 1 })
-    .select("title amount requestedBy justification status legitimacy photoFileId createdAt")
-    .lean();
+  const rows = await sql`
+    select id as _id, title, amount, requested_by as "requestedBy", justification,
+           status, legitimacy, photo_file_id as "photoFileId", created_at as "createdAt"
+      from purchase_requests
+     where status in ('pending', 'deferred')
+     order by created_at asc
+  `;
+  return rows.map((r) => ({ ...r, amount: Number(r.amount) }));
 }
 
-/* ──────────────── Lot balance reconciliation (daily job + UI) ─────────────── */
+/* ──────────────── Lot balance reconciliation (now a view) ─────────────────── */
 
-export async function recomputeLotBalances() {
-  const lots = await BagLot.find();
-  const results = [];
-  for (const lot of lots) {
-    const [fills, counts, claims] = await Promise.all([
-      BagEvent.aggregate([
-        { $match: { lotId: lot._id, type: "filled" } },
-        { $group: { _id: null, n: { $sum: "$quantity" } } },
-      ]),
-      BagEvent.find({ lotId: lot._id, type: "stock_count" }).sort({ date: -1 }).limit(1).lean(),
-      DamageClaim.find({ lotId: lot._id }).lean(),
-    ]);
-    const filled = fills[0]?.n || 0;
-    const damagedVerified = claims.filter((c) => c.status === "verified").reduce((a, c) => a + c.quantity, 0);
-    const damagedPending = claims
-      .filter((c) => c.status === "pending" || c.status === "cosign_required")
-      .reduce((a, c) => a + c.quantity, 0);
-    const disposed = claims.filter((c) => c.disposal?.action).reduce((a, c) => a + c.quantity, 0);
+export interface LotBalance {
+  lotId: string;
+  lotCode: string;
+  supplier: string;
+  received: number;
+  filled: number;
+  damagedVerified: number;
+  damagedPending: number;
+  disposed: number;
+  inStock: number;
+  gap: number;
+}
 
-    // If a physical stock count exists, trust it; otherwise derive book stock.
-    const bookStock = lot.quantity - filled - damagedVerified;
-    const inStock = counts[0] ? counts[0].quantity : bookStock;
-    const gap = lot.quantity - filled - damagedVerified - inStock;
+/**
+ * Reads v_lot_balances. This replaces recomputeLotBalances(), which was an N+1
+ * loop that wrote an embedded sub-document and had to be re-invoked from five
+ * different write paths — if any of them forgot, the stored balance went stale
+ * and nothing noticed. A view cannot be stale.
+ */
+export async function getLotBalances(): Promise<LotBalance[]> {
+  const rows = await sql`
+    select lot_id, lot_code, supplier, received, filled,
+           damaged_verified, damaged_pending, disposed, in_stock, gap
+      from v_lot_balances
+     order by lot_code
+  `;
+  return rows.map((r) => ({
+    lotId: String(r.lot_id),
+    lotCode: r.lot_code,
+    supplier: r.supplier,
+    received: Number(r.received),
+    filled: Number(r.filled),
+    damagedVerified: Number(r.damaged_verified),
+    damagedPending: Number(r.damaged_pending),
+    disposed: Number(r.disposed),
+    inStock: Number(r.in_stock),
+    gap: Number(r.gap),
+  }));
+}
 
-    lot.balance = {
-      received: lot.quantity,
-      filled,
-      damagedVerified,
-      damagedPending,
-      disposed,
-      inStock,
-      gap,
-      computedAt: new Date(),
-    };
-    await lot.save();
-    results.push({ lotCode: lot.lotCode, gap });
-  }
-  return results;
+/** Lots whose bags don't add up — possible theft or unrecorded use. */
+export async function getLotGaps(): Promise<LotBalance[]> {
+  return (await getLotBalances()).filter((l) => l.gap > 0);
 }
 
 /* ───────────── Statistical tripwires: worker / shift / supplier ───────────── */
 
+export interface TripwireRow {
+  key: string;
+  qty: number;
+  vsMeanX: number;
+  flagged: boolean;
+}
+
 export async function damageTripwires(now = new Date()) {
   const since = addDays(eatDayStart(now), -90);
-  const claims = await DamageClaim.find({ createdAt: { $gte: since } })
-    .populate<{ lotId: { supplier: string; lotCode: string } }>("lotId", "supplier lotCode")
-    .lean();
 
-  const tally = (keyFn: (c: (typeof claims)[number]) => string | undefined) => {
-    const m = new Map<string, number>();
-    for (const c of claims) {
-      const k = keyFn(c);
-      if (!k) continue;
-      m.set(k, (m.get(k) || 0) + c.quantity);
-    }
-    const entries = Array.from(m.entries()).map(([key, qty]) => ({ key, qty }));
+  // Grouping happens in SQL; the mean / 2× flagging stays in JS because it is
+  // a judgement rule rather than a query.
+  const [byWorkerRows, byShiftRows, bySupplierRows] = await Promise.all([
+    sql<{ key: string; qty: string }[]>`
+      select worker as key, sum(quantity) as qty
+        from damage_claims
+       where created_at >= ${since} and worker is not null
+       group by worker`,
+    sql<{ key: string; qty: string }[]>`
+      select shift as key, sum(quantity) as qty
+        from damage_claims
+       where created_at >= ${since} and shift is not null
+       group by shift`,
+    sql<{ key: string; qty: string }[]>`
+      select l.supplier || ' / ' || l.lot_code as key, sum(c.quantity) as qty
+        from damage_claims c
+        join bag_lots l on l.id = c.lot_id
+       where c.created_at >= ${since}
+       group by 1`,
+  ]);
+
+  const rank = (rows: { key: string; qty: string }[]): TripwireRow[] => {
+    const entries = rows.map((r) => ({ key: r.key, qty: Number(r.qty) }));
     const mean = entries.length ? entries.reduce((a, e) => a + e.qty, 0) / entries.length : 0;
     return entries
-      .map((e) => ({ ...e, vsMeanX: mean > 0 ? Math.round((e.qty / mean) * 10) / 10 : 0, flagged: mean > 0 && e.qty >= mean * 2 }))
+      .map((e) => ({
+        ...e,
+        vsMeanX: mean > 0 ? Math.round((e.qty / mean) * 10) / 10 : 0,
+        flagged: mean > 0 && e.qty >= mean * 2,
+      }))
       .sort((a, b) => b.qty - a.qty);
   };
 
   return {
-    byWorker: tally((c) => c.worker),
-    byShift: tally((c) => c.shift),
-    bySupplierLot: tally((c) => (c.lotId ? `${c.lotId.supplier} / ${c.lotId.lotCode}` : undefined)),
+    byWorker: rank(byWorkerRows),
+    byShift: rank(byShiftRows),
+    bySupplierLot: rank(bySupplierRows),
   };
 }
 
@@ -285,15 +380,18 @@ export async function damageTripwires(now = new Date()) {
 export async function detectExceptions(now = new Date()): Promise<string[]> {
   const exceptions: string[] = [];
   const { start, end } = yesterdayRange(now);
-
-  // 1. Bag damage rate vs monthly average
   const monthStart = addDays(eatDayStart(now), -30);
-  const [yClaims, mClaims] = await Promise.all([
-    DamageClaim.aggregate([{ $match: { createdAt: { $gte: start, $lt: end } } }, { $group: { _id: null, n: { $sum: "$quantity" } } }]),
-    DamageClaim.aggregate([{ $match: { createdAt: { $gte: monthStart, $lt: start } } }, { $group: { _id: null, n: { $sum: "$quantity" } } }]),
-  ]);
-  const yDam = yClaims[0]?.n || 0;
-  const avgDaily = (mClaims[0]?.n || 0) / 29;
+
+  // 1. Bag damage rate vs the trailing monthly average
+  const [dam] = await sql<{ yesterday: string; month: string }[]>`
+    select
+      (select coalesce(sum(quantity),0) from damage_claims
+        where created_at >= ${start} and created_at < ${end})       as yesterday,
+      (select coalesce(sum(quantity),0) from damage_claims
+        where created_at >= ${monthStart} and created_at < ${start}) as month
+  `;
+  const yDam = Number(dam.yesterday) || 0;
+  const avgDaily = (Number(dam.month) || 0) / 29;
   if (avgDaily > 0 && yDam >= avgDaily * 3) {
     exceptions.push(
       `Bag damage rate was ${(yDam / avgDaily).toFixed(1)}× the monthly average yesterday (${yDam} bags claimed vs ~${avgDaily.toFixed(1)}/day).`
@@ -304,41 +402,52 @@ export async function detectExceptions(now = new Date()): Promise<string[]> {
   const { overdueClients } = await receivablesAging(now);
   for (const c of overdueClients) {
     if (c.daysOverdue >= 30 && c.daysOverdue <= 31) {
-      exceptions.push(`${c.client} crossed 30 days overdue on invoice ${c.invoiceNumber} (ETB ${Math.round(c.outstanding).toLocaleString()} outstanding).`);
+      exceptions.push(
+        `${c.client} crossed 30 days overdue on invoice ${c.invoiceNumber} (ETB ${Math.round(c.outstanding).toLocaleString()} outstanding).`
+      );
     }
   }
   const over60 = overdueClients.filter((c) => c.daysOverdue > 60);
   if (over60.length > 0) {
     exceptions.push(
-      `${over60.length} invoice(s) are more than 60 days overdue, totalling ETB ${Math.round(over60.reduce((a, c) => a + c.outstanding, 0)).toLocaleString()}.`
+      `${over60.length} invoice(s) are more than 60 days overdue, totalling ETB ${Math.round(
+        over60.reduce((a, c) => a + c.outstanding, 0)
+      ).toLocaleString()}.`
     );
   }
 
   // 3. Poor stone quality at the gate yesterday
-  const badLoads = await StoneDelivery.find({ date: { $gte: start, $lt: end }, qualityGrade: "dark/weathered" }).lean();
+  const badLoads = await sql<{ truck_plate: string }[]>`
+    select truck_plate from stone_deliveries
+     where date >= ${start} and date < ${end} and quality_grade = 'dark/weathered'
+  `;
   for (const l of badLoads) {
-    exceptions.push(`Truck ${l.truckPlate}'s load scored dark/weathered at the gate.`);
+    exceptions.push(`Truck ${l.truck_plate}'s load scored dark/weathered at the gate.`);
   }
 
   // 4. Lot balance gaps (possible theft / unrecorded use)
-  const gapLots = await BagLot.find({ "balance.gap": { $gt: 0 } }).lean();
-  for (const lot of gapLots) {
-    exceptions.push(`Lot ${lot.lotCode} (${lot.supplier}) has ${lot.balance?.gap} unaccounted bags.`);
+  for (const lot of await getLotGaps()) {
+    exceptions.push(`Lot ${lot.lotCode} (${lot.supplier}) has ${lot.gap} unaccounted bags.`);
   }
 
   // 5. Suspicious damage claims awaiting review
-  const suspicious = await DamageClaim.countDocuments({
-    status: { $in: ["pending", "cosign_required"] },
-    flags: { $in: ["suspicious_image", "duplicate_photo"] },
-  });
-  if (suspicious > 0) exceptions.push(`${suspicious} damage claim(s) flagged as suspicious are awaiting review.`);
+  const [{ n: suspicious }] = await sql<{ n: string }[]>`
+    select count(*) as n from damage_claims
+     where status in ('pending','cosign_required')
+       and flags && array['suspicious_image','duplicate_photo']
+  `;
+  if (Number(suspicious) > 0) {
+    exceptions.push(`${suspicious} damage claim(s) flagged as suspicious are awaiting review.`);
+  }
 
   // 6. Stale purchase requests
-  const stalePR = await PurchaseRequest.countDocuments({
-    status: "pending",
-    createdAt: { $lt: addDays(now, -3) },
-  });
-  if (stalePR > 0) exceptions.push(`${stalePR} purchase request(s) have been waiting for approval for over 3 days.`);
+  const [{ n: stalePR }] = await sql<{ n: string }[]>`
+    select count(*) as n from purchase_requests
+     where status = 'pending' and created_at < ${addDays(now, -3)}
+  `;
+  if (Number(stalePR) > 0) {
+    exceptions.push(`${stalePR} purchase request(s) have been waiting for approval for over 3 days.`);
+  }
 
   return exceptions;
 }

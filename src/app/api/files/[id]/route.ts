@@ -1,17 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
-import { dbConnect } from "@/lib/db";
-import { StoredFile } from "@/lib/models";
+import { getFileRow, getFileBytesByPath } from "@/lib/storage";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
-  await dbConnect();
-  const file = await StoredFile.findById(params.id).lean();
-  if (!file) return NextResponse.json({ error: "not found" }, { status: 404 });
-  return new NextResponse(Buffer.from(file.data as unknown as Uint8Array), {
-    headers: {
-      "Content-Type": file.contentType,
-      "Cache-Control": "private, max-age=31536000, immutable",
-    },
-  });
+  const row = await getFileRow(params.id);
+  if (!row) return NextResponse.json({ error: "not found" }, { status: 404 });
+
+  try {
+    const bytes = await getFileBytesByPath(row.storage_path);
+    return new NextResponse(new Uint8Array(bytes), {
+      headers: {
+        "Content-Type": row.content_type,
+        "Cache-Control": "private, max-age=31536000, immutable",
+      },
+    });
+  } catch {
+    return NextResponse.json({ error: "not found" }, { status: 404 });
+  }
 }

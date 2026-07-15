@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import { dbConnect } from "@/lib/db";
 import { companyChat } from "@/lib/chat";
 import { isOpenAIConfigured } from "@/lib/llm";
 
@@ -8,13 +7,6 @@ export const maxDuration = 60;
 
 function chatErrorMessage(e: unknown) {
   const message = e instanceof Error ? e.message : String(e);
-  if (message.includes("MongoDB Atlas") || message.includes("IP") || message.includes("whitelist")) {
-    return (
-      "MongoDB Atlas is blocking this deployment from connecting. The dashboard AI can read all company data after " +
-      "MONGODB_URI is reachable from Vercel. In MongoDB Atlas, open Network Access and allow Vercel serverless access " +
-      "(commonly 0.0.0.0/0 for Vercel serverless, or a private/static egress setup)."
-    );
-  }
   return message || "AI chat failed.";
 }
 
@@ -32,7 +24,6 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    await dbConnect();
     const reply = await companyChat(
       messages
         .filter((m) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string")

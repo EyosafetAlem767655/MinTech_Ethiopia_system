@@ -1,4 +1,4 @@
-import { Brief } from "@/lib/models";
+import sql, { jsonb } from "@/lib/sql";
 import { etb, yesterdayRange, eatDateLabel } from "@/lib/dates";
 import { writeBriefNarrative } from "@/lib/llm";
 import {
@@ -7,21 +7,19 @@ import {
   monthOnMonth,
   pendingPurchaseRequests,
   receivablesAging,
-  recomputeLotBalances,
 } from "@/lib/metrics";
 import { sendBriefMessage } from "@/lib/telegram";
 import { broadcastPush } from "@/lib/push";
 
 /**
- * Assembles the morning brief: recomputes lot balances (the daily job),
- * pulls yesterday's numbers from the database, detects exceptions, asks the
- * LLM for the narrative (words only — figures come straight from queries),
- * then pushes via Telegram + Web Push. Runs once a day from Vercel Cron.
+ * Assembles the morning brief: pulls yesterday's numbers, detects exceptions,
+ * asks the LLM for the narrative (words only — figures come straight from
+ * queries), then pushes via Telegram + Web Push. Runs daily from Vercel Cron.
+ *
+ * The old lot-balance reconciliation step is gone: balances are now derived by
+ * the v_lot_balances view, so there is nothing to recompute.
  */
 export async function assembleAndSendBrief(now = new Date()) {
-  // Daily reconciliation job (kept inside the single Hobby-tier cron run).
-  await recomputeLotBalances();
-
   const { start } = yesterdayRange(now);
   const dateLabel = eatDateLabel(start);
 
@@ -82,19 +80,32 @@ export async function assembleAndSendBrief(now = new Date()) {
     tag: `brief-${dateLabel}`,
   });
 
-  const doc = await Brief.findOneAndUpdate(
-    { date: dateLabel },
-    {
-      date: dateLabel,
-      fiveLines,
-      exceptions,
-      narrative,
-      numbers: numbers as unknown as Record<string, number>,
-      sentTelegram,
-      sentPush: pushRes.sent > 0,
-    },
-    { upsert: true, new: true }
-  );
+  const [doc] = await sql<{ id: string }[]>`
+    insert into briefs (date, five_lines, exceptions, narrative, numbers, sent_telegram, sent_push)
+    values (${dateLabel}, ${fiveLines}, ${exceptions}, ${narrative},
+            ${jsonb(numbers as unknown as Record<string, unknown>)},
+            ${sentTelegram}, ${pushRes.sent > 0})
+    on conflict (date) do update set
+      five_lines    = excluded.five_lines,
+      exceptions    = excluded.exceptions,
+      narrative     = excluded.narrative,
+      numbers       = excluded.numbers,
+      sent_telegram = excluded.sent_telegram,
+      sent_push     = excluded.sent_push,
+      updated_at    = now()
+    returning id
+  `;
 
-  return { date: dateLabel, exceptions, fiveLines, narrative, sentTelegram, push: pushRes, briefId: doc._id };
+  return { date: dateLabel, exceptions, fiveLines, narrative, sentTelegram, push: pushRes, briefId: doc.id };
+}
+
+export async function latestBrief() {
+  const rows = await sql`
+    select id as _id, date, five_lines as "fiveLines", exceptions, narrative, numbers,
+           sent_telegram as "sentTelegram", sent_push as "sentPush", created_at as "createdAt"
+      from briefs
+     order by date desc
+     limit 1
+  `;
+  return rows[0] ?? null;
 }

@@ -1,18 +1,30 @@
 import { NextRequest, NextResponse } from "next/server";
-import { dbConnect } from "@/lib/db";
-import { BagLot, StoredFile } from "@/lib/models";
+import sql from "@/lib/sql";
+import { putFile } from "@/lib/storage";
 
 export const dynamic = "force-dynamic";
 
+// Lots with their derived balance (from v_lot_balances) nested back in, so the
+// bags page keeps reading `lot.balance.gap` etc. without any change.
 export async function GET() {
-  await dbConnect();
-  const lots = await BagLot.find().sort({ receivedAt: -1 }).lean();
+  const lots = await sql`
+    select l.id as _id, l.lot_code as "lotCode", l.supplier, l.bag_type as "bagType",
+           l.quantity, l.delivery_note as "deliveryNote", l.handlers,
+           l.received_at as "receivedAt",
+           jsonb_build_object(
+             'received', b.received, 'filled', b.filled,
+             'damagedVerified', b.damaged_verified, 'damagedPending', b.damaged_pending,
+             'disposed', b.disposed, 'inStock', b.in_stock, 'gap', b.gap
+           ) as balance
+      from bag_lots l
+      join v_lot_balances b on b.lot_id = l.id
+     order by l.received_at desc
+  `;
   return NextResponse.json(lots);
 }
 
 /** Supervisor registers a bag lot: supplier, quantity, bag type, photos, delivery note. */
 export async function POST(req: NextRequest) {
-  await dbConnect();
   const form = await req.formData();
   const supplier = String(form.get("supplier") || "");
   const bagType = String(form.get("bagType") || "");
@@ -26,40 +38,27 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const photoIds = [];
+  const photoIds: string[] = [];
   for (const entry of form.getAll("photos")) {
     const file = entry as File;
     if (!file || file.size === 0) continue;
-    const stored = await StoredFile.create({
-      data: Buffer.from(await file.arrayBuffer()),
-      contentType: file.type || "image/jpeg",
-      filename: file.name,
+    const stored = await putFile(Buffer.from(await file.arrayBuffer()), file.type || "image/jpeg", {
       kind: "lot_photo",
+      filename: file.name,
     });
-    photoIds.push(stored._id);
+    photoIds.push(stored.id);
   }
 
-  const count = await BagLot.countDocuments();
-  const lot = await BagLot.create({
-    lotCode: `LOT-${new Date().getFullYear()}-${String(count + 1).padStart(4, "0")}`,
-    supplier,
-    bagType,
-    quantity,
-    deliveryNote,
-    photoIds,
-    registeredBy,
-    handlers: registeredBy ? [registeredBy] : [],
-    receivedAt: new Date(),
-    balance: {
-      received: quantity,
-      filled: 0,
-      damagedVerified: 0,
-      damagedPending: 0,
-      disposed: 0,
-      inStock: quantity,
-      gap: 0,
-      computedAt: new Date(),
-    },
-  });
-  return NextResponse.json({ ok: true, id: lot._id, lotCode: lot.lotCode });
+  // lot_code from a sequence — the DB guarantees uniqueness, no count()+1 race.
+  const [lot] = await sql<{ id: string; lot_code: string }[]>`
+    insert into bag_lots (lot_code, supplier, bag_type, quantity, delivery_note, registered_by, handlers, photo_ids)
+    values (
+      'LOT-' || extract(year from now())::int || '-' || lpad(nextval('bag_lot_code_seq')::text, 4, '0'),
+      ${supplier}, ${bagType}, ${quantity}, ${deliveryNote}, ${registeredBy || null},
+      ${registeredBy ? [registeredBy] : []}, ${photoIds}
+    )
+    returning id, lot_code
+  `;
+
+  return NextResponse.json({ ok: true, id: lot.id, lotCode: lot.lot_code });
 }

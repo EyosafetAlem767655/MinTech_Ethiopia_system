@@ -1,4 +1,4 @@
-import { Invoice, Receipt } from "@/lib/models";
+import sql from "@/lib/sql";
 
 const EAT_OFFSET_MS = 3 * 60 * 60 * 1000;
 
@@ -16,51 +16,69 @@ export function eatMonthRange(month = currentEatMonth()) {
 
 export async function monthlySalesReport(month = currentEatMonth()) {
   const { start, end } = eatMonthRange(month);
-  const dateMatch = { $gte: start, $lt: end };
 
-  const [sales, collections, expenseRows, clientRows, categoryRows] = await Promise.all([
-    Invoice.aggregate([
-      { $match: { invoicedAt: dateMatch } },
-      { $group: { _id: null, sacks: { $sum: "$sacks" }, amount: { $sum: "$amount" }, count: { $sum: 1 } } },
-    ]),
-    Invoice.aggregate([
-      { $unwind: "$payments" },
-      { $match: { "payments.date": dateMatch } },
-      { $group: { _id: null, amount: { $sum: "$payments.amount" }, count: { $sum: 1 } } },
-    ]),
-    Receipt.aggregate([
-      { $match: { receiptDate: dateMatch } },
-      { $group: { _id: null, amount: { $sum: "$amount" }, count: { $sum: 1 } } },
-    ]),
-    Invoice.aggregate([
-      { $match: { invoicedAt: dateMatch } },
-      { $group: { _id: "$client", amount: { $sum: "$amount" }, sacks: { $sum: "$sacks" } } },
-      { $sort: { amount: -1 } },
-      { $limit: 6 },
-    ]),
-    Receipt.aggregate([
-      { $match: { receiptDate: dateMatch } },
-      { $group: { _id: { $ifNull: ["$category", "Uncategorized"] }, amount: { $sum: "$amount" }, count: { $sum: 1 } } },
-      { $sort: { amount: -1 } },
-      { $limit: 6 },
-    ]),
+  const [totals, clientRows, categoryRows] = await Promise.all([
+    // Five Mongo pipelines → one round trip. `payments` being a table means
+    // cash collected no longer needs an $unwind.
+    sql<
+      {
+        sacks: string; revenue: string; invoice_count: string;
+        collected: string; payment_count: string;
+        expenses: string; receipt_count: string;
+      }[]
+    >`
+      select
+        (select coalesce(sum(sacks),0)  from invoices where invoiced_at >= ${start} and invoiced_at < ${end}) as sacks,
+        (select coalesce(sum(amount),0) from invoices where invoiced_at >= ${start} and invoiced_at < ${end}) as revenue,
+        (select count(*)                from invoices where invoiced_at >= ${start} and invoiced_at < ${end}) as invoice_count,
+        (select coalesce(sum(amount),0) from payments where date >= ${start} and date < ${end})               as collected,
+        (select count(*)                from payments where date >= ${start} and date < ${end})               as payment_count,
+        (select coalesce(sum(amount),0) from receipts where receipt_date >= ${start} and receipt_date < ${end}) as expenses,
+        (select count(*)                from receipts where receipt_date >= ${start} and receipt_date < ${end}) as receipt_count
+    `,
+    sql<{ client: string; amount: string; sacks: string }[]>`
+      select client, sum(amount) as amount, sum(sacks) as sacks
+        from invoices
+       where invoiced_at >= ${start} and invoiced_at < ${end}
+       group by client
+       order by amount desc
+       limit 6
+    `,
+    sql<{ category: string; amount: string; count: string }[]>`
+      select coalesce(category, 'Uncategorized') as category,
+             sum(amount) as amount, count(*) as count
+        from receipts
+       where receipt_date >= ${start} and receipt_date < ${end}
+       group by 1
+       order by amount desc
+       limit 6
+    `,
   ]);
 
-  const revenueInvoiced = sales[0]?.amount || 0;
-  const cashCollected = collections[0]?.amount || 0;
-  const receiptExpenses = expenseRows[0]?.amount || 0;
+  const t = totals[0];
+  const revenueInvoiced = Number(t.revenue) || 0;
+  const cashCollected = Number(t.collected) || 0;
+  const receiptExpenses = Number(t.expenses) || 0;
 
   return {
     month,
-    sacksSold: sales[0]?.sacks || 0,
+    sacksSold: Number(t.sacks) || 0,
     revenueInvoiced,
     cashCollected,
     receiptExpenses,
     netCash: cashCollected - receiptExpenses,
-    invoiceCount: sales[0]?.count || 0,
-    receiptCount: expenseRows[0]?.count || 0,
-    paymentCount: collections[0]?.count || 0,
-    topClients: clientRows.map((r) => ({ client: r._id || "Unknown", amount: r.amount || 0, sacks: r.sacks || 0 })),
-    expenseCategories: categoryRows.map((r) => ({ category: r._id || "Uncategorized", amount: r.amount || 0, count: r.count || 0 })),
+    invoiceCount: Number(t.invoice_count) || 0,
+    receiptCount: Number(t.receipt_count) || 0,
+    paymentCount: Number(t.payment_count) || 0,
+    topClients: clientRows.map((r) => ({
+      client: r.client || "Unknown",
+      amount: Number(r.amount) || 0,
+      sacks: Number(r.sacks) || 0,
+    })),
+    expenseCategories: categoryRows.map((r) => ({
+      category: r.category || "Uncategorized",
+      amount: Number(r.amount) || 0,
+      count: Number(r.count) || 0,
+    })),
   };
 }

@@ -1,4 +1,4 @@
-import { DailyOpsReport, type IDailyOpsReport } from "@/lib/models";
+import sql, { jsonb } from "@/lib/sql";
 
 export interface ParsedDayEntry {
   dateLabel: string;
@@ -55,7 +55,6 @@ export function parseOpsReportText(text: string): ParsedDayEntry[] {
   let section: Section = null;
 
   for (const line of lines) {
-    // Check for date
     const dateInfo = parseDateLabel(line);
     if (dateInfo) {
       currentLabel = dateInfo.label;
@@ -76,15 +75,12 @@ export function parseOpsReportText(text: string): ParsedDayEntry[] {
     if (!currentLabel) continue;
     const entry = entriesMap.get(currentLabel)!;
 
-    // Detect section headers
-    const lower = line.toLowerCase();
     if (/^delivered/i.test(line)) { section = "delivered"; continue; }
     if (/^received/i.test(line)) { section = "received"; continue; }
     if (/^stock/i.test(line)) { section = "stock"; continue; }
     if (/25\s*kg\s*bag/i.test(line)) { section = "bags25"; continue; }
     if (/40\s*kg\s*bag/i.test(line)) { section = "bags40"; continue; }
 
-    // Parse key=value pairs in current section
     const pairs = extractKV(line);
     if (pairs.length === 0 || section === null) continue;
 
@@ -118,44 +114,54 @@ export async function ingestOpsReport(
   let updated = 0;
 
   for (const entry of entries) {
-    const existing = await DailyOpsReport.findOne({ dateLabel: entry.dateLabel });
-    if (existing) {
-      // Merge: only overwrite sections that are present in the new entry
-      if (Object.keys(entry.delivered).length) existing.delivered = { ...(existing.delivered || {}), ...entry.delivered };
-      if (Object.keys(entry.received).length) existing.received = { ...(existing.received || {}), ...entry.received };
-      if (Object.keys(entry.stock).length) existing.stock = { ...(existing.stock || {}), ...entry.stock };
-      if (Object.keys(entry.bags.kg25).length) {
-        existing.bags = existing.bags || {};
-        existing.bags.kg25 = { ...(existing.bags.kg25 || {}), ...entry.bags.kg25 };
-      }
-      if (Object.keys(entry.bags.kg40).length) {
-        existing.bags = existing.bags || {};
-        existing.bags.kg40 = { ...(existing.bags.kg40 || {}), ...entry.bags.kg40 };
-      }
-      existing.markModified("delivered");
-      existing.markModified("received");
-      existing.markModified("stock");
-      existing.markModified("bags");
-      await existing.save();
-      updated++;
-    } else {
-      await DailyOpsReport.create({
-        dateLabel: entry.dateLabel,
-        date: entry.date,
-        reportedBy,
-        delivered: Object.keys(entry.delivered).length ? entry.delivered : undefined,
-        received: Object.keys(entry.received).length ? entry.received : undefined,
-        stock: Object.keys(entry.stock).length ? entry.stock : undefined,
-        bags:
-          Object.keys(entry.bags.kg25).length || Object.keys(entry.bags.kg40).length
-            ? entry.bags
-            : undefined,
-        rawText: text.slice(0, 500),
-        source: "telegram",
-      });
-      saved++;
-    }
+    // The Mongo version did findOne → merge in JS → markModified ×4 → save,
+    // a check-then-act race guarded only by the unique index. Here the merge is
+    // a single atomic statement: `||` concatenates jsonb, so a section absent
+    // from this paste ('{}') leaves the stored one untouched, which reproduces
+    // the old "only overwrite sections present in the new entry" rule.
+    const bags: Record<string, unknown> = {};
+    if (Object.keys(entry.bags.kg25).length) bags.kg25 = entry.bags.kg25;
+    if (Object.keys(entry.bags.kg40).length) bags.kg40 = entry.bags.kg40;
+
+    const [row] = await sql<{ inserted: boolean }[]>`
+      insert into daily_ops_reports
+        (date_label, date, reported_by, delivered, received, stock, bags, raw_text, source)
+      values
+        (${entry.dateLabel}, ${entry.date}, ${reportedBy},
+         ${jsonb(entry.delivered)}, ${jsonb(entry.received)}, ${jsonb(entry.stock)},
+         ${jsonb(bags)}, ${text.slice(0, 500)}, 'telegram')
+      on conflict (date_label) do update set
+        -- These three are flat maps, so a shallow jsonb merge is exactly right:
+        -- keys absent from this paste keep their stored values.
+        delivered = daily_ops_reports.delivered || excluded.delivered,
+        received  = daily_ops_reports.received  || excluded.received,
+        stock     = daily_ops_reports.stock     || excluded.stock,
+        -- bags is nested one level deeper. A shallow merge would let a paste
+        -- containing only 25kg figures replace the whole kg25 object (dropping
+        -- previously-recorded product codes), so merge each weight class.
+        bags = jsonb_build_object(
+          'kg25', coalesce(daily_ops_reports.bags -> 'kg25', '{}'::jsonb)
+                    || coalesce(excluded.bags -> 'kg25', '{}'::jsonb),
+          'kg40', coalesce(daily_ops_reports.bags -> 'kg40', '{}'::jsonb)
+                    || coalesce(excluded.bags -> 'kg40', '{}'::jsonb)
+        ),
+        updated_at = now()
+      returning (xmax = 0) as inserted
+    `;
+    if (row.inserted) saved++;
+    else updated++;
   }
 
   return { saved, updated, entries };
+}
+
+export async function recentOpsReports(days = 90) {
+  const cutoff = new Date(Date.now() - days * 86400000);
+  return sql`
+    select id as _id, date_label as "dateLabel", date, reported_by as "reportedBy",
+           delivered, received, stock, bags, source, created_at as "createdAt"
+      from daily_ops_reports
+     where date >= ${cutoff}
+     order by date asc
+  `;
 }

@@ -9,6 +9,7 @@ const items = [
   { href: "/bags", label: "Bags", icon: "🛡" },
   { href: "/receipts", label: "Reports", icon: "📊" },
   { href: "/chat", label: "AI", icon: "💬" },
+  { href: "/settings", label: "Settings", icon: "⚙️" },
 ];
 
 export default function BottomNav() {
@@ -16,7 +17,7 @@ export default function BottomNav() {
   if (pathname === "/login") return null;
   return (
     <nav className="fixed bottom-0 inset-x-0 z-50 glass border-t border-clay-100 pb-[env(safe-area-inset-bottom)]">
-      <div className="max-w-lg mx-auto grid grid-cols-5">
+      <div className="max-w-lg mx-auto grid grid-cols-6">
         {items.map((it) => {
           const active = pathname === it.href || (it.href !== "/" && pathname.startsWith(it.href));
           return (

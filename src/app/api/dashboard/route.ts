@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
-import { dbConnect } from "@/lib/db";
-import { Brief, BagLot, DamageClaim } from "@/lib/models";
+import sql from "@/lib/sql";
+import { latestBrief as fetchLatestBrief } from "@/lib/brief";
 import {
   bestAndWorstDays,
   damageTripwires,
   detectExceptions,
   getDailySeries,
+  getLotGaps,
   getYesterdayNumbers,
   missingWithholding,
   monthOnMonth,
@@ -17,8 +18,6 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 30;
 
 export async function GET() {
-  await dbConnect();
-
   const [
     yesterday,
     exceptions,
@@ -31,7 +30,7 @@ export async function GET() {
     prs,
     latestBrief,
     flaggedLots,
-    pendingClaims,
+    pendingClaimsRows,
     tripwires,
   ] = await Promise.all([
     getYesterdayNumbers(),
@@ -43,11 +42,12 @@ export async function GET() {
     receivablesAging(),
     missingWithholding(),
     pendingPurchaseRequests(),
-    Brief.findOne().sort({ date: -1 }).lean(),
-    BagLot.find({ "balance.gap": { $gt: 0 } }).select("lotCode supplier balance handlers").lean(),
-    DamageClaim.countDocuments({ status: { $in: ["pending", "cosign_required"] } }),
+    fetchLatestBrief(),
+    getLotGaps(),
+    sql<{ n: string }[]>`select count(*) as n from damage_claims where status in ('pending','cosign_required')`,
     damageTripwires(),
   ]);
+  const pendingClaims = Number(pendingClaimsRows[0]?.n) || 0;
 
   return NextResponse.json({
     yesterday,

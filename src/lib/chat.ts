@@ -9,7 +9,8 @@ import {
   pendingPurchaseRequests,
   receivablesAging,
 } from "@/lib/metrics";
-import { BagLot, Brief, DamageClaim, Invoice, PurchaseRequest, Receipt, ShiftReport, StoneDelivery } from "@/lib/models";
+import sql from "@/lib/sql";
+import { getLotBalances } from "@/lib/metrics";
 
 /**
  * Company chatbot with full data access via tool-calling. The model decides
@@ -101,8 +102,11 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<unk
     }
     case "get_bag_control": {
       const [lots, claims, tripwires] = await Promise.all([
-        BagLot.find().select("-photoIds").sort({ receivedAt: -1 }).limit(30).lean(),
-        DamageClaim.find().select("-photos.exifCheck").sort({ createdAt: -1 }).limit(30).lean(),
+        getLotBalances(),
+        sql`
+          select c.id, c.quantity, c.status, c.worker, c.flags, c.created_at,
+                 (select jsonb_agg(jsonb_build_object('ai', p.ai)) from claim_photos p where p.claim_id = c.id) as photos
+            from damage_claims c order by c.created_at desc limit 30`,
         damageTripwires(),
       ]);
       return { lots, recentClaims: claims, tripwires };
@@ -110,24 +114,25 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<unk
     case "search_records": {
       const limit = Math.min(Number(args.limit) || 20, 50);
       switch (args.collection) {
-        case "invoices": {
-          const q = args.client ? { client: { $regex: String(args.client), $options: "i" } } : {};
-          return Invoice.find(q).sort({ invoicedAt: -1 }).limit(limit).lean();
-        }
+        case "invoices":
+          // Parameterised ILIKE — no unescaped input into a regex.
+          return args.client
+            ? sql`select * from invoices where client ilike '%' || ${String(args.client)} || '%' order by invoiced_at desc limit ${limit}`
+            : sql`select * from invoices order by invoiced_at desc limit ${limit}`;
         case "stone_deliveries":
-          return StoneDelivery.find().sort({ date: -1 }).limit(limit).lean();
+          return sql`select * from stone_deliveries order by date desc limit ${limit}`;
         case "shift_reports":
-          return ShiftReport.find().sort({ date: -1 }).limit(limit).lean();
+          return sql`select * from shift_reports order by date desc limit ${limit}`;
         case "receipts":
-          return Receipt.find().sort({ createdAt: -1 }).limit(limit).lean();
+          return sql`select * from receipts order by created_at desc limit ${limit}`;
         case "damage_claims":
-          return DamageClaim.find().select("-photos.exifCheck").sort({ createdAt: -1 }).limit(limit).lean();
+          return sql`select * from damage_claims order by created_at desc limit ${limit}`;
         case "bag_lots":
-          return BagLot.find().select("-photoIds").sort({ receivedAt: -1 }).limit(limit).lean();
+          return sql`select * from bag_lots order by received_at desc limit ${limit}`;
         case "purchase_requests":
-          return PurchaseRequest.find().sort({ createdAt: -1 }).limit(limit).lean();
+          return sql`select * from purchase_requests order by created_at desc limit ${limit}`;
         case "briefs":
-          return Brief.find().sort({ createdAt: -1 }).limit(limit).lean();
+          return sql`select * from briefs order by created_at desc limit ${limit}`;
       }
       return { error: "unknown collection" };
     }

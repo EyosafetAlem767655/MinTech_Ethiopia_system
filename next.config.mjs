@@ -1,7 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   experimental: {
-    serverComponentsExternalPackages: ["sharp", "pdf-lib", "web-push", "mongoose"],
+    serverComponentsExternalPackages: ["sharp", "pdf-lib", "web-push", "postgres"],
   },
   async headers() {
     return [

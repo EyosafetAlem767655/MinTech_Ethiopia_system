@@ -2,10 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { AUTH_COOKIE, authToken, isAuthDisabled } from "@/lib/auth";
 
 // Routes reachable without the dashboard password.
+// Keep these as specific as possible: a bare "/api/telegram" prefix would also
+// expose any future "/api/telegram-*" route (e.g. user management).
 const PUBLIC_PREFIXES = [
   "/login",
   "/api/login",
-  "/api/telegram",
+  "/api/telegram/webhook",
   "/api/cron",
   "/manifest.json",
   "/sw.js",

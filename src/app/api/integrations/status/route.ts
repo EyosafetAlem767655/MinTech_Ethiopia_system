@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { dbConnect } from "@/lib/db";
+import sql from "@/lib/sql";
 import { envValue, integrationEnvChecks } from "@/lib/env";
 import { getTelegramBotInfo, getTelegramWebhookInfo } from "@/lib/telegram";
 
@@ -23,11 +23,10 @@ function redactWebhookUrl(url?: string) {
   }
 }
 
-async function checkMongo(): Promise<LiveStatus> {
+async function checkSupabase(): Promise<LiveStatus> {
   try {
-    const conn = await dbConnect();
-    await conn.connection.db?.admin().ping();
-    return { ok: true, details: { readyState: conn.connection.readyState } };
+    const [row] = await sql<{ ok: number }[]>`select 1 as ok`;
+    return { ok: row?.ok === 1 };
   } catch (e) {
     return { ok: false, error: errorMessage(e) };
   }
@@ -90,7 +89,7 @@ export async function GET(req: NextRequest) {
   const liveChecks: Record<string, LiveStatus> = {};
 
   if (live) {
-    liveChecks.mongodb = await checkMongo();
+    liveChecks.supabase = await checkSupabase();
     liveChecks.openai = await checkOpenAI();
     liveChecks.telegram = await checkTelegram();
   }
