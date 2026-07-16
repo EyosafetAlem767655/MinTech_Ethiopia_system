@@ -4,7 +4,7 @@ import { recentOpsReports } from "@/lib/ops-report";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const reports = (await recentOpsReports(90)) as any[];
+  const reports = (await recentOpsReports(180)) as any[];
 
   // Collect all product names seen across all reports
   const productSet = new Set<string>();

@@ -155,7 +155,12 @@ export async function ingestOpsReport(
   return { saved, updated, entries };
 }
 
-export async function recentOpsReports(days = 90) {
+/**
+ * Default window is half a year: the operations report is a slow-moving stock
+ * ledger rather than a live feed, and a 90-day window silently clipped the
+ * start of the imported history off the charts.
+ */
+export async function recentOpsReports(days = 180) {
   const cutoff = new Date(Date.now() - days * 86400000);
   return sql`
     select id as _id, date_label as "dateLabel", date, reported_by as "reportedBy",
