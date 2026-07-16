@@ -38,17 +38,36 @@ const LABEL: Record<string, string> = {
   Talk: "Talc",
 };
 
-// Color families: ETL = warm clay, EC = blue, EL = green, Talc = neutral
+/**
+ * Product colours.
+ *
+ * These were previously grouped by family (ETL warm / EC blue / EL green) with
+ * shades inside each family. It read nicely as a mnemonic but failed as an
+ * encoding: ETL6 vs ETL9 sat at ΔE 7.1 for *normal* vision (the floor is 15) —
+ * i.e. nobody could tell two of the main products apart in a stacked bar — the
+ * three EL greens were too light to hold against a white surface, and Talc was
+ * so desaturated it read as a gridline.
+ *
+ * These eight are a palette validated as a set (lightness band, chroma floor,
+ * colour-vision-deficiency separation, normal-vision separation, contrast), in
+ * this order — the ordering is what guarantees neighbouring stack segments stay
+ * apart, so keep it aligned with the alphabetical order the API returns.
+ *
+ * There is no ninth hue: eight is where the space saturates and a ninth cannot
+ * pass. Talc doesn't need one — it only ever appears in Stock, never in the
+ * Delivered/Received flows, so it never has to be told apart from these eight
+ * inside a stack. It takes the neutral below and is always directly labelled.
+ */
 const COLOR: Record<string, string> = {
-  ETL6: "#da674c",
-  ETL9: "#c64d30",
-  ETL15: "#8a3622",
-  EC15: "#2563eb",
-  EC90: "#60a5fa",
-  "2EL": "#16a34a",
-  "3EL": "#4ade80",
-  "5EL": "#86efac",
-  Talk: "#a8a29e",
+  "2EL": "#2a78d6", // blue
+  "3EL": "#008300", // green
+  "5EL": "#e87ba4", // magenta
+  EC15: "#eda100", // yellow
+  EC90: "#1baf7a", // aqua
+  ETL15: "#eb6834", // orange
+  ETL6: "#4a3aa7", // violet
+  ETL9: "#e34948", // red
+  Talk: "#6b6a66", // neutral — stock-only, always directly labelled
 };
 
 const BAG_COLORS: Record<string, string> = {
@@ -59,7 +78,8 @@ const BAG_COLORS: Record<string, string> = {
 };
 
 function pl(p: string) { return LABEL[p] || p; }
-function pc(p: string) { return COLOR[p] || "#c64d30"; }
+/** Unknown products fall back to the neutral rather than impersonating a series. */
+function pc(p: string) { return COLOR[p] || "#6b6a66"; }
 
 function fmtDate(d: string) {
   const dt = new Date(d);
@@ -199,6 +219,10 @@ function DailyFlowChart({
                 name={p}
                 stackId="a"
                 fill={pc(p)}
+                // A hairline of surface between segments keeps two adjacent
+                // fills from reading as one block.
+                stroke="#ffffff"
+                strokeWidth={1}
                 radius={
                   i === visibleProducts.length - 1
                     ? [3, 3, 0, 0]

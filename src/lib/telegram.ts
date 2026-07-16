@@ -131,6 +131,50 @@ export async function deleteMessage(chatId: string | number, messageId: number) 
   return call("deleteMessage", { chat_id: chatId, message_id: messageId });
 }
 
+/**
+ * Uploads a file to a chat. Unlike every other call here this must be
+ * multipart/form-data rather than JSON, because the bytes ride along with it.
+ * Telegram caps bot uploads at 50 MB.
+ */
+export async function sendDocument(
+  chatId: string | number,
+  file: { buffer: Buffer; filename: string; contentType: string },
+  caption?: string
+): Promise<TelegramApiResponse<{ message_id: number }>> {
+  const token = telegramToken();
+  if (!token) {
+    const description = "TELEGRAM_BOT_TOKEN is not set.";
+    console.error(`Telegram sendDocument failed: ${description}`);
+    return { ok: false, description };
+  }
+
+  try {
+    const form = new FormData();
+    form.append("chat_id", String(chatId));
+    if (caption) {
+      form.append("caption", caption.slice(0, 1024)); // Telegram's caption limit
+      form.append("parse_mode", "HTML");
+    }
+    form.append(
+      "document",
+      new Blob([new Uint8Array(file.buffer)], { type: file.contentType }),
+      file.filename
+    );
+
+    const res = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, {
+      method: "POST",
+      body: form,
+    });
+    const json = (await res.json()) as TelegramApiResponse<{ message_id: number }>;
+    if (!json.ok) console.error("Telegram sendDocument failed:", JSON.stringify(json));
+    return json;
+  } catch (e) {
+    const description = e instanceof Error ? e.message : String(e);
+    console.error("Telegram sendDocument failed:", description);
+    return { ok: false, description };
+  }
+}
+
 export async function answerCallbackQuery(callbackQueryId: string, text: string) {
   return call("answerCallbackQuery", { callback_query_id: callbackQueryId, text, show_alert: false });
 }

@@ -5,16 +5,16 @@ import { isPositionKey } from "@/lib/positions";
 
 export const dynamic = "force-dynamic";
 
-// password_hash must never leave the server, so it's never selected.
-const SELECT = sql`
-  select id as _id, full_name as "fullName", positions, active,
-         session_epoch as "sessionEpoch", chat_id as "chatId", logged_in as "loggedIn",
-         last_login_at as "lastLoginAt", last_seen_at as "lastSeenAt",
-         locked_until as "lockedUntil", note, created_at as "createdAt"
-`;
-
 export async function GET() {
-  const users = await sql`${SELECT} from telegram_users order by full_name asc`;
+  // password_hash must never leave the server, so it is never selected.
+  const users = await sql`
+    select id as _id, full_name as "fullName", positions, active,
+           session_epoch as "sessionEpoch", chat_id as "chatId", logged_in as "loggedIn",
+           last_login_at as "lastLoginAt", last_seen_at as "lastSeenAt",
+           locked_until as "lockedUntil", note, created_at as "createdAt"
+      from telegram_users
+     order by full_name asc
+  `;
   return NextResponse.json(users);
 }
 

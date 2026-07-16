@@ -18,11 +18,16 @@ export interface TrendPoint {
   collections: number;
 }
 
+// One metric is plotted at a time, each against its own axis — production is
+// tonnes and the money series are ETB, and putting two scales on one chart
+// would make the shapes lie about each other.
 const METRICS = [
-  { key: "production", label: "Production", unit: "t", color: "#c64d30" },
-  { key: "sales", label: "Sales", unit: "ETB", color: "#8a3622" },
-  { key: "collections", label: "Collections", unit: "ETB", color: "#da674c" },
+  { key: "production", label: "Production", unit: "t", color: "#2a78d6" },
+  { key: "sales", label: "Sales", unit: "ETB", color: "#008300" },
+  { key: "collections", label: "Collections", unit: "ETB", color: "#e87ba4" },
 ] as const;
+
+export type MetricKey = (typeof METRICS)[number]["key"];
 
 const RANGES = [
   { key: "d7", label: "7D" },
@@ -32,18 +37,22 @@ const RANGES = [
 
 export default function TrendCharts({
   series,
+  metrics,
 }: {
   series: { d7: TrendPoint[]; d30: TrendPoint[]; d90: TrendPoint[] };
+  /** Restricts the metric switcher — lets a tab show only what it's about. */
+  metrics?: readonly MetricKey[];
 }) {
+  const shown = metrics ? METRICS.filter((m) => metrics.includes(m.key)) : METRICS;
   const [range, setRange] = useState<(typeof RANGES)[number]["key"]>("d7");
-  const [metric, setMetric] = useState<(typeof METRICS)[number]>(METRICS[0]);
+  const [metric, setMetric] = useState<(typeof METRICS)[number]>(shown[0] ?? METRICS[0]);
   const data = series[range] || [];
 
   return (
     <div className="card p-4">
       <div className="flex items-center justify-between gap-2 mb-3">
         <div className="flex gap-1.5 overflow-x-auto no-scrollbar">
-          {METRICS.map((m) => (
+          {shown.map((m) => (
             <button
               key={m.key}
               onClick={() => setMetric(m)}

@@ -162,41 +162,50 @@ export function bestAndWorstDays(series: TrendPoint[], key: keyof Omit<TrendPoin
   return { best: { date: best.date, value: best[key] }, worst: { date: worst.date, value: worst[key] } };
 }
 
+const sumOf = (s: TrendPoint[], k: keyof Omit<TrendPoint, "date">) => s.reduce((a, p) => a + p[k], 0);
+const pctChange = (cur: number, prev: number) =>
+  prev === 0 ? null : Math.round(((cur - prev) / prev) * 1000) / 10;
+
 /**
- * BEHAVIOUR CHANGE (bug fix). The Mongo version built the comparison window as
- * `getDailySeries(60, todayStart-30).slice(0, 30)`, which takes the *first* 30
- * days of a 60-day window — i.e. days 60–90 ago — and skips days 30–60
- * entirely. "Previous 30 days" now means the 30 days immediately before the
- * current window, which is what the name and the UI both claim.
+ * Month-on-month from an already-fetched series — no queries of its own.
  *
- * Month-on-month percentages will therefore differ from the old dashboard.
- * That is intended: the old ones were comparing against the wrong month.
+ * `series` must be at least 60 days, ordered oldest→newest. The last 30 entries
+ * are the current window and the 30 before them are the comparison window, so a
+ * single 90-day fetch serves the whole dashboard.
+ *
+ * BEHAVIOUR CHANGE (bug fix, carried over from the Mongo port): the original
+ * built the comparison window as `getDailySeries(60, T-30).slice(0, 30)`, which
+ * takes the *first* 30 days of a 60-day window — days 60–90 ago — skipping days
+ * 30–60 entirely. "Previous 30 days" now means the 30 days immediately before
+ * the current window, which is what the name and the UI both claim.
  */
-export async function monthOnMonth(now = new Date()) {
-  const todayStart = eatDayStart(now);
-  const last30 = await getDailySeries(30, now);          // [T-30, T)
-  const prev30 = await getDailySeries(30, addDays(todayStart, -30)); // [T-60, T-30)
-  const sum = (s: TrendPoint[], k: keyof Omit<TrendPoint, "date">) => s.reduce((a, p) => a + p[k], 0);
-  const pct = (cur: number, prev: number) => (prev === 0 ? null : Math.round(((cur - prev) / prev) * 1000) / 10);
+export function monthOnMonthFrom(series: TrendPoint[]) {
+  const last30 = series.slice(-30);
+  const prev30 = series.slice(-60, -30);
   const cur = {
-    production: sum(last30, "production"),
-    sales: sum(last30, "sales"),
-    collections: sum(last30, "collections"),
+    production: sumOf(last30, "production"),
+    sales: sumOf(last30, "sales"),
+    collections: sumOf(last30, "collections"),
   };
   const prev = {
-    production: sum(prev30, "production"),
-    sales: sum(prev30, "sales"),
-    collections: sum(prev30, "collections"),
+    production: sumOf(prev30, "production"),
+    sales: sumOf(prev30, "sales"),
+    collections: sumOf(prev30, "collections"),
   };
   return {
     current: cur,
     previous: prev,
     changePct: {
-      production: pct(cur.production, prev.production),
-      sales: pct(cur.sales, prev.sales),
-      collections: pct(cur.collections, prev.collections),
+      production: pctChange(cur.production, prev.production),
+      sales: pctChange(cur.sales, prev.sales),
+      collections: pctChange(cur.collections, prev.collections),
     },
   };
+}
+
+/** Convenience wrapper for callers that don't already hold a series. */
+export async function monthOnMonth(now = new Date()) {
+  return monthOnMonthFrom(await getDailySeries(60, now));
 }
 
 /* ─────────────────────────────── Money section ────────────────────────────── */
@@ -279,9 +288,12 @@ export async function pendingPurchaseRequests() {
 /* ──────────────── Lot balance reconciliation (now a view) ─────────────────── */
 
 export interface LotBalance {
+  /** Kept as `_id` too so the dashboard can use it as a React key unchanged. */
+  _id: string;
   lotId: string;
   lotCode: string;
   supplier: string;
+  handlers: string[];
   received: number;
   filled: number;
   damagedVerified: number;
@@ -289,6 +301,16 @@ export interface LotBalance {
   disposed: number;
   inStock: number;
   gap: number;
+  /** Mirrors the shape the UI read when the balance was an embedded document. */
+  balance: {
+    received: number;
+    filled: number;
+    damagedVerified: number;
+    damagedPending: number;
+    disposed: number;
+    inStock: number;
+    gap: number;
+  };
 }
 
 /**
@@ -298,24 +320,36 @@ export interface LotBalance {
  * and nothing noticed. A view cannot be stale.
  */
 export async function getLotBalances(): Promise<LotBalance[]> {
+  // handlers lives on bag_lots rather than the view, so join it back in — the
+  // bag-control panel lists who touched a lot alongside its gap.
   const rows = await sql`
-    select lot_id, lot_code, supplier, received, filled,
-           damaged_verified, damaged_pending, disposed, in_stock, gap
-      from v_lot_balances
-     order by lot_code
+    select b.lot_id, b.lot_code, b.supplier, b.received, b.filled,
+           b.damaged_verified, b.damaged_pending, b.disposed, b.in_stock, b.gap,
+           l.handlers
+      from v_lot_balances b
+      join bag_lots l on l.id = b.lot_id
+     order by b.lot_code
   `;
-  return rows.map((r) => ({
-    lotId: String(r.lot_id),
-    lotCode: r.lot_code,
-    supplier: r.supplier,
-    received: Number(r.received),
-    filled: Number(r.filled),
-    damagedVerified: Number(r.damaged_verified),
-    damagedPending: Number(r.damaged_pending),
-    disposed: Number(r.disposed),
-    inStock: Number(r.in_stock),
-    gap: Number(r.gap),
-  }));
+  return rows.map((r) => {
+    const balance = {
+      received: Number(r.received),
+      filled: Number(r.filled),
+      damagedVerified: Number(r.damaged_verified),
+      damagedPending: Number(r.damaged_pending),
+      disposed: Number(r.disposed),
+      inStock: Number(r.in_stock),
+      gap: Number(r.gap),
+    };
+    return {
+      _id: String(r.lot_id),
+      lotId: String(r.lot_id),
+      lotCode: r.lot_code,
+      supplier: r.supplier,
+      handlers: (r.handlers as string[]) ?? [],
+      ...balance,
+      balance,
+    };
+  });
 }
 
 /** Lots whose bags don't add up — possible theft or unrecorded use. */
@@ -377,7 +411,15 @@ export async function damageTripwires(now = new Date()) {
 
 /* ─────────────────────────── Exception detection ──────────────────────────── */
 
-export async function detectExceptions(now = new Date()): Promise<string[]> {
+/**
+ * `deps` lets a caller pass work it has already done. The dashboard fetches the
+ * aging report and the lot gaps for its own payload, and without this they'd be
+ * queried a second time here.
+ */
+export async function detectExceptions(
+  now = new Date(),
+  deps: { aging?: Awaited<ReturnType<typeof receivablesAging>>; lotGaps?: LotBalance[] } = {}
+): Promise<string[]> {
   const exceptions: string[] = [];
   const { start, end } = yesterdayRange(now);
   const monthStart = addDays(eatDayStart(now), -30);
@@ -399,7 +441,7 @@ export async function detectExceptions(now = new Date()): Promise<string[]> {
   }
 
   // 2. Clients newly crossing 30 days overdue
-  const { overdueClients } = await receivablesAging(now);
+  const { overdueClients } = deps.aging ?? (await receivablesAging(now));
   for (const c of overdueClients) {
     if (c.daysOverdue >= 30 && c.daysOverdue <= 31) {
       exceptions.push(
@@ -426,7 +468,7 @@ export async function detectExceptions(now = new Date()): Promise<string[]> {
   }
 
   // 4. Lot balance gaps (possible theft / unrecorded use)
-  for (const lot of await getLotGaps()) {
+  for (const lot of deps.lotGaps ?? (await getLotGaps())) {
     exceptions.push(`Lot ${lot.lotCode} (${lot.supplier}) has ${lot.gap} unaccounted bags.`);
   }
 

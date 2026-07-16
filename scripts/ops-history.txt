@@ -1,11 +1,4 @@
-import { NextResponse } from "next/server";
-import { ingestOpsReport } from "@/lib/ops-report";
-
-export const dynamic = "force-dynamic";
-export const maxDuration = 60;
-
-// Raw historical data provided by management (31 Mar – 2 May 2026)
-const HISTORICAL_DATA = `31/3/2026
+31/3/2026
 Delivered-
 ETL9=30,
 5EL=11,
@@ -701,14 +694,4 @@ White=17500,
 Beige=5500,
 40Kg Bag
 Beige=51707, Yellow=41000,
-Green=300,`;
-
-export async function GET() {
-  const result = await ingestOpsReport(HISTORICAL_DATA, "seed");
-  return NextResponse.json({
-    ok: true,
-    saved: result.saved,
-    updated: result.updated,
-    dates: result.entries.map((e) => e.dateLabel),
-  });
-}
+Green=300,

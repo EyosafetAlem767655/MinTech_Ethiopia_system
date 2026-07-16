@@ -4,17 +4,17 @@ import postgres from "postgres";
  * Postgres connection to Supabase.
  *
  * Must point at the **transaction pooler** (Supavisor, port 6543), not the
- * direct connection (5432): Vercel lambdas are short-lived and numerous, and
- * the direct connection would exhaust Postgres' backend slots. The pooler is
- * what makes serverless + Postgres viable.
+ * direct connection (5432). The direct host resolves to IPv6 only and Vercel is
+ * IPv4, so pointing at it makes every request hang until the function times out
+ * (a 504) rather than failing fast.
  *
  * `prepare: false` is not optional — the transaction pooler assigns a different
- * backend per statement, so server-side prepared statements cannot be reused
- * and postgres.js must send everything as a simple query.
+ * backend per statement, so server-side prepared statements can't be reused.
  *
- * The connection is cached on globalThis so Next.js hot reloads (and warm
- * lambda invocations) reuse one client, mirroring what src/lib/db.ts used to do
- * for Mongoose.
+ * The client is created lazily and cached on globalThis. Lazily matters twice
+ * over: `next build` imports these modules, and an eager connection would make
+ * the build itself require SUPABASE_DB_URL; and a missing variable now surfaces
+ * as a readable per-request error instead of a module-load crash.
  */
 
 declare global {
@@ -22,21 +22,47 @@ declare global {
   var _sql: postgres.Sql | undefined;
 }
 
-function create(): postgres.Sql {
-  const url = process.env.SUPABASE_DB_URL;
-  if (!url) throw new Error("SUPABASE_DB_URL is not set");
+function client(): postgres.Sql {
+  if (global._sql) return global._sql;
 
-  return postgres(url, {
+  const url = process.env.SUPABASE_DB_URL;
+  if (!url) {
+    throw new Error(
+      "SUPABASE_DB_URL is not set. Use the Supabase transaction pooler string (port 6543) from Connect → Transaction pooler."
+    );
+  }
+
+  global._sql = postgres(url, {
     prepare: false,
-    max: 1,
+    // Not 1. The dashboard fans out ~12 queries through Promise.all; with a
+    // single connection postgres.js queues them and they run strictly one after
+    // another, which is what pushed the route past the function time limit.
+    // Supavisor's transaction mode multiplexes, so holding a few client
+    // connections is exactly what the pooler is there for.
+    max: 5,
     idle_timeout: 20,
     connect_timeout: 10,
-    // Mongo returned plain JS objects; keep jsonb round-tripping the same way.
     transform: { undefined: null },
   });
+  return global._sql;
 }
 
-export const sql: postgres.Sql = global._sql ?? (global._sql = create());
+/**
+ * Lazy proxy around the postgres.js client. `sql\`...\`` hits the apply trap;
+ * `sql.json(...)` / `sql.begin(...)` hit the get trap. Behaves exactly like the
+ * real client, but nothing connects until the first query.
+ */
+export const sql: postgres.Sql = new Proxy(function () {} as unknown as postgres.Sql, {
+  apply(_target, _thisArg, args: unknown[]) {
+    return (client() as unknown as (...a: unknown[]) => unknown)(...args);
+  },
+  get(_target, prop) {
+    const c = client() as unknown as Record<string | symbol, unknown>;
+    const value = c[prop];
+    return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(c) : value;
+  },
+}) as postgres.Sql;
+
 export default sql;
 
 /**

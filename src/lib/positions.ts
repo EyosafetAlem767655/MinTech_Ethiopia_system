@@ -174,6 +174,7 @@ export const HR_KINDS: Record<HrKind, { button: string; en: string; question: st
 /* ───────────────────────────────── Positions ─────────────────────────────── */
 
 export type PositionKey =
+  | "admin"
   | "quality_checker"
   | "production_reporter"
   | "finance_reporter"
@@ -193,7 +194,18 @@ export interface Position {
 /** Every internal employee gets these, regardless of position. */
 const BASE_CAPABILITIES: CapabilityKey[] = ["daily_report", "receipt", "question"];
 
+/** Capability keys in declaration order — used to grant the admin everything. */
+const ALL_CAPABILITIES = Object.keys(CAPABILITIES) as CapabilityKey[];
+
 export const POSITIONS: Record<PositionKey, Position> = {
+  admin: {
+    key: "admin",
+    en: "Administrator",
+    am: "አስተዳዳሪ",
+    description:
+      "Full access to every report. Receives the yearly data archive on Telegram before old records are deleted.",
+    capabilities: ALL_CAPABILITIES,
+  },
   quality_checker: {
     key: "quality_checker",
     en: "Stone quality & weight checker",
