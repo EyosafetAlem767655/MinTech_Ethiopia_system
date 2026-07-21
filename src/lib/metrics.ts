@@ -45,10 +45,12 @@ export async function getDayNumbers(start: Date, end: Date): Promise<DayNumbers>
       (select coalesce(sum(loads), 0)
          from stone_deliveries where date >= ${start} and date < ${end})            as truckloads,
 
-      (select coalesce(sum(case when bag_weight_kg > 0
-                                then filled_sacks * bag_weight_kg / 1000.0
-                                else 0 end), 0)
-         from shift_reports where date >= ${start} and date < ${end})               as tons_produced,
+      -- Production = "Delivered" tonnage from the daily ops report (the plant's
+      -- own definition of output). Was shift_reports, which the bot doesn't feed.
+      (select coalesce(sum((e.value)::numeric), 0)
+         from daily_ops_reports r
+         cross join lateral jsonb_each_text(r.delivered) as e(key, value)
+        where r.date >= ${start} and r.date < ${end})                               as tons_produced,
 
       (select coalesce(sum(case when bag_weight_kg > 0
                                 then sacks * bag_weight_kg / 1000.0
@@ -112,12 +114,14 @@ export async function getDailySeries(days: number, now = new Date()): Promise<Tr
       )::date as d
     ),
     prod as (
-      select (date at time zone ${EAT})::date as d,
-             sum(case when bag_weight_kg > 0
-                      then filled_sacks * bag_weight_kg / 1000.0
-                      else 0 end) as n
-        from shift_reports
-       where date >= ${start} and date < ${end}
+      -- Production = daily ops "Delivered" tonnage (sum of the jsonb map),
+      -- bucketed to the EAT calendar day. The report's date is stored at UTC
+      -- midnight of that day, so the EAT conversion lands on the same date.
+      select (r.date at time zone ${EAT})::date as d,
+             sum((e.value)::numeric) as n
+        from daily_ops_reports r
+        cross join lateral jsonb_each_text(r.delivered) as e(key, value)
+       where r.date >= ${start} and r.date < ${end}
        group by 1
     ),
     sales as (

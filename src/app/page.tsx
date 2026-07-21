@@ -6,6 +6,7 @@ import CountUp from "@/components/CountUp";
 import TrendCharts, { type TrendPoint } from "@/components/TrendCharts";
 import AgingChart from "@/components/AgingChart";
 import OpsReportCharts, { type OpsReport } from "@/components/OpsReportCharts";
+import ProductionTrend from "@/components/ProductionTrend";
 import ShiftCharts, { type ShiftReport } from "@/components/ShiftCharts";
 import { enablePushNotifications } from "@/components/PwaSetup";
 import { MINTECH_MODULES } from "@/lib/modules";
@@ -66,7 +67,6 @@ const fmtETB = (n: number) => `ETB ${Math.round(n).toLocaleString()}`;
 
 const TABS = [
   { key: "overview", label: "Overview", icon: "☀️" },
-  { key: "production", label: "Production", icon: "🏭" },
   { key: "sales", label: "Sales", icon: "💵" },
   { key: "shift", label: "Shift", icon: "👷" },
 ] as const;
@@ -239,6 +239,26 @@ export default function OwnerDashboard() {
                   </div>
                 </section>
 
+                {/* Production — the two graphs, both driven by the ops-report data */}
+                <section className="animate-fade-up">
+                  <h2 className="font-display font-bold text-lg mb-2.5 px-1">Production</h2>
+                  {opsData ? (
+                    <ProductionTrend reports={opsData.reports} />
+                  ) : (
+                    <div className="card p-4 text-sm text-stone-400">Operations reports unavailable.</div>
+                  )}
+                  <MoM data={data} keys={["production"]} title="Production · last 30d vs previous 30d" />
+                </section>
+
+                <section className="animate-fade-up">
+                  <h2 className="font-display font-bold text-lg mb-2.5 px-1">Operations data</h2>
+                  {opsData ? (
+                    <OpsReportCharts reports={opsData.reports} products={opsData.products} latest={opsData.latest} />
+                  ) : (
+                    <div className="card p-4 text-sm text-stone-400">Operations reports unavailable.</div>
+                  )}
+                </section>
+
                 {/* Bag control snapshot */}
                 <section className="animate-fade-up pb-6">
                   <h2 className="font-display font-bold text-lg mb-2.5 px-1">Bag control</h2>
@@ -269,32 +289,6 @@ export default function OwnerDashboard() {
                       </span>
                     )}
                   </Link>
-                </section>
-              </>
-            )}
-
-            {/* ═════════════ PRODUCTION ═════════════ */}
-            {tab === "production" && (
-              <>
-                <section className="grid grid-cols-2 gap-3">
-                  <Kpi icon="🏭" label="Tons produced yesterday" value={data.yesterday.tonsProduced} suffix=" t" decimals={2} />
-                  <Kpi icon="🪨" label="Truckloads received" value={data.yesterday.truckloads} />
-                </section>
-
-                <section className="animate-fade-up">
-                  <h2 className="font-display font-bold text-lg mb-2.5 px-1">Production trend</h2>
-                  <TrendCharts series={data.series} metrics={["production"]} />
-                  <BestWorst data={data} keys={["production"]} />
-                  <MoM data={data} keys={["production"]} title="Production · last 30d vs previous 30d" />
-                </section>
-
-                <section className="animate-fade-up pb-6">
-                  <h2 className="font-display font-bold text-lg mb-2.5 px-1">Operations data</h2>
-                  {opsData ? (
-                    <OpsReportCharts reports={opsData.reports} products={opsData.products} latest={opsData.latest} />
-                  ) : (
-                    <div className="card p-4 text-sm text-stone-400">Operations reports unavailable.</div>
-                  )}
                 </section>
               </>
             )}
