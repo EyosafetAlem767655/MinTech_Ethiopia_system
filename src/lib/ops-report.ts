@@ -156,11 +156,11 @@ export async function ingestOpsReport(
 }
 
 /**
- * Default window is half a year: the operations report is a slow-moving stock
- * ledger rather than a live feed, and a 90-day window silently clipped the
- * start of the imported history off the charts.
+ * Default window is a full year, so the dashboard's range selector (up to 1Y)
+ * always has data to filter down from. The ops report is a slow-moving stock
+ * ledger, so a year of daily rows is small.
  */
-export async function recentOpsReports(days = 180) {
+export async function recentOpsReports(days = 365) {
   const cutoff = new Date(Date.now() - days * 86400000);
   return sql`
     select id as _id, date_label as "dateLabel", date, reported_by as "reportedBy",

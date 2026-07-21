@@ -115,12 +115,14 @@ export default function ProductionTrend({ reports }: { reports: OpsReport[] }) {
               wrapperStyle={{ fontSize: 11 }}
               formatter={(v) => (v === "delivered" ? "Delivered (output)" : "Received (input)")}
             />
+            {/* Short ranges are only a handful of points; show markers so a
+                1-day selection renders as a visible dot rather than nothing. */}
             <Line
               type="monotone"
               dataKey="delivered"
               stroke={DELIVERED}
               strokeWidth={2}
-              dot={false}
+              dot={days <= 31 ? { r: 3, fill: DELIVERED } : false}
               animationDuration={500}
             />
             <Line
@@ -128,7 +130,7 @@ export default function ProductionTrend({ reports }: { reports: OpsReport[] }) {
               dataKey="received"
               stroke={RECEIVED}
               strokeWidth={2}
-              dot={false}
+              dot={days <= 31 ? { r: 3, fill: RECEIVED } : false}
               animationDuration={500}
             />
           </LineChart>

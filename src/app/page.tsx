@@ -5,8 +5,8 @@ import Link from "next/link";
 import CountUp from "@/components/CountUp";
 import TrendCharts, { type TrendPoint } from "@/components/TrendCharts";
 import AgingChart from "@/components/AgingChart";
-import OpsReportCharts, { type OpsReport } from "@/components/OpsReportCharts";
-import ProductionTrend from "@/components/ProductionTrend";
+import { type OpsReport } from "@/components/OpsReportCharts";
+import ProductionSection from "@/components/ProductionSection";
 import ShiftCharts, { type ShiftReport } from "@/components/ShiftCharts";
 import { enablePushNotifications } from "@/components/PwaSetup";
 import { MINTECH_MODULES } from "@/lib/modules";
@@ -63,6 +63,23 @@ interface OpsData {
   latest: OpsReport | null;
 }
 
+interface ComplianceRow {
+  _id: string;
+  fullName: string;
+  positions: string[];
+  submittedToday: boolean;
+  lastSubmitted: string | null;
+  submitted7: number;
+  missed7: number;
+  missedStreak: number;
+}
+
+interface ComplianceData {
+  today: string;
+  summary: { total: number; submittedToday: number; missingToday: number };
+  compliance: ComplianceRow[];
+}
+
 const fmtETB = (n: number) => `ETB ${Math.round(n).toLocaleString()}`;
 
 const TABS = [
@@ -77,6 +94,7 @@ export default function OwnerDashboard() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [opsData, setOpsData] = useState<OpsData | null>(null);
   const [shifts, setShifts] = useState<ShiftReport[]>([]);
+  const [compliance, setCompliance] = useState<ComplianceData | null>(null);
   const [error, setError] = useState("");
   const [pushState, setPushState] = useState<string>("");
   const [tab, setTab] = useState<TabKey>("overview");
@@ -85,10 +103,11 @@ export default function OwnerDashboard() {
     try {
       // The dashboard call is the slow one; the rest are supporting data and
       // must not be able to blank the page if they fail.
-      const [dashRes, opsRes, shiftRes] = await Promise.all([
+      const [dashRes, opsRes, shiftRes, complianceRes] = await Promise.all([
         fetch("/api/dashboard"),
         fetch("/api/ops-reports"),
         fetch("/api/shift-report"),
+        fetch("/api/daily-reports?limit=1"),
       ]);
       if (!dashRes.ok) throw new Error(`Dashboard HTTP ${dashRes.status}`);
       setData(await dashRes.json());
@@ -97,6 +116,7 @@ export default function OwnerDashboard() {
         const s = await shiftRes.json();
         if (Array.isArray(s)) setShifts(s);
       }
+      if (complianceRes.ok) setCompliance(await complianceRes.json());
     } catch (e) {
       setError(String(e));
     }
@@ -239,24 +259,17 @@ export default function OwnerDashboard() {
                   </div>
                 </section>
 
-                {/* Production — the two graphs, both driven by the ops-report data */}
+                {/* Daily-report compliance — who missed today */}
+                {compliance && <ComplianceCard data={compliance} />}
+
+                {/* Production — both graphs, one shared time-range selector */}
                 <section className="animate-fade-up">
-                  <h2 className="font-display font-bold text-lg mb-2.5 px-1">Production</h2>
                   {opsData ? (
-                    <ProductionTrend reports={opsData.reports} />
+                    <ProductionSection reports={opsData.reports} />
                   ) : (
                     <div className="card p-4 text-sm text-stone-400">Operations reports unavailable.</div>
                   )}
                   <MoM data={data} keys={["production"]} title="Production · last 30d vs previous 30d" />
-                </section>
-
-                <section className="animate-fade-up">
-                  <h2 className="font-display font-bold text-lg mb-2.5 px-1">Operations data</h2>
-                  {opsData ? (
-                    <OpsReportCharts reports={opsData.reports} products={opsData.products} latest={opsData.latest} />
-                  ) : (
-                    <div className="card p-4 text-sm text-stone-400">Operations reports unavailable.</div>
-                  )}
                 </section>
 
                 {/* Bag control snapshot */}
@@ -398,6 +411,61 @@ export default function OwnerDashboard() {
 }
 
 /* ─────────────────────────────── Small pieces ─────────────────────────────── */
+
+function ComplianceCard({ data }: { data: ComplianceData }) {
+  const { summary, compliance } = data;
+  const missing = compliance.filter((c) => !c.submittedToday);
+  const allIn = missing.length === 0 && summary.total > 0;
+  const fmtLast = (d: string | null) => (d ? d.slice(5) : "never");
+
+  return (
+    <section className="animate-fade-up">
+      <div className="mb-2.5 flex items-center justify-between px-1">
+        <h2 className="font-display text-lg font-bold">Daily reports</h2>
+        <Link href="/settings" className="text-[11px] font-bold text-clay-600">
+          Manage →
+        </Link>
+      </div>
+
+      {summary.total === 0 ? (
+        <div className="card p-4 text-sm text-stone-500">
+          No employees added yet. Add them under <span className="font-semibold">Settings</span>.
+        </div>
+      ) : (
+        <div className={`card p-4 ${allIn ? "border-green-200 bg-green-50/50" : "border-amber-200 bg-amber-50/40"}`}>
+          <div className="flex items-center justify-between">
+            <p className={`text-sm font-bold ${allIn ? "text-green-800" : "text-amber-800"}`}>
+              {allIn
+                ? `✅ All ${summary.total} employees submitted today`
+                : `⚠️ ${summary.missingToday} of ${summary.total} haven't submitted today`}
+            </p>
+            <span className="font-display text-lg font-bold tabular-nums text-clay-900">
+              {summary.submittedToday}/{summary.total}
+            </span>
+          </div>
+
+          {missing.length > 0 && (
+            <div className="mt-3 space-y-1.5">
+              {missing.map((c) => (
+                <div key={c._id} className="flex items-center justify-between border-t border-amber-100 pt-1.5 text-xs first:border-t-0 first:pt-0">
+                  <span className="font-semibold text-stone-800">{c.fullName}</span>
+                  <span className="text-stone-500">
+                    last {fmtLast(c.lastSubmitted)}
+                    {c.missedStreak > 1 && (
+                      <span className="ml-1.5 rounded-full bg-red-100 px-1.5 py-0.5 font-bold text-red-700">
+                        {c.missedStreak}d missed
+                      </span>
+                    )}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
 
 function BestWorst({ data, keys }: { data: DashboardData; keys: readonly ("production" | "sales" | "collections")[] }) {
   return (

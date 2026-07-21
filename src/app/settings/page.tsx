@@ -354,6 +354,17 @@ function PositionEditor({
 
 /* ─────────────────────────────── Daily reports ────────────────────────────── */
 
+interface ComplianceRow {
+  _id: string;
+  fullName: string;
+  positions: string[];
+  submittedToday: boolean;
+  lastSubmitted: string | null;
+  submitted7: number;
+  missed7: number;
+  missedStreak: number;
+}
+
 function ReportsTab() {
   const [data, setData] = useState<{
     today: string;
@@ -361,6 +372,8 @@ function ReportsTab() {
     hr: HrRow[];
     materials: MaterialRow[];
     missingToday: { _id: string; fullName: string }[];
+    compliance: ComplianceRow[];
+    summary: { total: number; submittedToday: number; missingToday: number };
   } | null>(null);
 
   useEffect(() => {
@@ -372,21 +385,65 @@ function ReportsTab() {
 
   if (!data) return <p className="py-10 text-center text-sm text-stone-400">Loading…</p>;
 
+  // Missing first, then whoever is furthest behind.
+  const rows = [...(data.compliance ?? [])].sort(
+    (a, b) => Number(a.submittedToday) - Number(b.submittedToday) || b.missed7 - a.missed7
+  );
+  const fmtLast = (d: string | null) => (d ? d.slice(5) : "never");
+
   return (
     <div className="space-y-5">
       <div className="rounded-2xl border border-stone-200 bg-white p-4">
-        <p className="text-xs font-bold uppercase tracking-widest text-stone-400">
-          Not yet submitted today ({data.today})
-        </p>
-        {data.missingToday.length === 0 ? (
-          <p className="mt-2 text-sm text-green-700">Everyone has submitted their daily report. 🎉</p>
+        <div className="flex items-center justify-between">
+          <p className="text-xs font-bold uppercase tracking-widest text-stone-400">
+            Daily report compliance · {data.today}
+          </p>
+          <span className="font-display text-sm font-bold text-stone-800">
+            {data.summary?.submittedToday ?? 0}/{data.summary?.total ?? 0} today
+          </span>
+        </div>
+
+        {rows.length === 0 ? (
+          <p className="mt-2 text-sm text-stone-400">No active employees yet.</p>
         ) : (
-          <div className="mt-2 flex flex-wrap gap-1.5">
-            {data.missingToday.map((u) => (
-              <span key={u._id} className="rounded-full bg-amber-100 px-2.5 py-1 text-xs font-bold text-amber-800">
-                {u.fullName}
-              </span>
-            ))}
+          <div className="mt-3 overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="text-[10px] uppercase tracking-widest text-stone-400">
+                <tr>
+                  <th className="pb-1.5 font-bold">Employee</th>
+                  <th className="pb-1.5 text-center font-bold">Today</th>
+                  <th className="pb-1.5 text-center font-bold">Last 7d</th>
+                  <th className="pb-1.5 text-right font-bold">Last report</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((c) => (
+                  <tr key={c._id} className="border-t border-stone-100">
+                    <td className="py-2 font-semibold text-stone-800">{c.fullName}</td>
+                    <td className="py-2 text-center">
+                      {c.submittedToday ? (
+                        <span className="font-bold text-green-700">✓</span>
+                      ) : (
+                        <span className="rounded-full bg-amber-100 px-2 py-0.5 font-bold text-amber-800">missing</span>
+                      )}
+                    </td>
+                    <td className="py-2 text-center tabular-nums">
+                      <span className={c.missed7 > 0 ? "text-amber-700" : "text-stone-500"}>
+                        {c.submitted7}/7
+                      </span>
+                    </td>
+                    <td className="py-2 text-right text-stone-500">
+                      {fmtLast(c.lastSubmitted)}
+                      {c.missedStreak > 1 && (
+                        <span className="ml-1.5 rounded-full bg-red-100 px-1.5 py-0.5 font-bold text-red-700">
+                          {c.missedStreak}d
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
       </div>
