@@ -2,9 +2,9 @@
  * Employee positions and what each one may submit through the Telegram bot.
  *
  * A user holds one or more positions; their bot menu is the union of the
- * capabilities of those positions. `finance_reporter` deliberately includes
- * `wht` so the finance department can file withholding receipts without also
- * being given the dedicated WHT-submitter position.
+ * capabilities of those positions. `daily_finance_reporter` deliberately
+ * includes `wht`, so filing withholding receipts is a finance task rather than
+ * a separate standalone position.
  */
 
 export type CapabilityKey =
@@ -175,11 +175,12 @@ export const HR_KINDS: Record<HrKind, { button: string; en: string; question: st
 
 export type PositionKey =
   | "admin"
-  | "quality_checker"
+  | "stone_quality_checker"
+  | "weight_checker"
   | "production_reporter"
-  | "finance_reporter"
+  | "daily_finance_reporter"
+  | "monthly_finance_reporter"
   | "store_keeper"
-  | "wht_submitter"
   | "purchase_requester"
   | "hr";
 
@@ -206,12 +207,19 @@ export const POSITIONS: Record<PositionKey, Position> = {
       "Full access to every report. Receives the yearly data archive on Telegram before old records are deleted.",
     capabilities: ALL_CAPABILITIES,
   },
-  quality_checker: {
-    key: "quality_checker",
-    en: "Stone quality & weight checker",
-    am: "የድንጋይ ጥራትና ክብደት ተቆጣጣሪ",
-    description: "Checks incoming stone quality and files weight reports. Several people hold this position.",
-    capabilities: [...BASE_CAPABILITIES, "truck", "shift"],
+  stone_quality_checker: {
+    key: "stone_quality_checker",
+    en: "Stone quality checker",
+    am: "የድንጋይ ጥራት ተቆጣጣሪ",
+    description: "Checks the quality of incoming stone deliveries at the gate. Several people hold this position.",
+    capabilities: [...BASE_CAPABILITIES, "truck"],
+  },
+  weight_checker: {
+    key: "weight_checker",
+    en: "Weight report checker",
+    am: "የክብደት ሪፖርት ተቆጣጣሪ",
+    description: "Files weight reports (filled sacks and bag weights). Several people hold this position.",
+    capabilities: [...BASE_CAPABILITIES, "shift"],
   },
   production_reporter: {
     key: "production_reporter",
@@ -220,12 +228,19 @@ export const POSITIONS: Record<PositionKey, Position> = {
     description: "Reports daily production output and shift performance.",
     capabilities: [...BASE_CAPABILITIES, "shift", "ops"],
   },
-  finance_reporter: {
-    key: "finance_reporter",
-    en: "Finance reporter (daily & monthly)",
-    am: "የፋይናንስ ሪፖርተር",
-    description: "Submits sales reports, payments and monthly financials. Also allowed to file WHT receipts.",
+  daily_finance_reporter: {
+    key: "daily_finance_reporter",
+    en: "Daily financial reporter",
+    am: "የዕለታዊ ፋይናንስ ሪፖርተር",
+    description: "Submits daily sales and payment reports, and files 3% withholding tax (WHT) receipts.",
     capabilities: [...BASE_CAPABILITIES, "sales", "wht"],
+  },
+  monthly_finance_reporter: {
+    key: "monthly_finance_reporter",
+    en: "Monthly financial reporter",
+    am: "የወርሃዊ ፋይናንስ ሪፖርተር",
+    description: "Submits monthly financial and sales summaries.",
+    capabilities: [...BASE_CAPABILITIES, "sales"],
   },
   store_keeper: {
     key: "store_keeper",
@@ -233,13 +248,6 @@ export const POSITIONS: Record<PositionKey, Position> = {
     am: "የመጋዘን ሹም",
     description: "Counts imported PP bags and other materials; reports damaged bags.",
     capabilities: [...BASE_CAPABILITIES, "materials", "damage", "ops"],
-  },
-  wht_submitter: {
-    key: "wht_submitter",
-    en: "WHT receipt submitter",
-    am: "የWHT ደረሰኝ አስገቢ",
-    description: "Files 3% withholding tax receipts against invoices.",
-    capabilities: [...BASE_CAPABILITIES, "wht"],
   },
   purchase_requester: {
     key: "purchase_requester",
