@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { HR_KINDS, POSITIONS, POSITION_KEYS, capabilitiesFor, type PositionKey } from "@/lib/positions";
+import { InstallButton } from "@/components/InstallPrompt";
 
 interface BotUser {
   _id: string;
@@ -14,6 +15,7 @@ interface BotUser {
   lastSeenAt?: string;
   lockedUntil?: string;
   note?: string;
+  archivedAt?: string;
   createdAt: string;
 }
 
@@ -86,10 +88,18 @@ export default function SettingsPage() {
   return (
     <main className="max-w-4xl mx-auto px-4 pb-10">
       <header className="hero-gradient -mx-4 px-5 pb-7 pt-10 text-white sm:mx-0 sm:mt-4 sm:rounded-2xl">
+        <div className="mb-3 inline-flex items-center rounded-xl bg-white/95 px-3 py-1.5 shadow">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/logo.png" alt="MinTech" className="h-6 w-auto" />
+        </div>
         <p className="text-xs font-bold tracking-[0.24em] uppercase text-clay-100">Settings</p>
         <h1 className="font-display text-2xl font-bold">Telegram bot access</h1>
         <p className="mt-1 text-sm text-clay-100/90">Employees · positions · passwords · full audit trail</p>
       </header>
+
+      <div className="pt-5">
+        <InstallButton />
+      </div>
 
       <div className="flex gap-1.5 py-5">
         {(["users", "reports", "activity"] as const).map((t) => (
@@ -169,8 +179,13 @@ function UsersTab() {
     await load();
   };
 
-  const remove = async (id: string, name: string) => {
-    if (!confirm(`Delete ${name}? Their Telegram access is revoked immediately. Submitted reports are kept.`)) return;
+  const archive = async (id: string, name: string) => {
+    if (
+      !confirm(
+        `Archive ${name}? Their Telegram access is revoked immediately, but their record and all submitted reports stay on the dashboard. You can restore them later.`
+      )
+    )
+      return;
     setBusy(true);
     await fetch(`/api/bot-users/${id}`, { method: "DELETE" });
     setBusy(false);
@@ -256,7 +271,9 @@ function UsersTab() {
       {users.length === 0 && <p className="py-10 text-center text-sm text-stone-400">No Telegram users yet.</p>}
 
       <div className="space-y-3">
-        {users.map((u) => {
+        {users
+          .filter((u) => !u.archivedAt)
+          .map((u) => {
           const locked = u.lockedUntil && new Date(u.lockedUntil).getTime() > Date.now();
           return (
             <div key={u._id} className="rounded-2xl border border-stone-200 bg-white p-4">
@@ -300,7 +317,7 @@ function UsersTab() {
                   tone={u.active ? "amber" : "green"}
                   onClick={() => patch(u._id, { active: !u.active })}
                 />
-                <SmallBtn label="Delete" tone="red" onClick={() => remove(u._id, u.fullName)} />
+                <SmallBtn label="Archive" tone="red" onClick={() => archive(u._id, u.fullName)} />
               </div>
 
               {editing === u._id && (
@@ -317,6 +334,44 @@ function UsersTab() {
           );
         })}
       </div>
+
+      {/* Archived employees — bot access revoked, record & history retained */}
+      {users.some((u) => u.archivedAt) && (
+        <div>
+          <h2 className="mb-2 mt-2 text-xs font-bold uppercase tracking-widest text-stone-400">
+            Archived ({users.filter((u) => u.archivedAt).length})
+          </h2>
+          <p className="mb-3 text-[11px] text-stone-400">
+            These employees can no longer sign into the bot, but their reports stay on the dashboard.
+          </p>
+          <div className="space-y-2">
+            {users
+              .filter((u) => u.archivedAt)
+              .map((u) => (
+                <div
+                  key={u._id}
+                  className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-stone-200 bg-stone-50 p-4"
+                >
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h3 className="text-sm font-bold text-stone-700">{u.fullName}</h3>
+                      <span className="rounded-full bg-stone-200 px-2 py-0.5 text-[11px] font-bold text-stone-600">
+                        Archived
+                      </span>
+                    </div>
+                    <p className="mt-0.5 text-xs text-stone-400">
+                      {u.positions.map((p) => POSITIONS[p]?.en).filter(Boolean).join(" · ") || "No position"}
+                    </p>
+                    <p className="mt-0.5 text-[11px] text-stone-400">
+                      {u.archivedAt ? `Archived ${fmtTime(u.archivedAt)}` : ""} · reports kept
+                    </p>
+                  </div>
+                  <SmallBtn label="Restore" tone="green" onClick={() => patch(u._id, { restore: true })} />
+                </div>
+              ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

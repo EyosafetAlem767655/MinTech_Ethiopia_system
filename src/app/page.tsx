@@ -9,6 +9,8 @@ import { type OpsReport } from "@/components/OpsReportCharts";
 import ProductionSection from "@/components/ProductionSection";
 import ShiftCharts, { type ShiftReport } from "@/components/ShiftCharts";
 import { enablePushNotifications } from "@/components/PwaSetup";
+import DepartmentTabs, { type TopView } from "@/components/DepartmentTabs";
+import DepartmentReport from "@/components/DepartmentReport";
 import { MINTECH_MODULES } from "@/lib/modules";
 
 interface LegitimacyInfo {
@@ -98,6 +100,7 @@ export default function OwnerDashboard() {
   const [error, setError] = useState("");
   const [pushState, setPushState] = useState<string>("");
   const [tab, setTab] = useState<TabKey>("overview");
+  const [view, setView] = useState<TopView>("brief");
 
   const load = useCallback(async () => {
     try {
@@ -139,8 +142,11 @@ export default function OwnerDashboard() {
         <div className="absolute -top-10 -right-10 w-48 h-48 rounded-full bg-white/5 animate-float" />
         <div className="absolute top-24 -left-12 w-36 h-36 rounded-full bg-white/5 animate-float [animation-delay:1.5s]" />
         <div className="relative stagger">
-          <p className="text-clay-200 text-xs font-semibold tracking-[0.25em] uppercase">MinTech Ethiopia</p>
-          <h1 className="font-display text-3xl font-bold mt-1.5 leading-tight">
+          <div className="inline-flex items-center rounded-2xl bg-white/95 px-4 py-2.5 shadow-lg shadow-black/10">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/logo.png" alt="MinTech Ethiopia" className="h-8 w-auto" />
+          </div>
+          <h1 className="font-display text-3xl font-bold mt-4 leading-tight">
             ☀️ Good morning,
             <br />
             Mr. Anteneh
@@ -156,6 +162,12 @@ export default function OwnerDashboard() {
       </header>
 
       <div className="px-4 -mt-12 relative space-y-5">
+        <DepartmentTabs value={view} onChange={setView} />
+
+        {view !== "brief" && <DepartmentReport dept={view} />}
+
+        {view === "brief" && (
+          <>
         {error && (
           <div className="card p-4 text-sm text-red-700 bg-red-50 border-red-200">
             Could not load dashboard: {error}
@@ -403,6 +415,8 @@ export default function OwnerDashboard() {
                 <ShiftCharts reports={shifts} />
               </section>
             )}
+          </>
+        )}
           </>
         )}
       </div>

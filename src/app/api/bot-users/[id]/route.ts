@@ -52,6 +52,12 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     if (!body.active) await revokeUserSessions(user.id);
   }
 
+  // Restore an archived employee: clear the archive marker and reactivate. Their
+  // full submission history was never removed, so it simply reconnects.
+  if (body.restore === true) {
+    await sql`update telegram_users set archived_at = null, active = true where id = ${user.id}`;
+  }
+
   if (body.forceLogout === true) await revokeUserSessions(user.id);
 
   if (body.unlock === true) {
@@ -61,18 +67,28 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
   const safe = first(await sql`
     select id as _id, full_name as "fullName", positions, active, session_epoch as "sessionEpoch",
            chat_id as "chatId", logged_in as "loggedIn", last_login_at as "lastLoginAt",
-           last_seen_at as "lastSeenAt", locked_until as "lockedUntil", note
+           last_seen_at as "lastSeenAt", locked_until as "lockedUntil", note, archived_at as "archivedAt"
       from telegram_users where id = ${user.id}
   `);
   return NextResponse.json({ ok: true, user: safe });
 }
 
+/**
+ * "Remove" is a soft archive, not a hard delete. The row is kept so the person's
+ * name, positions and full submission history stay visible on the dashboard; the
+ * session is revoked and the account is deactivated so they can no longer sign
+ * into the bot. Restore is handled by PATCH { restore: true }.
+ */
 export async function DELETE(_req: NextRequest, { params }: { params: { id: string } }) {
   if (!isUuid(params.id)) return NextResponse.json({ error: "Not found" }, { status: 404 });
   const user = first(await sql`select id from telegram_users where id = ${params.id}`);
   if (!user) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
   await revokeUserSessions(params.id);
-  await sql`delete from telegram_users where id = ${params.id}`;
-  return NextResponse.json({ ok: true });
+  await sql`
+    update telegram_users
+       set active = false, archived_at = coalesce(archived_at, now())
+     where id = ${params.id}
+  `;
+  return NextResponse.json({ ok: true, archived: true });
 }

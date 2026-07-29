@@ -155,6 +155,68 @@ export async function getDailySeries(days: number, now = new Date()): Promise<Tr
   }));
 }
 
+/**
+ * Production / sales / collections over an arbitrary [start, end) window,
+ * bucketed by day, week or month. This is the windowed generalisation of
+ * getDailySeries used by the department reports — the daily version above stays
+ * as the owner dashboard's fast path (a single 90-day day-bucketed fetch it can
+ * slice), while this one serves the six department ranges and their coarser
+ * buckets. Empty buckets are zero-filled by generate_series, same as above.
+ */
+export async function getBucketedSeries(
+  start: Date,
+  end: Date,
+  bucket: "day" | "week" | "month"
+): Promise<TrendPoint[]> {
+  const step = bucket === "day" ? "1 day" : bucket === "week" ? "1 week" : "1 month";
+
+  const rows = await sql<{ date: string; production: string; sales: string; collections: string }[]>`
+    with buckets as (
+      select generate_series(
+        date_trunc(${bucket}, (${start}::timestamptz at time zone ${EAT})),
+        date_trunc(${bucket}, (${end}::timestamptz   at time zone ${EAT}) - interval '1 second'),
+        ${step}::interval
+      ) as b
+    ),
+    prod as (
+      select date_trunc(${bucket}, r.date at time zone ${EAT}) as b,
+             sum((e.value)::numeric) as n
+        from daily_ops_reports r
+        cross join lateral jsonb_each_text(r.delivered) as e(key, value)
+       where r.date >= ${start} and r.date < ${end}
+       group by 1
+    ),
+    sales as (
+      select date_trunc(${bucket}, invoiced_at at time zone ${EAT}) as b, sum(amount) as n
+        from invoices
+       where invoiced_at >= ${start} and invoiced_at < ${end}
+       group by 1
+    ),
+    coll as (
+      select date_trunc(${bucket}, date at time zone ${EAT}) as b, sum(amount) as n
+        from payments
+       where date >= ${start} and date < ${end}
+       group by 1
+    )
+    select to_char(buckets.b, 'YYYY-MM-DD') as date,
+           coalesce(prod.n,  0) as production,
+           coalesce(sales.n, 0) as sales,
+           coalesce(coll.n,  0) as collections
+      from buckets
+      left join prod  on prod.b  = buckets.b
+      left join sales on sales.b = buckets.b
+      left join coll  on coll.b  = buckets.b
+     order by buckets.b
+  `;
+
+  return rows.map((r) => ({
+    date: r.date,
+    production: Number(r.production) || 0,
+    sales: Number(r.sales) || 0,
+    collections: Number(r.collections) || 0,
+  }));
+}
+
 export function bestAndWorstDays(series: TrendPoint[], key: keyof Omit<TrendPoint, "date">) {
   if (series.length === 0) return null;
   let best = series[0];

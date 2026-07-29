@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import PwaSetup from "@/components/PwaSetup";
 import BottomNav from "@/components/BottomNav";
+import InstallPrompt from "@/components/InstallPrompt";
 
 export const metadata: Metadata = {
   title: "MinTech Ethiopia",
@@ -25,6 +26,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body className="font-sans min-h-screen pb-24">
         <PwaSetup />
         {children}
+        <InstallPrompt />
         <BottomNav />
       </body>
     </html>

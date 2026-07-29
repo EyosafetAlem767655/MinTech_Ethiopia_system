@@ -11,7 +11,7 @@ export async function GET() {
     select id as _id, full_name as "fullName", positions, active,
            session_epoch as "sessionEpoch", chat_id as "chatId", logged_in as "loggedIn",
            last_login_at as "lastLoginAt", last_seen_at as "lastSeenAt",
-           locked_until as "lockedUntil", note, created_at as "createdAt"
+           locked_until as "lockedUntil", note, archived_at as "archivedAt", created_at as "createdAt"
       from telegram_users
      order by full_name asc
   `;
