@@ -20,9 +20,9 @@ body {
 /* Topographic-style brand backdrop for hero sections */
 .hero-gradient {
   background:
-    radial-gradient(1200px 500px at 80% -10%, rgba(218, 103, 76, 0.55), transparent 60%),
+    radial-gradient(1200px 500px at 80% -10%, rgba(217, 38, 41, 0.5), transparent 60%),
     radial-gradient(900px 420px at -10% 30%, rgba(115, 49, 34, 0.9), transparent 65%),
-    linear-gradient(135deg, #8a3622 0%, #733122 55%, #3e160d 100%);
+    linear-gradient(135deg, #8a2f22 0%, #733122 55%, #3e160d 100%);
 }
 
 .glass {

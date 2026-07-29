@@ -88,10 +88,12 @@ export default function SettingsPage() {
   return (
     <main className="max-w-4xl mx-auto px-4 pb-10">
       <header className="hero-gradient -mx-4 px-5 pb-7 pt-10 text-white sm:mx-0 sm:mt-4 sm:rounded-2xl">
-        <div className="mb-3 inline-flex items-center rounded-xl bg-white/95 px-3 py-1.5 shadow">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src="/logo.png" alt="MinTech" className="h-6 w-auto" />
-        </div>
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src="/logo.png"
+          alt="MinTech"
+          className="mb-3 h-10 w-auto drop-shadow-[0_3px_10px_rgba(0,0,0,0.25)]"
+        />
         <p className="text-xs font-bold tracking-[0.24em] uppercase text-clay-100">Settings</p>
         <h1 className="font-display text-2xl font-bold">Telegram bot access</h1>
         <p className="mt-1 text-sm text-clay-100/90">Employees · positions · passwords · full audit trail</p>

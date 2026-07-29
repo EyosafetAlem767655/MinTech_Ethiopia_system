@@ -20,7 +20,7 @@ import {
   receivablesAging,
   type TrendPoint,
 } from "@/lib/metrics";
-import { DEPARTMENTS, type DepartmentKey } from "@/lib/departments";
+import { DEPARTMENTS, DEPARTMENT_KEYS, type DepartmentKey } from "@/lib/departments";
 import { eatDateLabel } from "@/lib/dates";
 import { rangeWindow, RANGES, type RangeKey } from "@/lib/ranges";
 
@@ -330,6 +330,49 @@ async function departmentSubmissions(dept: DepartmentKey, start: Date, end: Date
   }
 
   return [...dailySubs, ...typed].sort((a, b) => (a.when < b.when ? 1 : -1)).slice(0, 60);
+}
+
+/* ─────────────────────────────── Brief summaries ──────────────────────────── */
+
+/** A compact, at-a-glance summary of one department for the Brief landing. */
+export interface DepartmentSummary {
+  department: DepartmentKey;
+  metric: DepartmentReport["metric"];
+  /** The two headline KPIs for the window. */
+  headline: Kpi[];
+  /** Top contributors by submission count in the window. */
+  contributors: RosterEntry[];
+  contributorCount: number;
+  /** A few most-recent employee activities. */
+  recent: Submission[];
+  activityCount: number;
+  lastActivity: string | null;
+}
+
+export async function getDepartmentSummary(
+  dept: DepartmentKey,
+  rangeKey: RangeKey,
+  now = new Date()
+): Promise<DepartmentSummary> {
+  const r = await getDepartmentReport(dept, rangeKey, now);
+  return {
+    department: dept,
+    metric: r.metric,
+    headline: r.kpis.slice(0, 2),
+    contributors: r.roster.slice(0, 4),
+    contributorCount: r.roster.length,
+    recent: r.submissions.slice(0, 3),
+    activityCount: r.submissions.length,
+    lastActivity: r.submissions[0]?.when ?? null,
+  };
+}
+
+/** Summaries for all four departments — the payload behind the Brief. */
+export async function getAllDepartmentSummaries(
+  rangeKey: RangeKey,
+  now = new Date()
+): Promise<DepartmentSummary[]> {
+  return Promise.all(DEPARTMENT_KEYS.map((k) => getDepartmentSummary(k, rangeKey, now)));
 }
 
 /* ──────────────────────────────────── Roster ──────────────────────────────── */

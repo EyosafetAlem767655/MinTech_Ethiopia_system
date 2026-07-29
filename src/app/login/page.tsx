@@ -50,10 +50,12 @@ function LoginForm() {
 export default function LoginPage() {
   return (
     <main className="min-h-screen hero-gradient flex flex-col items-center justify-center px-6">
-      <div className="mb-6 inline-flex items-center rounded-2xl bg-white/95 px-5 py-3 shadow-lg shadow-black/20">
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src="/logo.png" alt="MinTech Ethiopia" className="h-10 w-auto" />
-      </div>
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src="/logo.png"
+        alt="MinTech Ethiopia"
+        className="mb-8 h-16 w-auto max-w-[80%] drop-shadow-[0_4px_14px_rgba(0,0,0,0.3)]"
+      />
       <Suspense>
         <LoginForm />
       </Suspense>
