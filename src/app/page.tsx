@@ -74,17 +74,15 @@ export default function OwnerDashboard() {
       <header className="hero-gradient text-white px-5 pt-12 pb-20 rounded-b-[2.2rem] relative overflow-hidden">
         <div className="absolute -top-10 -right-10 w-48 h-48 rounded-full bg-white/5 animate-float" />
         <div className="absolute top-24 -left-12 w-36 h-36 rounded-full bg-white/5 animate-float [animation-delay:1.5s]" />
-        <div className="relative stagger">
+        <div className="relative stagger flex flex-col items-center text-center">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
             src="/logo.png"
             alt="MinTech Ethiopia"
-            className="h-14 w-auto max-w-[86%] drop-shadow-[0_4px_12px_rgba(0,0,0,0.25)]"
+            className="h-16 w-auto max-w-[88%] drop-shadow-[0_4px_12px_rgba(0,0,0,0.25)]"
           />
           <h1 className="font-display text-3xl font-bold mt-5 leading-tight">
-            ☀️ Good morning,
-            <br />
-            Mr. Anteneh
+            ☀️ Good morning, Mr. Anteneh
           </h1>
           <p className="text-clay-100/90 text-sm mt-2">{today} · Department activity</p>
           <button

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { HR_KINDS, POSITIONS, POSITION_KEYS, capabilitiesFor, type PositionKey } from "@/lib/positions";
+import { HR_KINDS, POSITIONS, POSITION_GROUPS, capabilitiesFor, type PositionKey } from "@/lib/positions";
 import { InstallButton } from "@/components/InstallPrompt";
 
 interface BotUser {
@@ -225,27 +225,12 @@ function UsersTab() {
           />
         </div>
 
-        <p className="mt-3 text-xs font-bold uppercase tracking-widest text-stone-400">Positions</p>
-        <div className="mt-1.5 grid gap-1.5 sm:grid-cols-2">
-          {POSITION_KEYS.map((p) => (
-            <label
-              key={p}
-              className={`flex cursor-pointer items-start gap-2 rounded-xl border p-2.5 text-xs transition ${
-                positions.includes(p) ? "border-clay-400 bg-clay-50" : "border-stone-200 bg-white"
-              }`}
-            >
-              <input
-                type="checkbox"
-                checked={positions.includes(p)}
-                onChange={() => togglePosition(p)}
-                className="mt-0.5 accent-clay-700"
-              />
-              <span>
-                <span className="block font-bold text-stone-800">{POSITIONS[p].en}</span>
-                <span className="block text-stone-500">{POSITIONS[p].am}</span>
-              </span>
-            </label>
-          ))}
+        <p className="mt-3 text-xs font-bold uppercase tracking-widest text-stone-400">Departments &amp; reports</p>
+        <p className="mt-0.5 text-[11px] text-stone-400">
+          Tick any reports across departments this employee should handle.
+        </p>
+        <div className="mt-2">
+          <PositionPicker selected={positions} onToggle={togglePosition} />
         </div>
 
         {positions.length > 0 && (
@@ -393,18 +378,66 @@ function PositionEditor({
 
   return (
     <div className="mt-3 rounded-xl bg-stone-50 p-3">
-      <div className="grid gap-1.5 sm:grid-cols-2">
-        {POSITION_KEYS.map((p) => (
-          <label key={p} className="flex items-center gap-2 text-xs text-stone-700">
-            <input type="checkbox" checked={next.includes(p)} onChange={() => toggle(p)} className="accent-clay-700" />
-            {POSITIONS[p].en}
-          </label>
-        ))}
-      </div>
+      <PositionPicker selected={next} onToggle={toggle} />
       <div className="mt-3 flex gap-2">
         <SmallBtn label="Save" tone="green" onClick={() => onSave(next)} disabled={next.length === 0} />
         <SmallBtn label="Cancel" onClick={onCancel} />
       </div>
+    </div>
+  );
+}
+
+/* ─────────────────────── Department-grouped role picker ────────────────────── */
+
+function PositionPicker({
+  selected,
+  onToggle,
+}: {
+  selected: PositionKey[];
+  onToggle: (p: PositionKey) => void;
+}) {
+  return (
+    <div className="space-y-2.5">
+      {POSITION_GROUPS.map((g) => (
+        <div key={g.key} className="rounded-xl border border-stone-200 bg-stone-50/50 p-3">
+          <p className="flex items-center gap-1.5 text-xs font-bold text-stone-800">
+            <span>{g.icon}</span>
+            {g.name}
+            <span className="font-normal text-stone-400">· {g.am}</span>
+          </p>
+          {g.note && <p className="mt-0.5 text-[11px] leading-snug text-stone-400">{g.note}</p>}
+          <div className="mt-2 grid gap-1.5 sm:grid-cols-2">
+            {g.positions.map((p) => {
+              const pos = POSITIONS[p];
+              const on = selected.includes(p);
+              return (
+                <label
+                  key={p}
+                  className={`flex cursor-pointer items-start gap-2 rounded-lg border p-2.5 text-xs transition ${
+                    on ? "border-clay-400 bg-clay-50" : "border-stone-200 bg-white"
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={on}
+                    onChange={() => onToggle(p)}
+                    className="mt-0.5 accent-clay-700"
+                  />
+                  <span>
+                    <span className="block font-bold text-stone-800">{pos.en}</span>
+                    <span className="block text-stone-500">{pos.am}</span>
+                    {!pos.dailyRequired && (
+                      <span className="mt-1 inline-block rounded-full bg-stone-200 px-1.5 py-0.5 text-[10px] font-bold text-stone-500">
+                        not daily
+                      </span>
+                    )}
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

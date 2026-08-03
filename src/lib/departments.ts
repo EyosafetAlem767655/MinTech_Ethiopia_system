@@ -49,7 +49,7 @@ export const DEPARTMENTS: Record<DepartmentKey, Department> = {
     accent: "bg-blue-600",
     color: "#2a78d6",
     blurb: "Output, shifts and stone intake at the gate.",
-    positions: ["production_reporter", "weight_checker", "stone_quality_checker"],
+    positions: ["prod_daily"],
   },
   asset_management: {
     key: "asset_management",
@@ -59,7 +59,7 @@ export const DEPARTMENTS: Record<DepartmentKey, Department> = {
     accent: "bg-amber-600",
     color: "#d08700",
     blurb: "Materials, bag inventory, purchases and damage.",
-    positions: ["store_keeper", "purchase_requester"],
+    positions: ["asset_materials", "asset_purchase"],
   },
   sales: {
     key: "sales",
@@ -69,7 +69,7 @@ export const DEPARTMENTS: Record<DepartmentKey, Department> = {
     accent: "bg-emerald-600",
     color: "#008300",
     blurb: "Invoiced revenue and tons sold.",
-    positions: ["daily_finance_reporter", "monthly_finance_reporter"],
+    positions: ["sales_daily"],
   },
   finance: {
     key: "finance",
@@ -79,7 +79,7 @@ export const DEPARTMENTS: Record<DepartmentKey, Department> = {
     accent: "bg-violet-600",
     color: "#7c3aed",
     blurb: "Cash collected, receivables and withholding.",
-    positions: ["daily_finance_reporter", "monthly_finance_reporter"],
+    positions: ["finance_daily", "finance_monthly"],
   },
 };
 

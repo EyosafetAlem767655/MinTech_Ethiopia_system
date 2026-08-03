@@ -354,17 +354,110 @@ export async function getDepartmentSummary(
   rangeKey: RangeKey,
   now = new Date()
 ): Promise<DepartmentSummary> {
-  const r = await getDepartmentReport(dept, rangeKey, now);
+  const { start, end } = rangeWindow(rangeKey, now);
+
+  // The Brief only needs activity — recent submissions + cheap counts. It must
+  // NOT run the heavy report queries (bucketed series, day numbers, receivables
+  // aging, lot balances): four departments' worth of those in parallel is what
+  // pushed this route to a 504. Counts are indexed, submissions are limited.
+  const [subs, counts] = await Promise.all([
+    departmentSubmissions(dept, start, end),
+    departmentActivityCounts(dept, start, end),
+  ]);
+
+  const roster = rosterFrom(subs);
+  const metric: DepartmentReport["metric"] =
+    dept === "production" ? "production" : dept === "finance" ? "collections" : "sales";
+
   return {
     department: dept,
-    metric: r.metric,
-    headline: r.kpis.slice(0, 2),
-    contributors: r.roster.slice(0, 4),
-    contributorCount: r.roster.length,
-    recent: r.submissions.slice(0, 3),
-    activityCount: r.submissions.length,
-    lastActivity: r.submissions[0]?.when ?? null,
+    metric,
+    headline: counts.headline,
+    contributors: roster.slice(0, 4),
+    contributorCount: roster.length,
+    recent: subs.slice(0, 3),
+    activityCount: counts.total,
+    lastActivity: subs[0]?.when ?? null,
   };
+}
+
+/** Cheap COUNT-only activity tallies for a department's Brief summary. */
+async function departmentActivityCounts(
+  dept: DepartmentKey,
+  start: Date,
+  end: Date
+): Promise<{ total: number; headline: Kpi[] }> {
+  const positions = DEPARTMENTS[dept].positions;
+  const n = (rows: { n: string }[]) => Number(rows[0]?.n) || 0;
+
+  const reports = n(
+    await sql<{ n: string }[]>`
+      select count(*) as n from daily_reports
+       where created_at >= ${start} and created_at < ${end}
+         and positions && ${positions}::text[]`
+  );
+
+  switch (dept) {
+    case "production": {
+      const [a] = await sql<{ shifts: string; deliveries: string }[]>`
+        select
+          (select count(*) from shift_reports    where date >= ${start} and date < ${end}) as shifts,
+          (select count(*) from stone_deliveries where date >= ${start} and date < ${end}) as deliveries`;
+      const shifts = Number(a.shifts) || 0;
+      const deliveries = Number(a.deliveries) || 0;
+      return {
+        total: reports + shifts + deliveries,
+        headline: [
+          { icon: "📝", label: "Daily reports", value: reports },
+          { icon: "👷", label: "Shift reports", value: shifts },
+        ],
+      };
+    }
+    case "asset_management": {
+      const [a] = await sql<{ materials: string; purchases: string; damage: string }[]>`
+        select
+          (select count(*) from material_counts   where created_at >= ${start} and created_at < ${end}) as materials,
+          (select count(*) from purchase_requests where created_at >= ${start} and created_at < ${end}) as purchases,
+          (select count(*) from damage_claims     where created_at >= ${start} and created_at < ${end}) as damage`;
+      const materials = Number(a.materials) || 0;
+      const purchases = Number(a.purchases) || 0;
+      const damage = Number(a.damage) || 0;
+      return {
+        total: reports + materials + purchases + damage,
+        headline: [
+          { icon: "📦", label: "Material counts", value: materials },
+          { icon: "🛒", label: "Purchase reqs", value: purchases },
+        ],
+      };
+    }
+    case "sales": {
+      const [a] = await sql<{ invoices: string; receipts: string }[]>`
+        select
+          (select count(*) from invoices where invoiced_at >= ${start} and invoiced_at < ${end}) as invoices,
+          (select count(*) from receipts where created_at  >= ${start} and created_at  < ${end}) as receipts`;
+      const invoices = Number(a.invoices) || 0;
+      const receipts = Number(a.receipts) || 0;
+      return {
+        total: reports + invoices + receipts,
+        headline: [
+          { icon: "📄", label: "Invoices", value: invoices },
+          { icon: "🧾", label: "Receipts", value: receipts },
+        ],
+      };
+    }
+    case "finance": {
+      const [a] = await sql<{ payments: string }[]>`
+        select (select count(*) from payments where date >= ${start} and date < ${end}) as payments`;
+      const payments = Number(a.payments) || 0;
+      return {
+        total: reports + payments,
+        headline: [
+          { icon: "💵", label: "Payments", value: payments },
+          { icon: "📝", label: "Daily reports", value: reports },
+        ],
+      };
+    }
+  }
 }
 
 /** Summaries for all four departments — the payload behind the Brief. */

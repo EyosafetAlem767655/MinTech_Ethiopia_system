@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import sql from "@/lib/sql";
 import { eatDateKey } from "@/lib/bot-auth";
+import { requiresDailyReport } from "@/lib/positions";
 
 export const dynamic = "force-dynamic";
 
@@ -56,7 +57,11 @@ export async function GET(req: NextRequest) {
   }
   const lastByUser = new Map(lastSubmitted.map((r) => [r.user_id, r.last]));
 
-  const compliance = activeEmployees.map((u) => {
+  // Only employees whose role obliges a daily report are held to compliance.
+  // Purchase-only, monthly-only and HR/Admin recipients are excluded.
+  const expected = activeEmployees.filter((u) => requiresDailyReport(u.positions));
+
+  const compliance = expected.map((u) => {
     const days = daysByUser.get(u.id) ?? new Set<string>();
     const submitted7 = window7.filter((d) => days.has(d)).length;
     // Missed days ending today (a streak): count leading days with no submission.
@@ -89,8 +94,8 @@ export async function GET(req: NextRequest) {
     missingToday,
     compliance,
     summary: {
-      total: activeEmployees.length,
-      submittedToday: activeEmployees.length - missingToday.length,
+      total: expected.length,
+      submittedToday: expected.length - missingToday.length,
       missingToday: missingToday.length,
     },
   });

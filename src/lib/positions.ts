@@ -1,10 +1,11 @@
 /**
- * Employee positions and what each one may submit through the Telegram bot.
+ * Employee report roles (grouped by department) and what each may submit through
+ * the Telegram bot.
  *
- * A user holds one or more positions; their bot menu is the union of the
- * capabilities of those positions. `daily_finance_reporter` deliberately
- * includes `wht`, so filing withholding receipts is a finance task rather than
- * a separate standalone position.
+ * A user holds one or more roles; their bot menu is the union of the capabilities
+ * of those roles. Roles can span departments (a person may report both sales and
+ * production). `finance_daily` includes `wht`, so filing withholding receipts is
+ * part of the daily finance role rather than a separate one.
  */
 
 export type CapabilityKey =
@@ -173,95 +174,125 @@ export const HR_KINDS: Record<HrKind, { button: string; en: string; question: st
 
 /* ───────────────────────────────── Positions ─────────────────────────────── */
 
+/**
+ * Report roles, grouped by department. An employee may hold roles across several
+ * departments — the checkboxes are independent. HR and Admin are recipient
+ * roles: they receive the morning digests (see the morning-reminder cron) rather
+ * than filing daily reports themselves.
+ *
+ * The bot's capture engine keys off CAPABILITIES, not these keys, so redefining
+ * the roles here does not touch how submissions are ingested.
+ */
+export type PositionGroupKey =
+  | "production"
+  | "asset_management"
+  | "sales"
+  | "finance"
+  | "hr"
+  | "admin";
+
 export type PositionKey =
-  | "admin"
-  | "stone_quality_checker"
-  | "weight_checker"
-  | "production_reporter"
-  | "daily_finance_reporter"
-  | "monthly_finance_reporter"
-  | "store_keeper"
-  | "purchase_requester"
-  | "hr";
+  | "prod_daily"
+  | "asset_materials"
+  | "asset_purchase"
+  | "sales_daily"
+  | "finance_daily"
+  | "finance_monthly"
+  | "hr"
+  | "admin";
 
 export interface Position {
   key: PositionKey;
+  department: PositionGroupKey;
   en: string;
   am: string;
   description: string;
   capabilities: CapabilityKey[];
+  /**
+   * Whether holding this role obliges a daily report. Tool purchase requests are
+   * on-demand and the monthly finance report is monthly, so those are false;
+   * HR and Admin are recipients, also false.
+   */
+  dailyRequired: boolean;
 }
-
-/** Every internal employee gets these, regardless of position. */
-const BASE_CAPABILITIES: CapabilityKey[] = ["daily_report", "receipt", "question"];
 
 /** Capability keys in declaration order — used to grant the admin everything. */
 const ALL_CAPABILITIES = Object.keys(CAPABILITIES) as CapabilityKey[];
 
 export const POSITIONS: Record<PositionKey, Position> = {
-  admin: {
-    key: "admin",
-    en: "Administrator",
-    am: "አስተዳዳሪ",
-    description:
-      "Full access to every report. Receives the yearly data archive on Telegram before old records are deleted.",
-    capabilities: ALL_CAPABILITIES,
+  prod_daily: {
+    key: "prod_daily",
+    department: "production",
+    en: "Daily production report",
+    am: "የዕለት ምርት ሪፖርት",
+    description: "Reports production output every day (shift and daily operations).",
+    capabilities: ["daily_report", "shift", "ops", "question"],
+    dailyRequired: true,
   },
-  stone_quality_checker: {
-    key: "stone_quality_checker",
-    en: "Stone quality checker",
-    am: "የድንጋይ ጥራት ተቆጣጣሪ",
-    description: "Checks the quality of incoming stone deliveries at the gate. Several people hold this position.",
-    capabilities: [...BASE_CAPABILITIES, "truck"],
+  asset_materials: {
+    key: "asset_materials",
+    department: "asset_management",
+    en: "Raw materials weight report",
+    am: "የጥሬ ዕቃ ክብደት ሪፖርት",
+    description: "Reports the weight of imported raw materials every day.",
+    capabilities: ["daily_report", "materials", "question"],
+    dailyRequired: true,
   },
-  weight_checker: {
-    key: "weight_checker",
-    en: "Weight report checker",
-    am: "የክብደት ሪፖርት ተቆጣጣሪ",
-    description: "Files weight reports (filled sacks and bag weights). Several people hold this position.",
-    capabilities: [...BASE_CAPABILITIES, "shift"],
+  asset_purchase: {
+    key: "asset_purchase",
+    department: "asset_management",
+    en: "Tool purchase request",
+    am: "የመሣሪያ ግዢ ጥያቄ",
+    description: "Raises tool and equipment purchase requests when needed (not daily).",
+    capabilities: ["purchase", "question"],
+    dailyRequired: false,
   },
-  production_reporter: {
-    key: "production_reporter",
-    en: "Daily production reporter",
-    am: "የዕለት ምርት ሪፖርተር",
-    description: "Reports daily production output and shift performance.",
-    capabilities: [...BASE_CAPABILITIES, "shift", "ops"],
+  sales_daily: {
+    key: "sales_daily",
+    department: "sales",
+    en: "Sales report & receipts",
+    am: "የሽያጭ ሪፖርትና ደረሰኝ",
+    description: "Files the daily sales report together with receipts.",
+    capabilities: ["daily_report", "sales", "receipt", "question"],
+    dailyRequired: true,
   },
-  daily_finance_reporter: {
-    key: "daily_finance_reporter",
-    en: "Daily financial reporter",
-    am: "የዕለታዊ ፋይናንስ ሪፖርተር",
-    description: "Submits daily sales and payment reports, and files 3% withholding tax (WHT) receipts.",
-    capabilities: [...BASE_CAPABILITIES, "sales", "wht"],
+  finance_daily: {
+    key: "finance_daily",
+    department: "finance",
+    en: "Daily financial report",
+    am: "የዕለታዊ ፋይናንስ ሪፖርት",
+    description: "Files the daily financial report and 3% withholding (WHT) receipts.",
+    capabilities: ["daily_report", "sales", "wht", "question"],
+    dailyRequired: true,
   },
-  monthly_finance_reporter: {
-    key: "monthly_finance_reporter",
-    en: "Monthly financial reporter",
-    am: "የወርሃዊ ፋይናንስ ሪፖርተር",
-    description: "Submits monthly financial and sales summaries.",
-    capabilities: [...BASE_CAPABILITIES, "sales"],
-  },
-  store_keeper: {
-    key: "store_keeper",
-    en: "Store keeper",
-    am: "የመጋዘን ሹም",
-    description: "Counts imported PP bags and other materials; reports damaged bags.",
-    capabilities: [...BASE_CAPABILITIES, "materials", "damage", "ops"],
-  },
-  purchase_requester: {
-    key: "purchase_requester",
-    en: "Tool purchase requester",
-    am: "የመሣሪያ ግዢ ጠያቂ",
-    description: "Raises purchase requests for tools and equipment.",
-    capabilities: [...BASE_CAPABILITIES, "purchase"],
+  finance_monthly: {
+    key: "finance_monthly",
+    department: "finance",
+    en: "Monthly financial report",
+    am: "የወርሃዊ ፋይናንስ ሪፖርት",
+    description: "Files the monthly financial summary (monthly, not daily).",
+    capabilities: ["sales", "question"],
+    dailyRequired: false,
   },
   hr: {
     key: "hr",
-    en: "HR & customer relations",
-    am: "የሰው ኃይልና ደንበኛ ግንኙነት ኃላፊ",
-    description: "Customer contact and feedback, price adjustments, attendance and conflict resolution.",
-    capabilities: [...BASE_CAPABILITIES, "hr"],
+    department: "hr",
+    en: "HR",
+    am: "የሰው ኃይል",
+    description:
+      "Receives the morning report of who did and didn't submit, plus tool purchase requests. Can also file HR/customer reports.",
+    capabilities: ["hr", "purchase", "question"],
+    dailyRequired: false,
+  },
+  admin: {
+    key: "admin",
+    department: "admin",
+    en: "Administrator",
+    am: "አስተዳዳሪ",
+    description:
+      "Receives a concise daily Telegram digest across Production, Sales, Finance and Asset, plus who missed the daily report. Full access to every report.",
+    capabilities: ALL_CAPABILITIES,
+    dailyRequired: false,
   },
 };
 
@@ -270,6 +301,47 @@ export const POSITION_KEYS = Object.keys(POSITIONS) as PositionKey[];
 export function isPositionKey(value: unknown): value is PositionKey {
   return typeof value === "string" && value in POSITIONS;
 }
+
+/* ─────────────── Department grouping for the add-user screen ──────────────── */
+
+export interface PositionGroup {
+  key: PositionGroupKey;
+  name: string;
+  am: string;
+  icon: string;
+  /** Extra explanation, used for the recipient (HR / Admin) groups. */
+  note?: string;
+  positions: PositionKey[];
+}
+
+export const POSITION_GROUPS: PositionGroup[] = [
+  { key: "production", name: "Production", am: "ምርት", icon: "🏭", positions: ["prod_daily"] },
+  {
+    key: "asset_management",
+    name: "Asset Management",
+    am: "የንብረት አስተዳደር",
+    icon: "📦",
+    positions: ["asset_materials", "asset_purchase"],
+  },
+  { key: "sales", name: "Sales", am: "ሽያጭ", icon: "🤝", positions: ["sales_daily"] },
+  { key: "finance", name: "Finance", am: "ፋይናንስ", icon: "💵", positions: ["finance_daily", "finance_monthly"] },
+  {
+    key: "hr",
+    name: "HR",
+    am: "የሰው ኃይል",
+    icon: "👥",
+    note: "Gets the morning digest of who submitted and who didn't, plus tool purchase requests.",
+    positions: ["hr"],
+  },
+  {
+    key: "admin",
+    name: "Admin",
+    am: "አስተዳዳሪ",
+    icon: "🛡",
+    note: "Gets a concise daily digest across all departments and who missed their report.",
+    positions: ["admin"],
+  },
+];
 
 /** Union of the capabilities granted by every position the user holds. */
 export function capabilitiesFor(positions: string[]): Capability[] {
@@ -285,6 +357,16 @@ export function capabilitiesFor(positions: string[]): Capability[] {
 
 export function hasCapability(positions: string[], key: CapabilityKey): boolean {
   return capabilitiesFor(positions).some((c) => c.key === key);
+}
+
+/** True when any held role obliges a daily report — drives reminders/compliance. */
+export function requiresDailyReport(positions: string[]): boolean {
+  return positions.some((p) => isPositionKey(p) && POSITIONS[p].dailyRequired);
+}
+
+/** True when the user holds a specific role (e.g. hr, admin). */
+export function hasPosition(positions: string[], key: PositionKey): boolean {
+  return positions.includes(key);
 }
 
 export function positionLabelsAm(positions: string[]): string {
