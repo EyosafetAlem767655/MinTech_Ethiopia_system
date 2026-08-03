@@ -2,6 +2,9 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+/** M2 purchase request trust loop. Folded into the Asset Management department
+ *  page (was /purchases). Keeps the owner decision workflow (PATCH). */
+
 interface LegitimacyInfo {
   score: number;
   flags: string[];
@@ -37,7 +40,7 @@ const STATUS_STYLES: Record<string, string> = {
 const DECIDED_STATUSES = new Set(["approved", "rejected", "bought", "disregarded"]);
 const OPEN_STATUSES = new Set(["pending", "deferred"]);
 
-export default function PurchasesPage() {
+export default function PurchasesPanel() {
   const [requests, setRequests] = useState<PurchaseRequest[]>([]);
   const [deciding, setDeciding] = useState<Record<string, boolean>>({});
   const [filter, setFilter] = useState<"open" | "all" | "history">("open");
@@ -47,21 +50,26 @@ export default function PurchasesPage() {
     if (res.ok) setRequests(await res.json());
   }, []);
 
-  useEffect(() => { load(); }, [load]);
-
-  const decide = useCallback(async (id: string, action: string) => {
-    setDeciding((p) => ({ ...p, [id]: true }));
-    try {
-      await fetch(`/api/purchase-requests/${id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action }),
-      });
-      await load();
-    } finally {
-      setDeciding((p) => ({ ...p, [id]: false }));
-    }
+  useEffect(() => {
+    load();
   }, [load]);
+
+  const decide = useCallback(
+    async (id: string, action: string) => {
+      setDeciding((p) => ({ ...p, [id]: true }));
+      try {
+        await fetch(`/api/purchase-requests/${id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action }),
+        });
+        await load();
+      } finally {
+        setDeciding((p) => ({ ...p, [id]: false }));
+      }
+    },
+    [load]
+  );
 
   const open = requests.filter((r) => OPEN_STATUSES.has(r.status));
   const history = requests.filter((r) => DECIDED_STATUSES.has(r.status));
@@ -75,23 +83,17 @@ export default function PurchasesPage() {
   };
 
   return (
-    <main className="max-w-4xl mx-auto px-4 pb-10">
-      <header className="hero-gradient -mx-4 px-5 pb-7 pt-10 text-white sm:mx-0 sm:mt-4 sm:rounded-2xl">
-        <p className="text-xs font-bold tracking-[0.24em] uppercase text-clay-100">M2</p>
-        <h1 className="font-display text-2xl font-bold">Purchase Request Trust Loop</h1>
-        <p className="mt-1 text-sm text-clay-100/90">Telegram intake · AI legitimacy · Decision history</p>
-      </header>
+    <section className="space-y-3">
+      <h2 className="font-display text-lg font-bold px-1">🛒 Purchase requests</h2>
 
-      {/* ── Metrics ── */}
-      <section className="grid grid-cols-2 gap-3 py-5 sm:grid-cols-4">
+      <section className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         <Metric label="Awaiting" value={counts.pending} tone="text-amber-700" />
         <Metric label="Bought" value={counts.bought} tone="text-green-700" />
         <Metric label="Disregarded" value={counts.disregarded} tone="text-stone-500" />
         <Metric label="Deferred" value={counts.deferred} tone="text-purple-600" />
       </section>
 
-      {/* ── Filter tabs ── */}
-      <div className="flex gap-1.5 mb-4">
+      <div className="flex gap-1.5">
         {(["open", "history", "all"] as const).map((f) => (
           <button
             key={f}
@@ -105,9 +107,8 @@ export default function PurchasesPage() {
         ))}
       </div>
 
-      {/* ── Request list ── */}
       {visible.length === 0 && (
-        <p className="py-12 text-center text-sm text-stone-400">
+        <p className="py-8 text-center text-sm text-stone-400">
           {filter === "open" ? "Nothing waiting for a decision. 🎉" : "No requests here."}
         </p>
       )}
@@ -120,7 +121,6 @@ export default function PurchasesPage() {
               OPEN_STATUSES.has(pr.status) ? "border-amber-200" : "border-stone-100"
             }`}
           >
-            {/* Header row */}
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
@@ -132,20 +132,16 @@ export default function PurchasesPage() {
                 <p className="mt-0.5 text-xs text-stone-500">
                   {fmtETB(pr.amount)} · by <span className="font-semibold">{pr.requestedBy}</span> · {pr.source} · {fmtDate(pr.createdAt)}
                 </p>
-                {pr.justification && (
-                  <p className="mt-1 text-xs leading-relaxed text-stone-600">{pr.justification}</p>
-                )}
+                {pr.justification && <p className="mt-1 text-xs leading-relaxed text-stone-600">{pr.justification}</p>}
               </div>
             </div>
 
-            {/* Legitimacy badge */}
             {pr.legitimacy && (
               <div className="mt-2">
                 <LegitimacyBar score={pr.legitimacy.score} reasoning={pr.legitimacy.reasoning} flags={pr.legitimacy.flags} />
               </div>
             )}
 
-            {/* Decision record */}
             {pr.decidedBy && pr.decidedAt && (
               <p className="mt-2 text-[11px] text-stone-400 font-medium">
                 {pr.status === "bought" ? "Purchased" : pr.status === "disregarded" ? "Disregarded" : "Decided"} by{" "}
@@ -153,7 +149,6 @@ export default function PurchasesPage() {
               </p>
             )}
 
-            {/* Decision buttons (only for open items) */}
             {OPEN_STATUSES.has(pr.status) && (
               <div className="mt-3 flex flex-wrap gap-2">
                 <ActionBtn label="✓ Bought" color="green" loading={!!deciding[pr._id]} onClick={() => decide(pr._id, "bought")} />
@@ -165,14 +160,14 @@ export default function PurchasesPage() {
           </div>
         ))}
       </div>
-    </main>
+    </section>
   );
 }
 
 function Metric({ label, value, tone }: { label: string; value: number; tone: string }) {
   return (
-    <div className="rounded-xl border border-stone-200 bg-white p-4">
-      <p className="text-xs font-bold uppercase tracking-widest text-stone-400">{label}</p>
+    <div className="rounded-xl border border-stone-200 bg-white p-3">
+      <p className="text-[10px] font-bold uppercase tracking-widest text-stone-400">{label}</p>
       <p className={`mt-1 font-display text-2xl font-bold ${tone}`}>{value}</p>
     </div>
   );

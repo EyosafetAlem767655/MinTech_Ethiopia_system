@@ -338,15 +338,10 @@ async function departmentSubmissions(dept: DepartmentKey, start: Date, end: Date
 export interface DepartmentSummary {
   department: DepartmentKey;
   metric: DepartmentReport["metric"];
-  /** The two headline KPIs for the window. */
+  /** The two headline activity counts for the window. */
   headline: Kpi[];
-  /** Top contributors by submission count in the window. */
-  contributors: RosterEntry[];
-  contributorCount: number;
-  /** A few most-recent employee activities. */
-  recent: Submission[];
+  /** Total submissions in the window across the department's tables. */
   activityCount: number;
-  lastActivity: string | null;
 }
 
 export async function getDepartmentSummary(
@@ -356,16 +351,13 @@ export async function getDepartmentSummary(
 ): Promise<DepartmentSummary> {
   const { start, end } = rangeWindow(rangeKey, now);
 
-  // The Brief only needs activity — recent submissions + cheap counts. It must
-  // NOT run the heavy report queries (bucketed series, day numbers, receivables
-  // aging, lot balances): four departments' worth of those in parallel is what
-  // pushed this route to a 504. Counts are indexed, submissions are limited.
-  const [subs, counts] = await Promise.all([
-    departmentSubmissions(dept, start, end),
-    departmentActivityCounts(dept, start, end),
-  ]);
+  // The Brief needs ONLY cheap indexed counts. It must never run the per-submission
+  // feed (ORDER BY created_at LIMIT scans) or the heavy report queries (bucketed
+  // series, day numbers, receivables aging, lot balances): four departments' worth
+  // of those in parallel is what pushed this route to a 504. The full submission
+  // feed + roster live on the per-department detail page, loaded one at a time.
+  const counts = await departmentActivityCounts(dept, start, end);
 
-  const roster = rosterFrom(subs);
   const metric: DepartmentReport["metric"] =
     dept === "production" ? "production" : dept === "finance" ? "collections" : "sales";
 
@@ -373,11 +365,7 @@ export async function getDepartmentSummary(
     department: dept,
     metric,
     headline: counts.headline,
-    contributors: roster.slice(0, 4),
-    contributorCount: roster.length,
-    recent: subs.slice(0, 3),
     activityCount: counts.total,
-    lastActivity: subs[0]?.when ?? null,
   };
 }
 

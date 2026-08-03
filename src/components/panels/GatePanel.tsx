@@ -2,6 +2,9 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+/** M6 truck & raw-material traceability. Folded into the Production department
+ *  page (was /gate). */
+
 type Grade = "good" | "fair" | "dark/weathered";
 
 interface StoneDelivery {
@@ -36,7 +39,7 @@ const gradeStyle: Record<Grade, string> = {
   "dark/weathered": "bg-red-100 text-red-700",
 };
 
-export default function GatePage() {
+export default function GatePanel() {
   const [data, setData] = useState<GateData | null>(null);
 
   const load = useCallback(async () => {
@@ -54,22 +57,18 @@ export default function GatePage() {
   const fairLoads = summary.find((row) => row._id === "fair")?.loads || 0;
 
   return (
-    <main className="max-w-6xl mx-auto px-4 pb-8">
-      <header className="hero-gradient -mx-4 px-5 pb-7 pt-10 text-white sm:mx-0 sm:mt-4 sm:rounded-2xl">
-        <p className="text-xs font-bold tracking-[0.24em] uppercase text-clay-100">M6</p>
-        <h1 className="font-display text-2xl font-bold">Truck & Raw-Material Traceability</h1>
-        <p className="mt-1 text-sm text-clay-100/90">Truck evidence, quarry source and AI stone quality history.</p>
-      </header>
+    <section className="space-y-3">
+      <h2 className="font-display text-lg font-bold px-1">🚚 Gate & stone traceability</h2>
 
-      <section className="grid gap-3 py-5 sm:grid-cols-3">
+      <section className="grid grid-cols-3 gap-2">
         <Metric label="Loads logged" value={totalLoads.toLocaleString()} />
         <Metric label="Fair loads" value={fairLoads.toLocaleString()} tone="text-amber-700" />
-        <Metric label="Dark/weathered loads" value={badLoads.toLocaleString()} tone="text-red-700" />
+        <Metric label="Dark/weathered" value={badLoads.toLocaleString()} tone="text-red-700" />
       </section>
 
-      <section className="rounded-xl border border-stone-200 bg-white">
+      <div className="rounded-xl border border-stone-200 bg-white">
         <div className="flex items-center justify-between border-b border-stone-100 p-4">
-          <h2 className="font-display text-base font-bold text-ink">Traceability log</h2>
+          <h3 className="font-display text-sm font-bold text-ink">Traceability log</h3>
           <span className="text-xs font-semibold text-stone-400">{data?.deliveries.length || 0} records</span>
         </div>
         <div className="divide-y divide-stone-100">
@@ -85,7 +84,7 @@ export default function GatePage() {
               )}
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
-                  <h3 className="font-bold text-stone-900">{delivery.truckPlate}</h3>
+                  <h4 className="font-bold text-stone-900">{delivery.truckPlate}</h4>
                   <span className={`rounded-full px-2.5 py-1 text-[11px] font-bold ${gradeStyle[delivery.qualityGrade]}`}>
                     {delivery.qualityGrade}
                   </span>
@@ -106,16 +105,16 @@ export default function GatePage() {
           {!data && <p className="p-6 text-center text-sm text-stone-400">Loading gate log...</p>}
           {data && data.deliveries.length === 0 && <p className="p-6 text-center text-sm text-stone-400">No truck check-ins yet.</p>}
         </div>
-      </section>
-    </main>
+      </div>
+    </section>
   );
 }
 
 function Metric({ label, value, tone = "text-stone-900" }: { label: string; value: string; tone?: string }) {
   return (
-    <div className="rounded-xl border border-stone-200 bg-white p-4">
-      <p className="text-xs font-bold uppercase tracking-widest text-stone-400">{label}</p>
-      <p className={`mt-2 font-display text-2xl font-bold ${tone}`}>{value}</p>
+    <div className="rounded-xl border border-stone-200 bg-white p-3">
+      <p className="text-[10px] font-bold uppercase tracking-widest text-stone-400">{label}</p>
+      <p className={`mt-1 font-display text-lg font-bold ${tone}`}>{value}</p>
     </div>
   );
 }

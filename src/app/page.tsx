@@ -1,44 +1,28 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import CountUp from "@/components/CountUp";
-import DepartmentTabs, { type TopView } from "@/components/DepartmentTabs";
-import DepartmentReport from "@/components/DepartmentReport";
 import RangeSelector from "@/components/RangeSelector";
+import DailyReportsPanel from "@/components/panels/DailyReportsPanel";
 import { enablePushNotifications } from "@/components/PwaSetup";
 import { DEPARTMENTS } from "@/lib/departments";
-import { RANGES, type RangeKey } from "@/lib/ranges";
-import type { DepartmentSummary, Kpi, Submission } from "@/lib/department-metrics";
+import { type RangeKey } from "@/lib/ranges";
+import type { DepartmentSummary, Kpi } from "@/lib/department-metrics";
 
 interface BriefData {
   exceptions: string[];
   brief: { date: string; narrative: string; fiveLines: string[] } | null;
 }
 
-const SOURCE_ICON: Record<Submission["source"], string> = {
-  daily_report: "📝",
-  shift: "👷",
-  stone: "🚚",
-  material: "📦",
-  purchase: "🛒",
-  damage: "🛡",
-  receipt: "🧾",
-  invoice: "📄",
-  payment: "💵",
-};
-
-const fmtTime = (d: string) =>
-  new Date(d).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
-
 export default function OwnerDashboard() {
-  const [view, setView] = useState<TopView>("brief");
   const [range, setRange] = useState<RangeKey>("weekly");
   const [brief, setBrief] = useState<BriefData | null>(null);
   const [summaries, setSummaries] = useState<DepartmentSummary[] | null>(null);
   const [pushState, setPushState] = useState<string>("");
   const [error, setError] = useState("");
 
-  // Exceptions + AI brief — the only two owner-level items kept on the landing.
+  // Exceptions + AI brief — the two owner-level items kept on the landing.
   useEffect(() => {
     fetch("/api/dashboard")
       .then((r) => (r.ok ? r.json() : null))
@@ -48,7 +32,7 @@ export default function OwnerDashboard() {
       .catch(() => {});
   }, []);
 
-  // Per-department summaries — reload when the window changes.
+  // Per-department summaries (cheap counts) — reload when the window changes.
   const loadSummaries = useCallback(async () => {
     setSummaries(null);
     setError("");
@@ -63,8 +47,8 @@ export default function OwnerDashboard() {
   }, [range]);
 
   useEffect(() => {
-    if (view === "brief") loadSummaries();
-  }, [view, loadSummaries]);
+    loadSummaries();
+  }, [loadSummaries]);
 
   const today = new Date().toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long" });
 
@@ -81,9 +65,7 @@ export default function OwnerDashboard() {
             alt="MinTech Ethiopia"
             className="h-16 w-auto max-w-[88%] drop-shadow-[0_4px_12px_rgba(0,0,0,0.25)]"
           />
-          <h1 className="font-display text-3xl font-bold mt-5 leading-tight">
-            ☀️ Good morning, Mr. Anteneh
-          </h1>
+          <h1 className="font-display text-3xl font-bold mt-5 leading-tight">☀️ Good morning, Mr. Anteneh</h1>
           <p className="text-clay-100/90 text-sm mt-2">{today} · Department activity</p>
           <button
             onClick={async () => setPushState(await enablePushNotifications())}
@@ -94,72 +76,71 @@ export default function OwnerDashboard() {
         </div>
       </header>
 
-      <div className="px-4 -mt-12 relative space-y-5">
-        <DepartmentTabs value={view} onChange={setView} />
-
-        {view !== "brief" && <DepartmentReport dept={view} />}
-
-        {view === "brief" && (
-          <>
-            {/* Exceptions — the one alert strip worth keeping up top */}
-            {brief && brief.exceptions.length > 0 && (
-              <section className="animate-scale-in">
-                <div className="exception-bar rounded-2xl bg-gradient-to-br from-clay-700 to-clay-900 text-white p-4 shadow-lg shadow-clay-300/50">
-                  <p className="text-[11px] font-bold tracking-widest uppercase text-clay-200 mb-2">
-                    🚨 {brief.exceptions.length} exception{brief.exceptions.length > 1 ? "s" : ""} to review
-                  </p>
-                  <ul className="space-y-1.5">
-                    {brief.exceptions.slice(0, 4).map((e, i) => (
-                      <li key={i} className="text-sm font-medium leading-snug flex gap-2">
-                        <span className="text-clay-300">▸</span>
-                        {e}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              </section>
-            )}
-
-            {brief?.brief?.narrative && (
-              <section className="card p-4 animate-fade-up border-l-4 border-l-clay-600">
-                <p className="text-[11px] font-bold tracking-widest uppercase text-clay-500 mb-1.5">
-                  ✦ AI morning brief · {brief.brief.date}
-                </p>
-                <p className="text-sm leading-relaxed text-stone-700 italic">{brief.brief.narrative}</p>
-              </section>
-            )}
-
-            {/* ───────── Per-department summaries ───────── */}
-            <section className="animate-fade-up">
-              <div className="mb-3 flex items-center justify-between gap-2 px-1">
-                <h2 className="font-display text-lg font-bold">Departments</h2>
-                <RangeSelector value={range} onChange={setRange} />
-              </div>
-
-              {error && (
-                <div className="card p-4 text-sm text-red-700 bg-red-50 border-red-200">
-                  Could not load summaries: {error}
-                </div>
-              )}
-
-              {!summaries && !error && (
-                <div className="space-y-3">
-                  {[0, 1, 2, 3].map((i) => (
-                    <div key={i} className="card h-40 animate-pulse bg-clay-50" />
-                  ))}
-                </div>
-              )}
-
-              {summaries && (
-                <div className="space-y-3 pb-6">
-                  {summaries.map((s) => (
-                    <SummaryCard key={s.department} summary={s} range={range} onOpen={() => setView(s.department)} />
-                  ))}
-                </div>
-              )}
-            </section>
-          </>
+      <div className="px-4 -mt-12 relative space-y-5 pb-6">
+        {/* Exceptions */}
+        {brief && brief.exceptions.length > 0 && (
+          <section className="animate-scale-in">
+            <div className="exception-bar rounded-2xl bg-gradient-to-br from-clay-700 to-clay-900 text-white p-4 shadow-lg shadow-clay-300/50">
+              <p className="text-[11px] font-bold tracking-widest uppercase text-clay-200 mb-2">
+                🚨 {brief.exceptions.length} exception{brief.exceptions.length > 1 ? "s" : ""} to review
+              </p>
+              <ul className="space-y-1.5">
+                {brief.exceptions.slice(0, 4).map((e, i) => (
+                  <li key={i} className="text-sm font-medium leading-snug flex gap-2">
+                    <span className="text-clay-300">▸</span>
+                    {e}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </section>
         )}
+
+        {/* AI morning brief */}
+        {brief?.brief?.narrative && (
+          <section className="card p-4 animate-fade-up border-l-4 border-l-clay-600">
+            <p className="text-[11px] font-bold tracking-widest uppercase text-clay-500 mb-1.5">
+              ✦ AI morning brief · {brief.brief.date}
+            </p>
+            <p className="text-sm leading-relaxed text-stone-700 italic">{brief.brief.narrative}</p>
+          </section>
+        )}
+
+        {/* ───────── Per-department summaries ───────── */}
+        <section className="animate-fade-up">
+          <div className="mb-3 flex items-center justify-between gap-2 px-1">
+            <h2 className="font-display text-lg font-bold">Departments</h2>
+            <RangeSelector value={range} onChange={setRange} />
+          </div>
+
+          {error && (
+            <div className="card p-4 text-sm text-red-700 bg-red-50 border-red-200">
+              Could not load summaries: {error}
+            </div>
+          )}
+
+          {!summaries && !error && (
+            <div className="space-y-3">
+              {[0, 1, 2, 3].map((i) => (
+                <div key={i} className="card h-28 animate-pulse bg-clay-50" />
+              ))}
+            </div>
+          )}
+
+          {summaries && (
+            <div className="space-y-3">
+              {summaries.map((s) => (
+                <SummaryCard key={s.department} summary={s} />
+              ))}
+            </div>
+          )}
+        </section>
+
+        {/* ───────── Daily reports & who submitted / missed ───────── */}
+        <section className="animate-fade-up">
+          <h2 className="mb-3 px-1 font-display text-lg font-bold">Daily reports</h2>
+          <DailyReportsPanel />
+        </section>
       </div>
     </main>
   );
@@ -167,88 +148,38 @@ export default function OwnerDashboard() {
 
 /* ─────────────────────────── Department summary card ───────────────────────── */
 
-function SummaryCard({
-  summary,
-  range,
-  onOpen,
-}: {
-  summary: DepartmentSummary;
-  range: RangeKey;
-  onOpen: () => void;
-}) {
+function SummaryCard({ summary }: { summary: DepartmentSummary }) {
   const meta = DEPARTMENTS[summary.department];
   const quiet = summary.activityCount === 0;
 
   return (
-    <button
-      onClick={onOpen}
-      className="card w-full p-0 overflow-hidden text-left transition active:scale-[0.99]"
+    <Link
+      href={`/departments/${summary.department}`}
+      className="card block overflow-hidden p-0 text-left transition active:scale-[0.99]"
     >
       {/* Header strip */}
-      <div className={`${meta.accent} px-4 py-3 text-white`}>
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
-            <span className="text-xl">{meta.icon}</span>
-            <div>
-              <p className="font-display text-base font-bold leading-none">{meta.name}</p>
-              <p className="text-[11px] text-white/80 mt-0.5">{meta.blurb}</p>
-            </div>
+      <div className={`${meta.accent} flex items-center justify-between px-4 py-3 text-white`}>
+        <div className="flex items-center gap-2.5">
+          <span className="text-xl">{meta.icon}</span>
+          <div>
+            <p className="font-display text-base font-bold leading-none">{meta.name}</p>
+            <p className="mt-0.5 text-[11px] text-white/80">{meta.blurb}</p>
           </div>
-          <span className="rounded-full bg-white/20 px-2.5 py-1 text-[11px] font-bold">
-            {quiet ? "quiet" : `${summary.activityCount} update${summary.activityCount === 1 ? "" : "s"}`}
-          </span>
         </div>
+        <span className="rounded-full bg-white/20 px-2.5 py-1 text-[11px] font-bold">
+          {quiet ? "quiet" : `${summary.activityCount} update${summary.activityCount === 1 ? "" : "s"}`}
+        </span>
       </div>
 
       <div className="p-4">
-        {/* Headline KPIs */}
         <div className="grid grid-cols-2 gap-2">
           {summary.headline.map((k) => (
             <MiniKpi key={k.label} kpi={k} />
           ))}
         </div>
-
-        {/* Who's active */}
-        {summary.contributors.length > 0 ? (
-          <div className="mt-3">
-            <p className="text-[10px] font-bold uppercase tracking-widest text-stone-400">
-              {summary.contributorCount} {summary.contributorCount === 1 ? "person" : "people"} active
-            </p>
-            <div className="mt-1.5 flex flex-wrap gap-1.5">
-              {summary.contributors.map((c) => (
-                <span
-                  key={c.name}
-                  className="rounded-full border border-clay-100 bg-white px-2.5 py-1 text-[11px] font-semibold text-stone-700"
-                >
-                  {c.name}
-                  <span className="ml-1 text-[10px] font-bold text-clay-500">{c.submissions}</span>
-                </span>
-              ))}
-            </div>
-          </div>
-        ) : (
-          <p className="mt-3 text-xs text-stone-400">
-            No submissions in the last {RANGES[range].label.toLowerCase()}.
-          </p>
-        )}
-
-        {/* Recent activity */}
-        {summary.recent.length > 0 && (
-          <div className="mt-3 space-y-1.5 border-t border-clay-50 pt-3">
-            {summary.recent.map((r) => (
-              <div key={`${r.source}-${r.id}`} className="flex items-center gap-2 text-xs">
-                <span className="leading-none">{SOURCE_ICON[r.source]}</span>
-                <span className="font-semibold text-stone-800">{r.who}</span>
-                <span className="truncate text-stone-500">{r.title}</span>
-                <span className="ml-auto shrink-0 text-[10px] text-stone-400">{fmtTime(r.when)}</span>
-              </div>
-            ))}
-          </div>
-        )}
-
         <p className="mt-3 text-right text-xs font-bold text-clay-700">Open {meta.name} →</p>
       </div>
-    </button>
+    </Link>
   );
 }
 
