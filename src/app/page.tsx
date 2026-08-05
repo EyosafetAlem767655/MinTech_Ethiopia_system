@@ -69,9 +69,16 @@ export default function OwnerDashboard() {
           <p className="text-clay-100/90 text-sm mt-2">{today} · Department activity</p>
           <button
             onClick={async () => setPushState(await enablePushNotifications())}
-            className="mt-4 text-xs font-semibold bg-white/15 hover:bg-white/25 border border-white/25 rounded-full px-4 py-2 transition-all active:scale-95"
+            disabled={pushState === "granted"}
+            className="mt-4 text-xs font-semibold bg-white/15 hover:bg-white/25 border border-white/25 rounded-full px-4 py-2 transition-all active:scale-95 disabled:opacity-80"
           >
-            {pushState === "granted" ? "🔔 Morning push enabled" : "🔕 Enable 6:30 AM push"}
+            {pushState === "granted"
+              ? "🔔 Morning push enabled"
+              : pushState === "denied"
+              ? "🔕 Blocked — allow notifications in settings"
+              : pushState === "unsupported"
+              ? "🔕 Push not available (install the app first)"
+              : "🔕 Enable 6:30 AM push"}
           </button>
         </div>
       </header>
@@ -136,6 +143,12 @@ export default function OwnerDashboard() {
           )}
         </section>
 
+        {/* ───────── Who submitted what (all types) ───────── */}
+        <section className="animate-fade-up">
+          <h2 className="mb-3 px-1 font-display text-lg font-bold">Recent submissions</h2>
+          <RecentSubmissions />
+        </section>
+
         {/* ───────── Daily reports & who submitted / missed ───────── */}
         <section className="animate-fade-up">
           <h2 className="mb-3 px-1 font-display text-lg font-bold">Daily reports</h2>
@@ -190,6 +203,70 @@ function MiniKpi({ kpi }: { kpi: Kpi }) {
         <CountUp value={kpi.value} prefix={kpi.prefix ?? ""} suffix={kpi.suffix ?? ""} decimals={kpi.decimals ?? 0} />
       </p>
       <p className="mt-0.5 text-[10px] font-medium leading-tight text-stone-400">{kpi.label}</p>
+    </div>
+  );
+}
+
+/* ─────────────────────── Recent submissions (who · what · when) ───────────── */
+
+interface ActivityItem {
+  _id: string;
+  actor: string;
+  detail?: string;
+  createdAt: string;
+}
+
+const SUBMISSION_LABELS: Record<string, { icon: string; label: string }> = {
+  daily_report: { icon: "📝", label: "Daily report" },
+  materials: { icon: "📦", label: "Material count" },
+  receipt: { icon: "🧾", label: "Receipt" },
+  purchase_request: { icon: "🛒", label: "Purchase request" },
+  damage_claim: { icon: "🛡", label: "Damage claim" },
+  stone_delivery: { icon: "🚚", label: "Stone delivery" },
+  shift_report: { icon: "👷", label: "Shift report" },
+  invoice: { icon: "📄", label: "Invoice" },
+  payment: { icon: "💵", label: "Payment" },
+  ops: { icon: "📊", label: "Operations report" },
+  withholding_receipt: { icon: "📄", label: "Withholding receipt" },
+};
+
+function humanizeDetail(detail?: string): { icon: string; label: string } {
+  if (!detail) return { icon: "📄", label: "Submission" };
+  if (detail.startsWith("hr:")) return { icon: "👥", label: "HR report" };
+  return SUBMISSION_LABELS[detail] || { icon: "📄", label: detail.replace(/_/g, " ") };
+}
+
+const fmtTime = (d: string) =>
+  new Date(d).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+
+function RecentSubmissions() {
+  const [items, setItems] = useState<ActivityItem[] | null>(null);
+
+  useEffect(() => {
+    fetch("/api/bot-activity?action=submission&limit=30")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (d?.items) setItems(d.items);
+      })
+      .catch(() => {});
+  }, []);
+
+  if (!items) return <div className="card h-24 animate-pulse bg-clay-50" />;
+  if (items.length === 0) return <p className="card p-4 text-sm text-stone-400">No submissions yet.</p>;
+
+  return (
+    <div className="card divide-y divide-clay-50 p-0">
+      {items.map((a) => {
+        const h = humanizeDetail(a.detail);
+        return (
+          <div key={a._id} className="flex items-center gap-2 p-3 text-xs">
+            <span className="text-base leading-none">{h.icon}</span>
+            <span className="font-bold text-stone-800">{a.actor}</span>
+            <span className="text-stone-500">{h.label}</span>
+            <span className="ml-auto shrink-0 text-[10px] text-stone-400">{fmtTime(a.createdAt)}</span>
+          </div>
+        );
+      })}
     </div>
   );
 }

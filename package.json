@@ -9,7 +9,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "telegram:set-webhook": "node scripts/set-telegram-webhook.mjs"
+    "telegram:set-webhook": "node scripts/set-telegram-webhook.mjs",
+    "gen:vapid": "node -e \"const k=require('web-push').generateVAPIDKeys();console.log('VAPID_PUBLIC_KEY='+k.publicKey+'\\nVAPID_PRIVATE_KEY='+k.privateKey+'\\nNEXT_PUBLIC_VAPID_PUBLIC_KEY='+k.publicKey)\""
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.2",

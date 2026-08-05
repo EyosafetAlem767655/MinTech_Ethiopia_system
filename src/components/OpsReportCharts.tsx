@@ -27,14 +27,14 @@ export interface OpsReport {
 
 // Display names: ETL = Ethiopian Talc/Limestone (microns), EC = Ethiopian Calcium Carbonate (microns), EL grades
 const LABEL: Record<string, string> = {
-  ETL6: "ETL 6μ",
-  ETL9: "ETL 9μ",
-  ETL15: "ETL 15μ",
-  EC15: "EC 15μ",
-  EC90: "EC 90μ",
-  "2EL": "EL Gr.2",
-  "3EL": "EL Gr.3",
-  "5EL": "EL Gr.5",
+  ETL6: "ETL-6",
+  ETL9: "ETL-9",
+  ETL15: "ETL-15",
+  EC15: "EC-15",
+  EC90: "EC-90",
+  "2EL": "2-EL",
+  "3EL": "3-EL",
+  "5EL": "5-EL",
   Talk: "Talc",
 };
 

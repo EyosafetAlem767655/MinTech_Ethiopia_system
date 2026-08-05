@@ -20,6 +20,8 @@ export interface Session {
   loginLockedUntil?: Date | null;
   capture?: any;
   draft?: any;
+  /** 5-minute correction window: last submission ref + any in-progress edit. */
+  editState?: any;
   history: { role: "user" | "assistant"; content: string }[];
 }
 
@@ -37,6 +39,7 @@ function rowToSession(r: any): Session {
     loginLockedUntil: r.login_locked_until,
     capture: r.capture ?? undefined,
     draft: r.draft ?? undefined,
+    editState: r.edit_state ?? undefined,
     history: r.history ?? [],
   };
 }
@@ -67,6 +70,7 @@ export async function saveSession(s: Session): Promise<void> {
       login_locked_until = ${s.loginLockedUntil ?? null},
       capture            = ${s.capture ? sql.json(s.capture) : null},
       draft              = ${s.draft ? sql.json(s.draft) : null},
+      edit_state         = ${s.editState ? sql.json(s.editState) : null},
       history            = ${sql.json(s.history ?? [])}
     where chat_id = ${s.chatId}
   `;

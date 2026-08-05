@@ -369,6 +369,16 @@ export function hasPosition(positions: string[], key: PositionKey): boolean {
   return positions.includes(key);
 }
 
+/**
+ * True when every role the user holds is a recipient role (admin / HR). These
+ * users receive the daily digests on Telegram but never submit reports — the bot
+ * shows them a receiver-only menu and rejects submission attempts. Someone who
+ * also holds a reporting role is NOT receiver-only and keeps their submit menu.
+ */
+export function isReceiverOnly(positions: string[]): boolean {
+  return positions.length > 0 && positions.every((p) => p === "admin" || p === "hr");
+}
+
 export function positionLabelsAm(positions: string[]): string {
   return positions.filter(isPositionKey).map((p) => POSITIONS[p].am).join("፣ ");
 }

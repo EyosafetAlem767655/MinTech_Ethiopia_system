@@ -63,8 +63,7 @@ export async function sendBriefMessage(chatId: string | number, text: string, da
 /* ─────────────────────────────── Button labels ───────────────────────────── */
 
 export const ENTRY_BUTTONS = {
-  receipt: "🧾 ደረሰኝ ያስገቡ",
-  internal: "🔐 ለውስጥ ሰራተኛ",
+  internal: "🔐 ግባ",
 } as const;
 
 export const NAV_BUTTONS = {
@@ -74,9 +73,9 @@ export const NAV_BUTTONS = {
   logout: "🚪 ውጣ",
 } as const;
 
-/** First screen after /start — the only two doors into the bot. */
+/** First screen after /start — internal employees only; a single login door. */
 export const ENTRY_KEYBOARD = {
-  keyboard: [[{ text: ENTRY_BUTTONS.receipt }], [{ text: ENTRY_BUTTONS.internal }]],
+  keyboard: [[{ text: ENTRY_BUTTONS.internal }]],
   resize_keyboard: true,
   one_time_keyboard: false,
 };
@@ -102,21 +101,9 @@ export function reportKeyboardFor(buttons: string[]) {
   };
 }
 
-export const EXTERNAL_KEYBOARD = {
-  keyboard: [[{ text: ENTRY_BUTTONS.receipt }], [{ text: NAV_BUTTONS.back }]],
-  resize_keyboard: true,
-  one_time_keyboard: false,
-};
-
 export async function sendEntryMenu(chatId: string | number, text?: string) {
-  return sendMessage(chatId, text || "👋 እንኳን ደህና መጡ! ምን ማድረግ ይፈልጋሉ?", {
+  return sendMessage(chatId, text || "🔐 ይህ ቦት ለውስጥ ሰራተኞች ብቻ ነው። ለመግባት ከታች ያለውን ይጫኑ።", {
     reply_markup: ENTRY_KEYBOARD,
-  });
-}
-
-export async function sendExternalMenu(chatId: string | number, text?: string) {
-  return sendMessage(chatId, text || "🧾 ደረሰኝ ለማስገባት የታችኛውን ቁልፍ ይጫኑ።", {
-    reply_markup: EXTERNAL_KEYBOARD,
   });
 }
 

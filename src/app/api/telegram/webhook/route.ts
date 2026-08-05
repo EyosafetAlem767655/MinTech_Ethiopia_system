@@ -19,7 +19,6 @@ import {
   ENTRY_BUTTONS,
   NAV_BUTTONS,
   sendEntryMenu,
-  sendExternalMenu,
   sendMessage,
   sendPurchaseDecisionRequest,
   sendReportMenu,
@@ -40,8 +39,10 @@ import {
   CAPABILITIES,
   capabilitiesFor,
   HR_KINDS,
+  isReceiverOnly,
   positionLabelsAm,
   type Capability,
+  type CapabilityKey,
   type HrKind,
 } from "@/lib/positions";
 import { insertClaimPhotos, processClaimPhoto } from "@/lib/claims";
@@ -78,7 +79,6 @@ const HR_KIND_BY_LABEL = new Map<string, HrKind>(
 );
 
 const NORM = {
-  entryReceipt: normaliseChoice(ENTRY_BUTTONS.receipt),
   entryInternal: normaliseChoice(ENTRY_BUTTONS.internal),
   cancel: normaliseChoice(NAV_BUTTONS.cancel),
   changeReport: normaliseChoice(NAV_BUTTONS.changeReport),
@@ -99,10 +99,10 @@ const MSG = {
   loggedOut: "👋 ከመለያዎ ወጥተዋል።",
   sessionRevoked: "🔒 ክፍለ ጊዜዎ ተዘግቷል። እባክዎ ድጋሚ ይግቡ።",
   noPermission: "⛔ ይህን ሪፖርት ለማስገባት ፈቃድ የለዎትም።",
-  internalOnly: "🔐 ይህ ክፍል ለውስጥ ሰራተኞች ብቻ ነው። እባክዎ ይግቡ።",
-  askExternalName: "👤 እባክዎ ሙሉ ስምዎን ይፃፉ።",
-  askExternalPhone: "📞 እባክዎ ስልክ ቁጥርዎን ይፃፉ (ምሳሌ፦ 0912345678)።",
-  badPhone: "⚠️ የስልክ ቁጥሩ ትክክል አይደለም። እባክዎ ድጋሚ ይፃፉ።",
+  receiverOnly: "📊 ይህ መለያ ሪፖርት አይልክም። የቀኑን ማጠቃለያ በዚህ ቦት ይቀበላሉ።",
+  editPrompt: "✏️ የተስተካከለውን ሪፖርት ይላኩ።",
+  editExpired: "⛔ የማስተካከያ ጊዜው (5 ደቂቃ) አልፏል።",
+  editUnavailable: "🔍 ይህን ሪፖርት ማስተካከል አልተቻለም።",
   captureNeedsText: "📝 ጽሑፉንም ያክሉ። ፎቶው ተቀምጧል፤ አሁን ዝርዝሩን ይፃፉ።",
   pickReportFirst: "➡️ በመጀመሪያ ከምናሌው የሪፖርት ዓይነት ይምረጡ።",
   photoRequired:
@@ -141,12 +141,15 @@ function menuButtons(user: any): string[] {
 }
 
 async function sendRoleMenu(chatId: string, user: any, text?: string) {
+  // Admin/HR are receivers — no submit menu, just a logout key.
+  if (isReceiverOnly(user.positions || [])) {
+    return sendReportMenu(chatId, [], text || MSG.receiverOnly);
+  }
   return sendReportMenu(chatId, menuButtons(user), text);
 }
 
 function actorOf(session: any, user?: any): string {
   if (user) return user.fullName;
-  if (session.external?.fullName) return session.external.fullName;
   return session.userName || "Telegram user";
 }
 
@@ -223,6 +226,99 @@ async function handlePurchaseCallback(data: string, callbackId: string, chatId: 
   });
 }
 
+/* ─────────────────────────── 5-minute edit window ─────────────────────────── */
+
+const EDIT_WINDOW_MS = 5 * 60 * 1000;
+
+/** Tables whose most recent row an employee may correct within the window. */
+const EDITABLE_TABLES = new Set([
+  "daily_reports",
+  "material_counts",
+  "hr_reports",
+  "receipts",
+  "purchase_requests",
+  "damage_claims",
+  "stone_deliveries",
+  "shift_reports",
+  "invoices",
+  "payments",
+]);
+
+interface SubmissionRef {
+  table: string;
+  id: string;
+}
+
+/** Inline "✏️ Correct" button attached to a submission confirmation. */
+function editMarkup(ref?: SubmissionRef) {
+  if (!ref) return undefined;
+  return {
+    inline_keyboard: [[{ text: "✏️ አስተካክል (5 ደቂቃ)", callback_data: `edit:${ref.table}:${ref.id}` }]],
+  };
+}
+
+async function deleteSubmissionRow(table: string, id: string) {
+  if (!EDITABLE_TABLES.has(table) || !isUuid(id)) return;
+  // table is whitelisted; sql(identifier) escapes it safely.
+  await sql`delete from ${sql(table)} where id = ${id}`;
+}
+
+/**
+ * Record the just-saved submission as the editable one, and — if this submission
+ * is itself the corrected version of a previous one (same type) — delete the old
+ * row now (replace-on-arrival, so an abandoned correction never loses data).
+ */
+async function finalizeSubmission(
+  session: any,
+  ref: SubmissionRef | undefined,
+  capKey: string,
+  hrKind?: string
+) {
+  const pending = session.editState?.pending as SubmissionRef | undefined;
+  if (pending && ref && pending.table === ref.table && pending.id !== ref.id) {
+    await deleteSubmissionRow(pending.table, pending.id).catch(() => {});
+  }
+  session.editState = ref ? { table: ref.table, id: ref.id, capKey, hrKind, at: Date.now() } : undefined;
+}
+
+/** Handles the "✏️ Correct" inline button: re-opens the report within 5 minutes. */
+async function handleEditCallback(data: string, callbackId: string, chatId: string, tgName: string) {
+  const [, table, id] = data.split(":");
+  const session = await loadSession(chatId, tgName);
+  const resolved = await resolveSession(session);
+  if (!resolved) {
+    await answerCallbackQuery(callbackId, "🔐 እባክዎ ይግቡ።");
+    return;
+  }
+
+  const es = session.editState;
+  if (!es || es.table !== table || es.id !== id || !isUuid(String(id))) {
+    await answerCallbackQuery(callbackId, MSG.editUnavailable);
+    return;
+  }
+  if (Date.now() - Number(es.at || 0) > EDIT_WINDOW_MS) {
+    await answerCallbackQuery(callbackId, MSG.editExpired);
+    return;
+  }
+
+  const cap = CAPABILITIES[es.capKey as CapabilityKey];
+  if (!cap) {
+    await answerCallbackQuery(callbackId, MSG.editUnavailable);
+    return;
+  }
+
+  // Mark this record for replacement; the corrected submission deletes it on arrival.
+  session.editState = { ...es, pending: { table, id } };
+  await answerCallbackQuery(callbackId, "✏️ አስተካክል");
+
+  if (cap.captureMode === "capture") {
+    await startCapture(session, chatId, cap, es.hrKind as HrKind | undefined);
+  } else {
+    await startLlmReport(session, chatId, cap);
+  }
+  await sendMessage(chatId, MSG.editPrompt);
+}
+
 /* ──────────────────────────── Typed record writers ───────────────────────── */
 
 async function getPhotoBase64(fileId: string): Promise<{ base64: string; contentType: string } | null> {
@@ -241,18 +337,18 @@ async function findInvoiceByNumber(invoiceNumber: string) {
 async function saveExtractedRecord(
   extraction: IngestionExtraction,
   opts: { fileId?: string; userName: string; meta?: Record<string, unknown> }
-) {
+): Promise<{ reply: string; ref?: SubmissionRef }> {
   const f = extraction.fields as Record<string, any>;
 
   switch (extraction.docType) {
     case "receipt": {
       if (!opts.fileId) {
-        return "📷 ደረሰኝ ፎቶ ያስፈልጋል። QR ኮድ ያለው ኦፊሴላዊ ደረሰኝ ፎቶ ይላኩ።";
+        return { reply: "📷 ደረሰኝ ፎቶ ያስፈልጋል። QR ኮድ ያለው ኦፊሴላዊ ደረሰኝ ፎቶ ይላኩ።" };
       }
 
       const photo = await getPhotoBase64(opts.fileId);
       if (!photo) {
-        return "📷 ፎቶ አልተገኘም። እባክዎ ድጋሚ ይሞክሩ።";
+        return { reply: "📷 ፎቶ አልተገኘም። እባክዎ ድጋሚ ይሞክሩ።" };
       }
 
       const [qrCheck, legitimacy] = await Promise.all([
@@ -270,12 +366,12 @@ async function saveExtractedRecord(
       ]);
 
       if (!qrCheck.hasQRCode) {
-        return "❌ ፎቶው ላይ QR ኮድ አልተገኘም። እባክዎ QR ኮድ ያለው ኦፊሴላዊ ደረሰኝ ፎቶ ይላኩ።";
+        return { reply: "❌ ፎቶው ላይ QR ኮድ አልተገኘም። እባክዎ QR ኮድ ያለው ኦፊሴላዊ ደረሰኝ ፎቶ ይላኩ።" };
       }
 
       const vendor = String(f.vendor || "Unknown vendor");
       const amount = Number(f.amount) || 0;
-      await sql`
+      const [row] = await sql<{ id: string }[]>`
         insert into receipts (vendor, client, amount, category, receipt_date, tax_invoice_number,
                               photo_file_id, submitted_by, source, legitimacy, meta)
         values (${vendor}, ${f.client ? String(f.client) : null}, ${amount},
@@ -285,9 +381,13 @@ async function saveExtractedRecord(
                 ${opts.fileId || null}, ${opts.userName}, 'telegram',
                 ${legitimacy ? sql.json(legitimacy as any) : null},
                 ${sql.json({ ...f, ...(opts.meta || {}) })})
+        returning id
       `;
       const legitimacyNote = legitimacy ? ` · ተዓማኒነት፦ ${legitimacy.score}%` : "";
-      return `🧾 ደረሰኝ ተቀምጧል፦ <b>${vendor}</b> — ${amount.toLocaleString()} ETB${legitimacyNote}`;
+      return {
+        reply: `🧾 ደረሰኝ ተቀምጧል፦ <b>${vendor}</b> — ${amount.toLocaleString()} ETB${legitimacyNote}`,
+        ref: { table: "receipts", id: row.id },
+      };
     }
 
     case "purchase_request": {
@@ -322,17 +422,20 @@ async function saveExtractedRecord(
         }).catch(() => {});
       }
       const legitimacyNote = legitimacy ? ` · ተዓማኒነት፦ ${legitimacy.score}%` : "";
-      return `🛒 የግዢ ጥያቄ ተቀምጧል፦ <b>${prTitle}</b> — ${prAmount.toLocaleString()} ETB${legitimacyNote} · ለባለቤቱ ማሳወቂያ ተልኳል።`;
+      return {
+        reply: `🛒 የግዢ ጥያቄ ተቀምጧል፦ <b>${prTitle}</b> — ${prAmount.toLocaleString()} ETB${legitimacyNote} · ለባለቤቱ ማሳወቂያ ተልኳል።`,
+        ref: { table: "purchase_requests", id: pr.id },
+      };
     }
 
     case "damage_claim": {
-      if (!opts.fileId) return "📷 ፎቶ ያስፈልጋል። እባክዎ የተበላሹትን ከረጢቶች ፎቶ ከብዛቱ ጋር አብረው ይላኩ።";
+      if (!opts.fileId) return { reply: "📷 ፎቶ ያስፈልጋል። እባክዎ የተበላሹትን ከረጢቶች ፎቶ ከብዛቱ ጋር አብረው ይላኩ።" };
 
       const reportedCount = Number(f.quantity) || 0;
-      if (!reportedCount) return "📝 የተበላሹትን ከረጢቶች ብዛት ያካትቱ።";
+      if (!reportedCount) return { reply: "📝 የተበላሹትን ከረጢቶች ብዛት ያካትቱ።" };
 
       const file = await getFileBytes(opts.fileId);
-      if (!file) return "❌ ፎቶው አልተገኘም። እባክዎ ድጋሚ ይላኩ።";
+      if (!file) return { reply: "❌ ፎቶው አልተገኘም። እባክዎ ድጋሚ ይላኩ።" };
 
       let lotId: string | null = null;
       if (f.lotCode) {
@@ -362,12 +465,14 @@ async function saveExtractedRecord(
       const mismatchNote = flags.has("count_mismatch")
         ? "\n⚠️ የቁጥር አለመጣጣም ታይቷል — ተቆጣጣሪው ያረጋግጣል።"
         : "";
-      return (
-        `🛡️ የ${reportedCount} ከረጢቶች ብልሽት ሪፖርት ተቀምጧል${aiNote}።\n` +
-        `🔍 የ-AI እምነት ደረጃ፦ <b>${processed.trustScore}%</b> (${trustLevel})` +
-        mismatchNote +
-        `\n\nየተቆጣጣሪ ፊርማ ያስፈልጋል።`
-      );
+      return {
+        reply:
+          `🛡️ የ${reportedCount} ከረጢቶች ብልሽት ሪፖርት ተቀምጧል${aiNote}።\n` +
+          `🔍 የ-AI እምነት ደረጃ፦ <b>${processed.trustScore}%</b> (${trustLevel})` +
+          mismatchNote +
+          `\n\nየተቆጣጣሪ ፊርማ ያስፈልጋል።`,
+        ref: { table: "damage_claims", id: claim.id },
+      };
     }
 
     case "stone_delivery": {
@@ -381,27 +486,35 @@ async function saveExtractedRecord(
         : aiScore?.qualityGrade || "good";
       const truckPlate = String(f.truckPlate || "UNKNOWN").toUpperCase();
       const loads = Number(f.loads) || 1;
-      await sql`
+      const [row] = await sql<{ id: string }[]>`
         insert into stone_deliveries (truck_plate, supplier, quarry, driver_name, gate_clerk, loads, quality_grade, photo_file_id, ai_score, notes)
         values (${truckPlate}, ${f.supplier ? String(f.supplier) : null}, ${f.quarry ? String(f.quarry) : null},
                 ${f.driverName ? String(f.driverName) : null}, ${opts.userName}, ${loads}, ${qualityGrade},
                 ${opts.fileId || null}, ${aiScore ? sql.json(aiScore as any) : null},
                 ${f.notes ? String(f.notes) : aiScore?.recommendation ?? null})
+        returning id
       `;
-      return `🚚 የጭነት መኪና ማድረሻ ተቀምጧል፦ <b>${truckPlate}</b>፣ ${loads} ጭነት(ቶች)፣ ጥራት፦ ${qualityGrade}።`;
+      return {
+        reply: `🚚 የጭነት መኪና ማድረሻ ተቀምጧል፦ <b>${truckPlate}</b>፣ ${loads} ጭነት(ቶች)፣ ጥራት፦ ${qualityGrade}።`,
+        ref: { table: "stone_deliveries", id: row.id },
+      };
     }
 
     case "shift_report": {
       const bagWeightKg = [25, 40].includes(Number(f.bagWeightKg)) ? Number(f.bagWeightKg) : null;
       const filledSacks = Number(f.filledSacks) || 0;
-      await sql`
+      const [row] = await sql<{ id: string }[]>`
         insert into shift_reports (supervisor, filled_sacks, bag_weight_kg, downtime_minutes, shift, notes)
         values (${opts.userName}, ${filledSacks}, ${bagWeightKg}, ${Number(f.downtimeMinutes) || 0},
                 ${f.shift === "night" ? "night" : "day"}, ${f.notes ? String(f.notes) : null})
+        returning id
       `;
       const tons = bagWeightKg ? ((filledSacks * bagWeightKg) / 1000).toFixed(2) : null;
       const tonsStr = tons ? ` (${tons} ቶን)` : "";
-      return `🏭 የፈረቃ ሪፖርት ተቀምጧል፦ ${filledSacks} ከረጢቶች${tonsStr}፣ ${Number(f.downtimeMinutes) || 0} ደቂቃ የሥራ መቋረጥ።`;
+      return {
+        reply: `🏭 የፈረቃ ሪፖርት ተቀምጧል፦ ${filledSacks} ከረጢቶች${tonsStr}፣ ${Number(f.downtimeMinutes) || 0} ደቂቃ የሥራ መቋረጥ።`,
+        ref: { table: "shift_reports", id: row.id },
+      };
     }
 
     case "invoice": {
@@ -409,41 +522,51 @@ async function saveExtractedRecord(
       const invoiceNumber = String(f.invoiceNumber || `TG-${Date.now()}`);
       const client = String(f.client || "Unknown client");
       const amount = Number(f.amount) || 0;
-      await sql`
+      const [row] = await sql<{ id: string }[]>`
         insert into invoices (invoice_number, client, client_phone, sacks, bag_weight_kg, amount, invoiced_at, due_date, withholding_receipt_received, notes)
         values (${invoiceNumber}, ${client}, ${f.clientPhone ? String(f.clientPhone) : null},
                 ${Number(f.sacks) || 0}, ${bagWeightKg}, ${amount},
                 ${f.invoiceDate ? new Date(String(f.invoiceDate)) : new Date()},
                 ${f.dueDate ? new Date(String(f.dueDate)) : new Date(Date.now() + 30 * 86400000)},
                 false, ${f.notes ? String(f.notes) : null})
+        returning id
       `;
-      return `💵 የሽያጭ ደረሰኝ ተቀምጧል፦ <b>${invoiceNumber}</b> — ${client} — ${amount.toLocaleString()} ETB።`;
+      return {
+        reply: `💵 የሽያጭ ደረሰኝ ተቀምጧል፦ <b>${invoiceNumber}</b> — ${client} — ${amount.toLocaleString()} ETB።`,
+        ref: { table: "invoices", id: row.id },
+      };
     }
 
     case "payment": {
       const invoiceNumber = String(f.invoiceNumber || "").trim();
-      if (!invoiceNumber) return "🔢 ለዚህ ክፍያ የደረሰኝ ቁጥሩን (invoice number) ያካትቱ።";
+      if (!invoiceNumber) return { reply: "🔢 ለዚህ ክፍያ የደረሰኝ ቁጥሩን (invoice number) ያካትቱ።" };
 
       const invoice = await findInvoiceByNumber(invoiceNumber);
       if (!invoice)
-        return `🔍 የደረሰኝ ቁጥር <b>${invoiceNumber}</b> አልተገኘም። እባክዎ መጀመሪያ የሽያጭ ደረሰኙን ይላኩ፣ ወይም ቁጥሩን ያስተካክሉ።`;
+        return {
+          reply: `🔍 የደረሰኝ ቁጥር <b>${invoiceNumber}</b> አልተገኘም። እባክዎ መጀመሪያ የሽያጭ ደረሰኙን ይላኩ፣ ወይም ቁጥሩን ያስተካክሉ።`,
+        };
 
       const amount = Number(f.amount) || 0;
-      await sql`
+      const [row] = await sql<{ id: string }[]>`
         insert into payments (invoice_id, amount, date, method)
         values (${invoice.id}, ${amount},
                 ${f.paymentDate ? new Date(String(f.paymentDate)) : new Date()},
                 ${f.method ? String(f.method) : "telegram"})
+        returning id
       `;
-      return `💵 የክፍያ መረጃ ለ<b>${invoiceNumber}</b> ተቀምጧል፦ ${amount.toLocaleString()} ETB።`;
+      return {
+        reply: `💵 የክፍያ መረጃ ለ<b>${invoiceNumber}</b> ተቀምጧል፦ ${amount.toLocaleString()} ETB።`,
+        ref: { table: "payments", id: row.id },
+      };
     }
 
     case "withholding_receipt": {
       const invoiceNumber = String(f.invoiceNumber || "").trim();
-      if (!invoiceNumber) return "🔢 የደረሰኝ ቁጥሩን (invoice number) ያካትቱ።";
+      if (!invoiceNumber) return { reply: "🔢 የደረሰኝ ቁጥሩን (invoice number) ያካትቱ።" };
 
       const invoice = await findInvoiceByNumber(invoiceNumber);
-      if (!invoice) return `🔍 የደረሰኝ ቁጥር <b>${invoiceNumber}</b> አልተገኘም። እባክዎ ትክክለኛውን ቁጥር ይላኩ።`;
+      if (!invoice) return { reply: `🔍 የደረሰኝ ቁጥር <b>${invoiceNumber}</b> አልተገኘም። እባክዎ ትክክለኛውን ቁጥር ይላኩ።` };
 
       await sql`
         update invoices set
@@ -452,47 +575,50 @@ async function saveExtractedRecord(
           withholding_receipt_file_id = ${opts.fileId || null}
         where id = ${invoice.id}
       `;
-      return `📄 የታክስ ደረሰኝ ለ<b>${invoiceNumber}</b> (${invoice.client}) ተቀምጧል።`;
+      return { reply: `📄 የታክስ ደረሰኝ ለ<b>${invoiceNumber}</b> (${invoice.client}) ተቀምጧል።` };
     }
 
     default:
-      return "✅ ደርሷል። ከማውጫው (menu) ውስጥ የሪፖርት ዓይነት ይምረጡ።";
+      return { reply: "✅ ደርሷል። ከማውጫው (menu) ውስጥ የሪፖርት ዓይነት ይምረጡ።" };
   }
 }
 
 /** Writes the free-text capture types: daily report, material count, HR report. */
-async function saveCapture(session: any, user: any): Promise<string> {
+async function saveCapture(session: any, user: any): Promise<{ reply: string; ref?: SubmissionRef }> {
   const capture = session.capture || {};
   const photoFileIds = (capture.photoFileIds || []) as string[];
   const text = String(capture.text || "").trim();
 
   if (capture.capKey === "daily_report") {
-    await sql`
+    const [row] = await sql<{ id: string }[]>`
       insert into daily_reports (user_id, full_name, positions, date_key, text, photo_file_ids, source)
       values (${user._id}, ${user.fullName}, ${user.positions}, ${eatDateKey()}, ${text}, ${photoFileIds}, 'telegram')
+      returning id
     `;
     const photoNote = photoFileIds.length ? ` · ${photoFileIds.length} ፎቶ(ዎች)` : "";
-    return `✅ የቀኑ ሪፖርት ተቀምጧል${photoNote}። አመሰግናለሁ!`;
+    return { reply: `✅ የቀኑ ሪፖርት ተቀምጧል${photoNote}። አመሰግናለሁ!`, ref: { table: "daily_reports", id: row.id } };
   }
 
   if (capture.capKey === "materials") {
-    await sql`
+    const [row] = await sql<{ id: string }[]>`
       insert into material_counts (user_id, counted_by, date_key, raw_text, photo_file_ids)
       values (${user._id}, ${user.fullName}, ${eatDateKey()}, ${text}, ${photoFileIds})
+      returning id
     `;
-    return `📦 የዕቃ ቆጠራ ተቀምጧል። አመሰግናለሁ!`;
+    return { reply: `📦 የዕቃ ቆጠራ ተቀምጧል። አመሰግናለሁ!`, ref: { table: "material_counts", id: row.id } };
   }
 
   if (capture.capKey === "hr") {
     const kind = (capture.hrKind || "customer_contact") as HrKind;
-    await sql`
+    const [row] = await sql<{ id: string }[]>`
       insert into hr_reports (user_id, full_name, kind, text, photo_file_ids)
       values (${user._id}, ${user.fullName}, ${kind}, ${text}, ${photoFileIds})
+      returning id
     `;
-    return `👥 ሪፖርት ተቀምጧል፦ <b>${HR_KINDS[kind].button}</b>።`;
+    return { reply: `👥 ሪፖርት ተቀምጧል፦ <b>${HR_KINDS[kind].button}</b>።`, ref: { table: "hr_reports", id: row.id } };
   }
 
-  return "✅ ደርሷል።";
+  return { reply: "✅ ደርሷል።" };
 }
 
 /* ─────────────────────────────── Photo handling ──────────────────────────── */
@@ -522,6 +648,7 @@ async function startLlmReport(session: any, chatId: string, cap: Capability) {
   session.capture = undefined;
   session.draft = {
     docType: cap.docType,
+    capKey: cap.key,
     reportLabel: cap.button,
     prompt: cap.question,
     inputMode: cap.input === "photo" ? "photo_caption" : "text",
@@ -584,18 +711,31 @@ export async function POST(req: NextRequest) {
     const chatId = String(cb.message?.chat?.id || cb.from?.id);
     const userName =
       [cb.from?.first_name, cb.from?.last_name].filter(Boolean).join(" ") || cb.from?.username || "Telegram user";
+    const data = String(cb.data);
+
+    // Employee "✏️ Correct" button — allowed from the submitter's own chat.
+    if (data.startsWith("edit:")) {
+      try {
+        await handleEditCallback(data, String(cb.id), chatId, userName);
+      } catch (e) {
+        console.error("telegram edit callback error:", e);
+        await answerCallbackQuery(String(cb.id), MSG.genericError);
+      }
+      return NextResponse.json({ ok: true });
+    }
+
     const ceoChatId = (process.env.TELEGRAM_CEO_CHAT_ID || "").trim();
 
     // Purchase approvals are irreversible spend decisions; only the owner's chat may make them.
     if (ceoChatId && chatId !== ceoChatId) {
       await answerCallbackQuery(String(cb.id), "⛔ ፈቃድ የለዎትም።");
-      await logActivity({ chatId, actor: userName, action: "unauthorized", detail: `callback ${cb.data}`, ok: false }).catch(() => {});
+      await logActivity({ chatId, actor: userName, action: "unauthorized", detail: `callback ${data}`, ok: false }).catch(() => {});
       return NextResponse.json({ ok: true });
     }
 
     try {
-      if (String(cb.data).startsWith("pr:")) {
-        await handlePurchaseCallback(String(cb.data), String(cb.id), chatId, userName);
+      if (data.startsWith("pr:")) {
+        await handlePurchaseCallback(data, String(cb.id), chatId, userName);
       } else {
         await answerCallbackQuery(String(cb.id), "❌ የተሳሳተ ተግባር።");
       }
@@ -695,10 +835,13 @@ export async function POST(req: NextRequest) {
         audience: "internal",
         action: "login_success",
       });
+      const welcomeTail = isReceiverOnly(user.positions)
+        ? `\n\n📊 የቀኑን ማጠቃለያ በዚህ ቦት ይቀበላሉ።`
+        : `\n\n➡️ የሪፖርት ዓይነት ይምረጡ።`;
       await sendRoleMenu(
         chatId,
         user,
-        `✅ እንኳን ደህና መጡ <b>${user.fullName}</b>።\n🏷️ የሥራ መደብ፦ ${positionLabelsAm(user.positions) || "—"}\n\n➡️ የሪፖርት ዓይነት ይምረጡ።`
+        `✅ እንኳን ደህና መጡ <b>${user.fullName}</b>።\n🏷️ የሥራ መደብ፦ ${positionLabelsAm(user.positions) || "—"}${welcomeTail}`
       );
       return NextResponse.json({ ok: true });
     }
@@ -711,14 +854,15 @@ export async function POST(req: NextRequest) {
       if (user) {
         await sendRoleMenu(chatId, user, `👋 እንኳን ደህና መጡ <b>${user.fullName}</b>።`);
       } else {
+        // Internal-only bot: an unauthenticated /start goes straight to login.
         if (session.auth) clearAuth(session);
-        session.state = "idle";
+        session.state = "awaiting_login_name";
         session.mode = "unknown";
         session.draft = undefined;
         session.capture = undefined;
         session.history = [];
         await persist(session);
-        await sendEntryMenu(chatId, MSG.welcome);
+        await sendMessage(chatId, `🔐 <b>ለውስጥ ሰራተኛ ብቻ</b>\n\n${MSG.askLoginName}`, { reply_markup: BACK_KEYBOARD });
       }
       await logActivity({ chatId, actor: actorOf(session, user), action: "start", audience: audienceOf(session) });
       return NextResponse.json({ ok: true });
@@ -762,11 +906,12 @@ export async function POST(req: NextRequest) {
       session.draft = undefined;
       session.capture = undefined;
       session.history = [];
+      // Abandoning a correction must not delete the original submission.
+      if (session.editState?.pending) session.editState = { ...session.editState, pending: undefined };
       await persist(session);
 
       const user = await currentUser(session, chatId);
       if (user) await sendRoleMenu(chatId, user, `${MSG.cancelled} እባክዎ የሪፖርት ዓይነት ይምረጡ።`);
-      else if (session.mode === "external") await sendExternalMenu(chatId, MSG.cancelled);
       else await sendEntryMenu(chatId, MSG.cancelled);
       return NextResponse.json({ ok: true });
     }
@@ -786,49 +931,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true });
     }
 
-    /* ── External identity capture (name → phone) ── */
-    if (session.state === "awaiting_external_name" && text) {
-      if (normText === NORM.back) {
-        session.state = "idle";
-        session.mode = "unknown";
-        await persist(session);
-        await sendEntryMenu(chatId, MSG.welcome);
-        return NextResponse.json({ ok: true });
-      }
-      session.external = { fullName: text.trim(), phone: "" };
-      session.state = "awaiting_external_phone";
-      await persist(session);
-      await sendMessage(chatId, MSG.askExternalPhone, { reply_markup: BACK_KEYBOARD });
-      return NextResponse.json({ ok: true });
-    }
-
-    if (session.state === "awaiting_external_phone" && text) {
-      if (normText === NORM.back) {
-        session.state = "awaiting_external_name";
-        await persist(session);
-        await sendMessage(chatId, MSG.askExternalName, { reply_markup: BACK_KEYBOARD });
-        return NextResponse.json({ ok: true });
-      }
-      const phone = text.trim();
-      if (!/^\+?[\d\s-]{7,20}$/.test(phone)) {
-        await sendMessage(chatId, MSG.badPhone, { reply_markup: BACK_KEYBOARD });
-        return NextResponse.json({ ok: true });
-      }
-      session.external = { fullName: session.external?.fullName || tgName, phone };
-      session.mode = "external";
-      await persist(session);
-      await logActivity({
-        chatId,
-        actor: session.external.fullName,
-        action: "external_registered",
-        audience: "external",
-        detail: phone,
-      });
-      await startLlmReport(session, chatId, CAPABILITIES.receipt);
-      return NextResponse.json({ ok: true });
-    }
-
-    /* ── Entry menu: the two doors ── */
+    /* ── Login door ── */
     if (normText === NORM.entryInternal) {
       session.state = "awaiting_login_name";
       session.draft = undefined;
@@ -840,27 +943,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true });
     }
 
-    if (normText === NORM.entryReceipt) {
-      const user = await currentUser(session, chatId);
-      if (user) {
-        await startLlmReport(session, chatId, CAPABILITIES.receipt);
-        return NextResponse.json({ ok: true });
-      }
-      if (!session.external?.phone) {
-        session.mode = "external";
-        session.state = "awaiting_external_name";
-        await persist(session);
-        await sendMessage(chatId, `🧾 <b>ደረሰኝ ማስገባት</b>\n\n${MSG.askExternalName}`, {
-          reply_markup: BACK_KEYBOARD,
-        });
-        return NextResponse.json({ ok: true });
-      }
-      session.mode = "external";
-      await startLlmReport(session, chatId, CAPABILITIES.receipt);
-      return NextResponse.json({ ok: true });
-    }
-
-    /* ── Back button at an idle external/internal menu ── */
+    /* ── Back button at an idle menu ── */
     if (normText === NORM.back && session.state === "idle") {
       session.mode = session.auth ? session.mode : "unknown";
       await persist(session);
@@ -870,17 +953,14 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true });
     }
 
-    /* ── Everything below needs an identity ── */
+    /* ── Everything below needs a signed-in employee ── */
     const user = await currentUser(session, chatId);
-    const isExternal = !user && session.mode === "external" && Boolean(session.external?.phone);
-
-    if (!user && !isExternal) {
-      await sendEntryMenu(chatId, MSG.welcome);
+    if (!user) {
+      await sendEntryMenu(chatId);
       return NextResponse.json({ ok: true });
     }
 
-    const submitterName = user ? user.fullName : session.external!.fullName;
-    const submitterMeta = user ? undefined : { submitterPhone: session.external!.phone, external: true };
+    const submitterName = user.fullName;
 
     /* ── HR subtype choice ── */
     if (session.state === "awaiting_hr_kind" && text) {
@@ -896,31 +976,29 @@ export async function POST(req: NextRequest) {
     /* ── Capability buttons ── */
     const cap = CAP_BY_LABEL.get(normText);
     if (cap) {
-      const allowed = user
-        ? capabilitiesFor(user.positions).some((c) => c.key === cap.key)
-        : cap.key === "receipt";
+      // Admin/HR are receivers — they may never file a report.
+      const allowed = !isReceiverOnly(user.positions) && capabilitiesFor(user.positions).some((c) => c.key === cap.key);
 
       if (!allowed) {
         await logActivity({
           chatId,
           actor: submitterName,
-          userId: user ? String(user._id) : undefined,
-          positions: user?.positions,
+          userId: String(user._id),
+          positions: user.positions,
           audience: audienceOf(session),
           action: "unauthorized",
           detail: cap.key,
           ok: false,
         });
-        if (user) await sendRoleMenu(chatId, user, MSG.noPermission);
-        else await sendExternalMenu(chatId, MSG.internalOnly);
+        await sendRoleMenu(chatId, user, isReceiverOnly(user.positions) ? MSG.receiverOnly : MSG.noPermission);
         return NextResponse.json({ ok: true });
       }
 
       await logActivity({
         chatId,
         actor: submitterName,
-        userId: user ? String(user._id) : undefined,
-        positions: user?.positions,
+        userId: String(user._id),
+        positions: user.positions,
         audience: audienceOf(session),
         action: "menu_select",
         detail: cap.key,
@@ -986,7 +1064,8 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true });
       }
 
-      const reply = await saveCapture(session, user);
+      const { reply, ref } = await saveCapture(session, user);
+      await finalizeSubmission(session, ref, capture.capKey, capture.hrKind);
       await logActivity({
         chatId,
         actor: user.fullName,
@@ -995,13 +1074,13 @@ export async function POST(req: NextRequest) {
         audience: "internal",
         action: "submission",
         detail: capture.capKey === "hr" ? `hr:${capture.hrKind}` : capture.capKey,
-        meta: { photos: capture.photoFileIds.length },
+        meta: { photos: capture.photoFileIds.length, ...(ref ? { table: ref.table, recordId: ref.id } : {}) },
       });
 
       session.state = "idle";
       session.capture = undefined;
       await persist(session);
-      await sendMessage(chatId, reply);
+      await sendMessage(chatId, reply, ref ? { reply_markup: editMarkup(ref) } : {});
       await sendRoleMenu(chatId, user);
       return NextResponse.json({ ok: true });
     }
@@ -1043,8 +1122,7 @@ export async function POST(req: NextRequest) {
     /* ── LLM ingestion: photo ── */
     if (hasPhoto(msg)) {
       if (session.state !== "awaiting_metadata" || !session.draft) {
-        if (user) await sendRoleMenu(chatId, user, MSG.pickReportFirst);
-        else await sendExternalMenu(chatId, MSG.pickReportFirst);
+        await sendRoleMenu(chatId, user, MSG.pickReportFirst);
         return NextResponse.json({ ok: true });
       }
 
@@ -1071,27 +1149,28 @@ export async function POST(req: NextRequest) {
       const docType = session.draft.docType || extraction.docType;
 
       if (extraction.complete) {
-        const reply = await saveExtractedRecord(
+        const capKey = session.draft.capKey || docType;
+        const { reply, ref } = await saveExtractedRecord(
           { ...extraction, docType: docType as IngestionExtraction["docType"] },
-          { fileId: stored.id, userName: submitterName, meta: submitterMeta }
+          { fileId: stored.id, userName: submitterName }
         );
+        await finalizeSubmission(session, ref, capKey);
         await logActivity({
           chatId,
           actor: submitterName,
-          userId: user ? String(user._id) : undefined,
-          positions: user?.positions,
+          userId: String(user._id),
+          positions: user.positions,
           audience: audienceOf(session),
           action: "submission",
           detail: docType,
-          meta: { hasPhoto: true },
+          meta: { hasPhoto: true, ...(ref ? { table: ref.table, recordId: ref.id } : {}) },
         });
         session.state = "idle";
         session.draft = undefined;
         session.history = [];
         await persist(session);
-        await sendMessage(chatId, reply);
-        if (user) await sendRoleMenu(chatId, user);
-        else await sendExternalMenu(chatId, "🧾 ሌላ ደረሰኝ ለማስገባት ቁልፉን ይጫኑ።");
+        await sendMessage(chatId, reply, ref ? { reply_markup: editMarkup(ref) } : {});
+        await sendRoleMenu(chatId, user);
       } else {
         session.state = "awaiting_metadata";
         session.draft = {
@@ -1128,26 +1207,28 @@ export async function POST(req: NextRequest) {
       const docType = session.draft.docType || extraction.docType;
 
       if (extraction.complete) {
-        const reply = await saveExtractedRecord(
+        const capKey = session.draft.capKey || docType;
+        const { reply, ref } = await saveExtractedRecord(
           { ...extraction, docType: docType as IngestionExtraction["docType"] },
-          { fileId: session.draft.fileId, userName: submitterName, meta: submitterMeta }
+          { fileId: session.draft.fileId, userName: submitterName }
         );
+        await finalizeSubmission(session, ref, capKey);
         await logActivity({
           chatId,
           actor: submitterName,
-          userId: user ? String(user._id) : undefined,
-          positions: user?.positions,
+          userId: String(user._id),
+          positions: user.positions,
           audience: audienceOf(session),
           action: "submission",
           detail: docType,
+          meta: ref ? { table: ref.table, recordId: ref.id } : undefined,
         });
         session.state = "idle";
         session.draft = undefined;
         session.history = [];
         await persist(session);
-        await sendMessage(chatId, reply);
-        if (user) await sendRoleMenu(chatId, user);
-        else await sendExternalMenu(chatId, "🧾 ሌላ ደረሰኝ ለማስገባት ቁልፉን ይጫኑ።");
+        await sendMessage(chatId, reply, ref ? { reply_markup: editMarkup(ref) } : {});
+        await sendRoleMenu(chatId, user);
       } else {
         session.draft = {
           ...session.draft,
@@ -1166,7 +1247,7 @@ export async function POST(req: NextRequest) {
     if (text && user) {
       const caps = capabilitiesFor(user.positions);
 
-      if (caps.some((c) => c.key === "ops") && isOpsReportText(text)) {
+      if (!isReceiverOnly(user.positions) && caps.some((c) => c.key === "ops") && isOpsReportText(text)) {
         const result = await ingestOpsReport(text, user.fullName);
         await logActivity({
           chatId,
@@ -1199,12 +1280,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true });
     }
 
-    if (isExternal) {
-      await sendExternalMenu(chatId, MSG.pickReportFirst);
-      return NextResponse.json({ ok: true });
-    }
-
-    await sendEntryMenu(chatId, MSG.welcome);
+    await sendEntryMenu(chatId);
   } catch (e) {
     console.error("telegram webhook error:", e);
     await logActivity({
