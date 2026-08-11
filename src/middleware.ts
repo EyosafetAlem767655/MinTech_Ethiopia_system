@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { AUTH_COOKIE, isAuthDisabled } from "@/lib/auth";
+import { AUTH_COOKIE, authToken, isAuthDisabled } from "@/lib/auth";
 import { isValidSession } from "@/lib/websession";
 
 // Routes reachable without the dashboard password.
@@ -25,7 +25,14 @@ export async function middleware(req: NextRequest) {
   if (PUBLIC_PREFIXES.some((p) => pathname.startsWith(p))) return NextResponse.next();
 
   const cookie = req.cookies.get(AUTH_COOKIE)?.value;
-  if (cookie && (await isValidSession(cookie))) return NextResponse.next();
+  if (cookie) {
+    // Accept either a live per-device session token, or the deterministic
+    // password-derived token used as a fallback when the session store is
+    // unavailable. The latter keeps the dashboard reachable even if the
+    // web_sessions migration hasn't run yet.
+    if (cookie === (await authToken())) return NextResponse.next();
+    if (await isValidSession(cookie)) return NextResponse.next();
+  }
 
   if (pathname.startsWith("/api/")) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });

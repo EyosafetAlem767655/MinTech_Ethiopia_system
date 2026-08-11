@@ -20,8 +20,16 @@ function LoginForm() {
       body: JSON.stringify({ password }),
     });
     setBusy(false);
-    if (res.ok) router.push(params.get("next") || "/");
-    else setError("Wrong password. Try again.");
+    if (res.ok) {
+      router.push(params.get("next") || "/");
+      return;
+    }
+    if (res.status === 401) {
+      setError("Wrong password. Try again.");
+    } else {
+      const body = await res.json().catch(() => null);
+      setError(body?.error || "Could not sign in. Please try again.");
+    }
   };
 
   return (
