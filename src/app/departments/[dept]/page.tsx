@@ -12,12 +12,21 @@ import ReceiptsPanel from "@/components/panels/ReceiptsPanel";
 import GatePanel from "@/components/panels/GatePanel";
 import ShiftPanel from "@/components/panels/ShiftPanel";
 import ProductionOpsPanel from "@/components/panels/ProductionOpsPanel";
+import ProductionGridPanel from "@/components/panels/ProductionGridPanel";
+import StockStatusPanel from "@/components/panels/StockStatusPanel";
+import RawMaterialReceivedPanel from "@/components/panels/RawMaterialReceivedPanel";
+import DeliveryReportPanel from "@/components/panels/DeliveryReportPanel";
+import PurchaseItemsPanel from "@/components/panels/PurchaseItemsPanel";
 
-/** The detailed module reports folded into each department, below the range summary. */
+/**
+ * Detailed reports per department, below the range summary. The company report
+ * formats come first (production grid, stock status, raw-material received,
+ * deliveries, purchased items), then the existing operational panels.
+ */
 const PANELS: Record<DepartmentKey, ComponentType[]> = {
-  production: [ProductionOpsPanel, ShiftPanel, GatePanel],
-  asset_management: [BagControlPanel, PurchasesPanel],
-  sales: [ReceiptsPanel],
+  production: [ProductionGridPanel, StockStatusPanel, ProductionOpsPanel, ShiftPanel, GatePanel],
+  asset_management: [RawMaterialReceivedPanel, PurchaseItemsPanel, StockStatusPanel, BagControlPanel, PurchasesPanel],
+  sales: [DeliveryReportPanel, ReceiptsPanel],
   finance: [ReceivablesPanel],
 };
 

@@ -48,6 +48,7 @@ import {
 import { insertClaimPhotos, processClaimPhoto } from "@/lib/claims";
 import { companyChat } from "@/lib/chat";
 import { ingestOpsReport, isOpsReportText } from "@/lib/ops-report";
+import { spreadsheetToText, isSpreadsheetMime } from "@/lib/spreadsheet";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -242,6 +243,11 @@ const EDITABLE_TABLES = new Set([
   "shift_reports",
   "invoices",
   "payments",
+  "production_reports",
+  "stock_status_reports",
+  "raw_material_receipts",
+  "delivery_reports",
+  "purchase_item_reports",
 ]);
 
 interface SubmissionRef {
@@ -332,6 +338,26 @@ async function findInvoiceByNumber(invoiceNumber: string) {
   return first<{ id: string; client: string }>(await sql`
     select id, client from invoices where lower(invoice_number) = lower(${invoiceNumber}) limit 1
   `);
+}
+
+/** Parse a report date string; falls back to now on anything unparseable. */
+function parseReportDate(v: unknown): Date {
+  const d = new Date(String(v ?? ""));
+  return isNaN(d.getTime()) ? new Date() : d;
+}
+
+/** Fold an LLM `items` array (e.g. [{product,tons}]) into a { key: number } jsonb map. */
+function itemsToMap(items: unknown, keyField: string, valField: string): Record<string, number> {
+  const map: Record<string, number> = {};
+  if (Array.isArray(items)) {
+    for (const it of items) {
+      const rec = it as Record<string, unknown>;
+      const k = String(rec?.[keyField] ?? "").trim();
+      const v = Number(rec?.[valField]);
+      if (k && !isNaN(v)) map[k] = v;
+    }
+  }
+  return map;
 }
 
 async function saveExtractedRecord(
@@ -576,6 +602,88 @@ async function saveExtractedRecord(
         where id = ${invoice.id}
       `;
       return { reply: `📄 የታክስ ደረሰኝ ለ<b>${invoiceNumber}</b> (${invoice.client}) ተቀምጧል።` };
+    }
+
+    /* ─────────────── Department report formats (text / photo / Excel) ─────────────── */
+
+    case "production_report": {
+      const products = itemsToMap(f.items, "product", "tons");
+      const fgrNo = f.fgrNo ? String(f.fgrNo) : null;
+      const [row] = await sql<{ id: string }[]>`
+        insert into production_reports (date, fgr_no, reported_by, products, source)
+        values (${parseReportDate(f.date)}, ${fgrNo}, ${opts.userName}, ${sql.json(products)}, 'telegram')
+        returning id
+      `;
+      const total = Object.values(products).reduce((a, b) => a + b, 0);
+      return {
+        reply: `🏭 የምርት ሪፖርት ተቀምጧል${fgrNo ? ` · FGR ${fgrNo}` : ""} · ${Object.keys(products).length} ምርት · ${total.toFixed(2)} ቶን።`,
+        ref: { table: "production_reports", id: row.id },
+      };
+    }
+
+    case "stock_status": {
+      const items = Array.isArray(f.rows) ? f.rows : [];
+      const month = String(f.month || new Date().toISOString().slice(0, 7));
+      const [row] = await sql<{ id: string }[]>`
+        insert into stock_status_reports (month, reported_by, items, source)
+        values (${month}, ${opts.userName}, ${sql.json(items)}, 'telegram')
+        returning id
+      `;
+      return {
+        reply: `📦 የክምችት ሁኔታ ሪፖርት (${month}) ተቀምጧል · ${items.length} ምርት።`,
+        ref: { table: "stock_status_reports", id: row.id },
+      };
+    }
+
+    case "raw_material_received": {
+      const materials = itemsToMap(f.items, "material", "qty");
+      const [row] = await sql<{ id: string }[]>`
+        insert into raw_material_receipts (date, supplier, dn_no, truck_plate, mrv_no, reported_by, materials, source)
+        values (${parseReportDate(f.date)}, ${f.supplier ? String(f.supplier) : null},
+                ${f.dnNo ? String(f.dnNo) : null}, ${f.truckPlate ? String(f.truckPlate) : null},
+                ${f.mrvNo ? String(f.mrvNo) : null}, ${opts.userName}, ${sql.json(materials)}, 'telegram')
+        returning id
+      `;
+      const total = Object.values(materials).reduce((a, b) => a + b, 0);
+      return {
+        reply: `🚚 የጥሬ ዕቃ ገቢ ተቀምጧል${f.supplier ? ` · ${String(f.supplier)}` : ""} · ${total.toFixed(2)} ብዛት።`,
+        ref: { table: "raw_material_receipts", id: row.id },
+      };
+    }
+
+    case "finished_goods_delivery": {
+      const products = itemsToMap(f.items, "product", "qty");
+      const paymentType = f.paymentType === "credit" ? "credit" : f.paymentType === "cash" ? "cash" : null;
+      const qty = Number(f.qty) || Object.values(products).reduce((a, b) => a + b, 0);
+      const customer = String(f.customer || "Unknown customer");
+      const [row] = await sql<{ id: string }[]>`
+        insert into delivery_reports (date, customer, invoice_no, payment_type, qty, delivery_no, reported_by, products, source)
+        values (${parseReportDate(f.date)}, ${customer}, ${f.invoiceNo ? String(f.invoiceNo) : null},
+                ${paymentType}, ${qty}, ${f.deliveryNo ? String(f.deliveryNo) : null},
+                ${opts.userName}, ${sql.json(products)}, 'telegram')
+        returning id
+      `;
+      return {
+        reply: `🚛 የሽያጭ ማድረሻ ተቀምጧል፦ <b>${customer}</b>${paymentType ? ` · ${paymentType}` : ""} · ${qty} ብዛት።`,
+        ref: { table: "delivery_reports", id: row.id },
+      };
+    }
+
+    case "purchase_items": {
+      const description = String(f.description || f.title || "Purchase item");
+      const amount = f.amount != null ? Number(f.amount) : null;
+      const [row] = await sql<{ id: string }[]>`
+        insert into purchase_item_reports (date, description, uom, qty, supplier, amount, cost_center, purchaser, reported_by, source)
+        values (${parseReportDate(f.date)}, ${description}, ${f.uom ? String(f.uom) : null},
+                ${f.qty != null ? Number(f.qty) : null}, ${f.supplier ? String(f.supplier) : null},
+                ${amount}, ${f.costCenter ? String(f.costCenter) : null},
+                ${f.purchaser ? String(f.purchaser) : opts.userName}, ${opts.userName}, 'telegram')
+        returning id
+      `;
+      return {
+        reply: `🧾 የግዢ ዕቃ ተቀምጧል፦ <b>${description}</b>${amount ? ` · ${Math.round(amount).toLocaleString()} ETB` : ""}።`,
+        ref: { table: "purchase_item_reports", id: row.id },
+      };
     }
 
     default:
@@ -1116,6 +1224,72 @@ export async function POST(req: NextRequest) {
           .join(", ")}`
       );
       if (user) await sendRoleMenu(chatId, user);
+      return NextResponse.json({ ok: true });
+    }
+
+    /* ── LLM ingestion: Excel sheet upload ── */
+    if (
+      session.state === "awaiting_metadata" &&
+      session.draft &&
+      msg.document &&
+      isSpreadsheetMime(msg.document.mime_type, msg.document.file_name)
+    ) {
+      const dl = await downloadTelegramFile(msg.document.file_id);
+      let sheetText = "";
+      if (dl) {
+        try {
+          sheetText = await spreadsheetToText(dl.buffer);
+        } catch {
+          sheetText = "";
+        }
+      }
+      if (!sheetText) {
+        await sendMessage(chatId, "⚠️ የExcel ሉሁን ማንበብ አልተቻለም። እባክዎ እንደ ጽሑፍ ይላኩ ወይም ፎቶ ያንሱ።", {
+          reply_markup: CHANGE_CANCEL_KEYBOARD,
+        });
+        return NextResponse.json({ ok: true });
+      }
+
+      session.history.push({ role: "user", content: sheetText.slice(0, 4000) });
+      const extraction = await classifyIngestion({
+        text: sheetText,
+        priorDraft: {
+          docType: session.draft.docType,
+          fields: session.draft.extracted,
+          missing: session.draft.missing,
+        },
+        history: session.history,
+      });
+      const docType = session.draft.docType || extraction.docType;
+
+      if (extraction.complete) {
+        const capKey = session.draft.capKey || docType;
+        const { reply, ref } = await saveExtractedRecord(
+          { ...extraction, docType: docType as IngestionExtraction["docType"] },
+          { userName: submitterName }
+        );
+        await finalizeSubmission(session, ref, capKey);
+        await logActivity({
+          chatId,
+          actor: submitterName,
+          userId: String(user._id),
+          positions: user.positions,
+          audience: audienceOf(session),
+          action: "submission",
+          detail: docType,
+          meta: { fromExcel: true, ...(ref ? { table: ref.table, recordId: ref.id } : {}) },
+        });
+        session.state = "idle";
+        session.draft = undefined;
+        session.history = [];
+        await persist(session);
+        await sendMessage(chatId, reply, ref ? { reply_markup: editMarkup(ref) } : {});
+        await sendRoleMenu(chatId, user);
+      } else {
+        session.draft = { ...session.draft, docType, extracted: extraction.fields, missing: extraction.missing };
+        await persist(session);
+        await sendMessage(chatId, extraction.question, { reply_markup: CHANGE_CANCEL_KEYBOARD });
+      }
       return NextResponse.json({ ok: true });
     }
 

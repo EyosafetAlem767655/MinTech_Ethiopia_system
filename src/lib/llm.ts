@@ -317,6 +317,11 @@ export interface IngestionExtraction {
     | "invoice"
     | "payment"
     | "withholding_receipt"
+    | "production_report"
+    | "stock_status"
+    | "raw_material_received"
+    | "finished_goods_delivery"
+    | "purchase_items"
     | "other";
   fields: Record<string, unknown>;
   missing: string[];
@@ -326,12 +331,13 @@ export interface IngestionExtraction {
 
 const INGESTION_SCHEMA = `Return STRICT JSON:
 {
-  "docType": "receipt" | "purchase_request" | "damage_claim" | "stone_delivery" | "shift_report" | "invoice" | "payment" | "withholding_receipt" | "other",
+  "docType": "receipt" | "purchase_request" | "damage_claim" | "stone_delivery" | "shift_report" | "invoice" | "payment" | "withholding_receipt" | "production_report" | "stock_status" | "raw_material_received" | "finished_goods_delivery" | "purchase_items" | "other",
   "fields": { ... extracted fields ... },
   "missing": [field names still needed],
   "question": "ONE short friendly question asking for the most important missing field(s)",
   "complete": boolean
 }
+Product codes are always one of: ETL15, ETL9, ETL6, 5EL, 3EL, 2EL, 1EL, EC15, EC90, Talk (normalise any spacing/hyphens like "ETL-9" or "ETL 9μ" to these codes; "Micro Talc"/"Talc" -> Talk).
 Required fields per type:
 - receipt: vendor, amount (number, ETB), category, receiptDate (YYYY-MM-DD), client if visible
 - purchase_request: title, amount (number, ETB), justification
@@ -341,7 +347,13 @@ Required fields per type:
 - invoice: invoiceNumber, client, amount (number, ETB), sacks, bagWeightKg (25 or 40 — the weight in kg of each sold sack), dueDate (YYYY-MM-DD), clientPhone
 - payment: invoiceNumber, client, amount (number, ETB), paymentDate (YYYY-MM-DD), method
 - withholding_receipt: invoiceNumber, client, amount (number, ETB), receiptDate (YYYY-MM-DD)
-- other: summary`;
+- production_report: date (YYYY-MM-DD), fgrNo (the FGR document number), items (array of {product: productCode, tons: number})
+- stock_status: month (e.g. "2026-06" or the sheet's month label), rows (array of {code: productCode, description, category ("finished"|"raw"|"packing"), bBalance (opening balance ton), received (ton), sales (ton), unitPrice (ETB), stockTon (ton on hand), etb (stock value ETB)})
+- raw_material_received: date (YYYY-MM-DD), supplier, dnNo (delivery-note number), truckPlate, mrvNo (material receiving voucher number), items (array of {material, qty: number})
+- finished_goods_delivery: date (YYYY-MM-DD), customer, invoiceNo, paymentType ("cash"|"credit"), deliveryNo, qty (total number), items (array of {product: productCode, qty: number})
+- purchase_items: date (YYYY-MM-DD), description, uom, qty (number), supplier, amount (number, ETB), costCenter, purchaser
+- other: summary
+For the multi-row report types (production_report, stock_status, raw_material_received, finished_goods_delivery) extract EVERY row you can read into the items/rows array. Set complete=true once the header fields and at least one row are present.`;
 
 export async function classifyIngestion(opts: {
   imageBase64?: string;
@@ -375,9 +387,11 @@ export async function classifyIngestion(opts: {
         {
           role: "system",
           content:
-            "You are the data-intake assistant for MinTech Ethiopia (a mining company). Workers send you photos " +
-            "of receipts, purchase requests, damaged bags, and short messages about truck deliveries and shifts. " +
-            "Classify what was sent, extract every field you can read, and ask for whatever is missing. " +
+            "You are the data-intake assistant for MinTech Ethiopia (a mining company). Workers send you photos, " +
+            "typed messages, or the text of an Excel sheet covering receipts, purchase requests, damaged bags, " +
+            "truck/stone deliveries, shifts, and the department reports (production, stock status, raw-material " +
+            "received, finished-goods delivery, purchased items). Tabular reports may contain many rows — read " +
+            "them all. Classify what was sent, extract every field you can read, and ask for whatever is missing. " +
             INGESTION_SCHEMA,
         },
         ...(opts.history || []).slice(-6).map((h) => ({ role: h.role, content: h.content } as const)),

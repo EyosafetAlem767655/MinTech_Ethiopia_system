@@ -15,6 +15,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { PRODUCT_COLOR as COLOR, BAG_COLORS, productLabel } from "@/lib/products";
 
 export interface OpsReport {
   dateLabel: string;
@@ -25,59 +26,7 @@ export interface OpsReport {
   bags?: { kg25?: Record<string, number>; kg40?: Record<string, number> };
 }
 
-// Display names: ETL = Ethiopian Talc/Limestone (microns), EC = Ethiopian Calcium Carbonate (microns), EL grades
-const LABEL: Record<string, string> = {
-  ETL6: "ETL-6",
-  ETL9: "ETL-9",
-  ETL15: "ETL-15",
-  EC15: "EC-15",
-  EC90: "EC-90",
-  "2EL": "2-EL",
-  "3EL": "3-EL",
-  "5EL": "5-EL",
-  Talk: "Talc",
-};
-
-/**
- * Product colours.
- *
- * These were previously grouped by family (ETL warm / EC blue / EL green) with
- * shades inside each family. It read nicely as a mnemonic but failed as an
- * encoding: ETL6 vs ETL9 sat at ΔE 7.1 for *normal* vision (the floor is 15) —
- * i.e. nobody could tell two of the main products apart in a stacked bar — the
- * three EL greens were too light to hold against a white surface, and Talc was
- * so desaturated it read as a gridline.
- *
- * These eight are a palette validated as a set (lightness band, chroma floor,
- * colour-vision-deficiency separation, normal-vision separation, contrast), in
- * this order — the ordering is what guarantees neighbouring stack segments stay
- * apart, so keep it aligned with the alphabetical order the API returns.
- *
- * There is no ninth hue: eight is where the space saturates and a ninth cannot
- * pass. Talc doesn't need one — it only ever appears in Stock, never in the
- * Delivered/Received flows, so it never has to be told apart from these eight
- * inside a stack. It takes the neutral below and is always directly labelled.
- */
-const COLOR: Record<string, string> = {
-  "2EL": "#2a78d6", // blue
-  "3EL": "#008300", // green
-  "5EL": "#e87ba4", // magenta
-  EC15: "#eda100", // yellow
-  EC90: "#1baf7a", // aqua
-  ETL15: "#eb6834", // orange
-  ETL6: "#4a3aa7", // violet
-  ETL9: "#e34948", // red
-  Talk: "#6b6a66", // neutral — stock-only, always directly labelled
-};
-
-const BAG_COLORS: Record<string, string> = {
-  Yellow: "#eab308",
-  White: "#a8a29e",
-  Beige: "#d4b896",
-  Green: "#16a34a",
-};
-
-function pl(p: string) { return LABEL[p] || p; }
+function pl(p: string) { return productLabel(p); }
 /** Unknown products fall back to the neutral rather than impersonating a series. */
 function pc(p: string) { return COLOR[p] || "#6b6a66"; }
 

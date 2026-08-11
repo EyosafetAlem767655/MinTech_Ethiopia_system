@@ -20,7 +20,13 @@ export type CapabilityKey =
   | "ops"
   | "materials"
   | "hr"
-  | "question";
+  | "question"
+  // Structured department report formats (text / photo / Excel).
+  | "production_report"
+  | "stock_status"
+  | "raw_material_received"
+  | "finished_goods_delivery"
+  | "purchase_items";
 
 /** How the bot collects a capability's payload. */
 export type CaptureMode =
@@ -124,6 +130,51 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
     question:
       "📊 የዕለታዊ ክንውን ሪፖርቱን እዚህ ይለጥፉ (paste)። ቀናትን፣ የገቡ/የወጡ/የቀሩ ዕቃዎችን ክፍሎች እና የከረጢት ብዛትን ያካትቱ።",
   },
+  production_report: {
+    key: "production_report",
+    button: "🏭 የምርት ሪፖርት",
+    captureMode: "llm",
+    docType: "production_report",
+    input: "any",
+    question:
+      "🏭 የዕለቱን ምርት ይላኩ — ጽሑፍ፣ ፎቶ ወይም የExcel ሉህ። ቀን፣ FGR ቁጥር እና የእያንዳንዱን ምርት ቶን ያካትቱ።",
+  },
+  stock_status: {
+    key: "stock_status",
+    button: "📦 የክምችት ሁኔታ ሪፖርት",
+    captureMode: "llm",
+    docType: "stock_status",
+    input: "any",
+    question:
+      "📦 የወሩን የክምችት ሁኔታ ሪፖርት ይላኩ — ጽሑፍ፣ ፎቶ ወይም Excel። ለእያንዳንዱ ምርት፦ የመነሻ ሚዛን፣ የገባ፣ ሽያጭ፣ የነጠላ ዋጋ እና ቀሪ ክምችት።",
+  },
+  raw_material_received: {
+    key: "raw_material_received",
+    button: "🚚 የጥሬ ዕቃ ገቢ ሪፖርት",
+    captureMode: "llm",
+    docType: "raw_material_received",
+    input: "any",
+    question:
+      "🚚 የገባውን ጥሬ ዕቃ ይላኩ — ጽሑፍ፣ ፎቶ ወይም Excel። አቅራቢ፣ የመላኪያ ደረሰኝ (DN) ቁጥር፣ የመኪና ሰሌዳ፣ MRV ቁጥር እና የዕቃ ዓይነትና ብዛት ያካትቱ።",
+  },
+  finished_goods_delivery: {
+    key: "finished_goods_delivery",
+    button: "🚛 የሽያጭ ማድረሻ ሪፖርት",
+    captureMode: "llm",
+    docType: "finished_goods_delivery",
+    input: "any",
+    question:
+      "🚛 የተላከውን/የተሸጠውን ምርት ይላኩ — ጽሑፍ፣ ፎቶ ወይም Excel። ደንበኛ፣ የደረሰኝ ቁጥር፣ ጥሬ ገንዘብ ወይም ብድር፣ የማድረሻ ቁጥር እና የእያንዳንዱን ምርት ብዛት ያካትቱ።",
+  },
+  purchase_items: {
+    key: "purchase_items",
+    button: "🧾 የግዢ ዕቃዎች ሪፖርት",
+    captureMode: "llm",
+    docType: "purchase_items",
+    input: "any",
+    question:
+      "🧾 የተገዙ ዕቃዎችን ይላኩ — ጽሑፍ፣ ፎቶ ወይም Excel። መግለጫ፣ መለኪያ (uom)፣ ብዛት፣ አቅራቢ፣ ዋጋ፣ የወጪ ማዕከል እና ገዢ ያካትቱ።",
+  },
   materials: {
     key: "materials",
     button: "📦 የዕቃ ቆጠራ",
@@ -226,7 +277,7 @@ export const POSITIONS: Record<PositionKey, Position> = {
     en: "Daily production report",
     am: "የዕለት ምርት ሪፖርት",
     description: "Reports production output every day (shift and daily operations).",
-    capabilities: ["daily_report", "shift", "ops", "question"],
+    capabilities: ["daily_report", "shift", "ops", "production_report", "stock_status", "question"],
     dailyRequired: true,
   },
   asset_materials: {
@@ -235,7 +286,7 @@ export const POSITIONS: Record<PositionKey, Position> = {
     en: "Raw materials weight report",
     am: "የጥሬ ዕቃ ክብደት ሪፖርት",
     description: "Reports the weight of imported raw materials every day.",
-    capabilities: ["daily_report", "materials", "question"],
+    capabilities: ["daily_report", "materials", "raw_material_received", "stock_status", "question"],
     dailyRequired: true,
   },
   asset_purchase: {
@@ -244,7 +295,7 @@ export const POSITIONS: Record<PositionKey, Position> = {
     en: "Tool purchase request",
     am: "የመሣሪያ ግዢ ጥያቄ",
     description: "Raises tool and equipment purchase requests when needed (not daily).",
-    capabilities: ["purchase", "question"],
+    capabilities: ["purchase", "purchase_items", "question"],
     dailyRequired: false,
   },
   sales_daily: {
@@ -253,7 +304,7 @@ export const POSITIONS: Record<PositionKey, Position> = {
     en: "Sales report & receipts",
     am: "የሽያጭ ሪፖርትና ደረሰኝ",
     description: "Files the daily sales report together with receipts.",
-    capabilities: ["daily_report", "sales", "receipt", "question"],
+    capabilities: ["daily_report", "sales", "receipt", "finished_goods_delivery", "question"],
     dailyRequired: true,
   },
   finance_daily: {
