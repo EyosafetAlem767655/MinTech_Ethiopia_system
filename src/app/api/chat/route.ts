@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { companyChat } from "@/lib/chat";
-import { isOpenAIConfigured } from "@/lib/llm";
+import { isAiConfigured } from "@/lib/llm";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -11,9 +11,9 @@ function chatErrorMessage(e: unknown) {
 }
 
 export async function POST(req: NextRequest) {
-  if (!isOpenAIConfigured()) {
+  if (!isAiConfigured()) {
     return NextResponse.json(
-      { error: "OPENAI_API_KEY is missing. Add it in Vercel Environment Variables and redeploy." },
+      { error: "NIVIDA_API_KEY is missing. Add it in Vercel Environment Variables and redeploy." },
       { status: 503 }
     );
   }

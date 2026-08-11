@@ -1,5 +1,5 @@
 import OpenAI from "openai";
-import { openai, TEXT_MODEL } from "@/lib/llm";
+import { textAI, TEXT_MODEL } from "@/lib/llm";
 import {
   damageTripwires,
   getDailySeries,
@@ -158,7 +158,7 @@ export async function companyChat(
   ];
 
   for (let round = 0; round < 4; round++) {
-    const res = await openai().chat.completions.create({
+    const res = await textAI().chat.completions.create({
       model: TEXT_MODEL,
       messages: convo,
       tools,
@@ -187,7 +187,7 @@ export async function companyChat(
   }
 
   // Final pass without tools so the model must answer.
-  const final = await openai().chat.completions.create({
+  const final = await textAI().chat.completions.create({
     model: TEXT_MODEL,
     messages: convo,
     max_tokens: 800,

@@ -22,6 +22,8 @@ export interface Session {
   draft?: any;
   /** 5-minute correction window: last submission ref + any in-progress edit. */
   editState?: any;
+  /** Sales receipt-scan flow scratch state (collected image ids + working draft). */
+  receiptScan?: any;
   history: { role: "user" | "assistant"; content: string }[];
 }
 
@@ -40,6 +42,7 @@ function rowToSession(r: any): Session {
     capture: r.capture ?? undefined,
     draft: r.draft ?? undefined,
     editState: r.edit_state ?? undefined,
+    receiptScan: r.receipt_scan ?? undefined,
     history: r.history ?? [],
   };
 }
@@ -71,6 +74,7 @@ export async function saveSession(s: Session): Promise<void> {
       capture            = ${s.capture ? sql.json(s.capture) : null},
       draft              = ${s.draft ? sql.json(s.draft) : null},
       edit_state         = ${s.editState ? sql.json(s.editState) : null},
+      receipt_scan       = ${s.receiptScan ? sql.json(s.receiptScan) : null},
       history            = ${sql.json(s.history ?? [])}
     where chat_id = ${s.chatId}
   `;

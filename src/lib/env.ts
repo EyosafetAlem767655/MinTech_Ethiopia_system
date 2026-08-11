@@ -34,7 +34,7 @@ export interface EnvCheck {
 export function integrationEnvChecks(): Record<string, EnvCheck> {
   const checks: Record<string, EnvCheck> = {
     supabase: check(["SUPABASE_DB_URL", "SUPABASE_SECRET_KEY", "NEXT_PUBLIC_SUPABASE_URL"]),
-    openai: check(["OPENAI_API_KEY"]),
+    ai: check(["NIVIDA_API_KEY", "QWEN_API"]),
     telegram: check(["TELEGRAM_BOT_TOKEN", "TELEGRAM_CEO_CHAT_ID", "TELEGRAM_WEBHOOK_SECRET", "APP_URL"]),
     cron: check(["CRON_SECRET"]),
     push: check(["VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY", "VAPID_SUBJECT", "NEXT_PUBLIC_VAPID_PUBLIC_KEY"]),

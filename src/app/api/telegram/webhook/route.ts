@@ -18,6 +18,7 @@ import {
   downloadTelegramFile,
   ENTRY_BUTTONS,
   NAV_BUTTONS,
+  sendDocument,
   sendEntryMenu,
   sendMessage,
   sendPurchaseDecisionRequest,
@@ -49,6 +50,13 @@ import { insertClaimPhotos, processClaimPhoto } from "@/lib/claims";
 import { companyChat } from "@/lib/chat";
 import { ingestOpsReport, isOpsReportText } from "@/lib/ops-report";
 import { spreadsheetToText, isSpreadsheetMime } from "@/lib/spreadsheet";
+import {
+  buildSalesReceiptsWorkbook,
+  computeReceipt,
+  extractSalesReceipt,
+  type SalesReceiptDraft,
+  type SalesReceiptRow,
+} from "@/lib/receipt-scan";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -798,6 +806,104 @@ const HR_KIND_KEYBOARD = {
 
 /* ─────────────────────────────────── Route ───────────────────────────────── */
 
+/* ───────────────────────── Sales receipt-scan flow ───────────────────────── */
+
+const RECEIPT_BTN = {
+  done: "✅ ጨርሻለሁ",
+  approve: "✅ አጽድቅ",
+  edit: "✏️ አስተካክл",
+  export: "📊 የዛሬውን Excel",
+  submit: "📤 ወደ ዳሽቦርድ አስገባ",
+  again: "🧾 አዲስ ደረሰኝ",
+} as const;
+
+const NORM_RECEIPT = {
+  done: normaliseChoice(RECEIPT_BTN.done),
+  approve: normaliseChoice(RECEIPT_BTN.approve),
+  edit: normaliseChoice(RECEIPT_BTN.edit),
+  export: normaliseChoice(RECEIPT_BTN.export),
+  submit: normaliseChoice(RECEIPT_BTN.submit),
+  again: normaliseChoice(RECEIPT_BTN.again),
+};
+
+const receiptCollectKeyboard = {
+  keyboard: [[{ text: RECEIPT_BTN.done }], [{ text: NAV_BUTTONS.cancel }]],
+  resize_keyboard: true,
+  one_time_keyboard: false,
+};
+const receiptActionKeyboard = {
+  keyboard: [[{ text: RECEIPT_BTN.approve }], [{ text: RECEIPT_BTN.edit }], [{ text: NAV_BUTTONS.cancel }]],
+  resize_keyboard: true,
+  one_time_keyboard: false,
+};
+const receiptNextKeyboard = {
+  keyboard: [
+    [{ text: RECEIPT_BTN.export }, { text: RECEIPT_BTN.submit }],
+    [{ text: RECEIPT_BTN.again }],
+    [{ text: NAV_BUTTONS.back }],
+  ],
+  resize_keyboard: true,
+  one_time_keyboard: false,
+};
+
+const money = (n: number) => Math.round(Number(n) || 0).toLocaleString();
+
+function receiptPreview(d: SalesReceiptDraft): string {
+  return (
+    `🧾 <b>የተነበበ ደረሰኝ</b>\n` +
+    `📅 ${d.date}\n` +
+    `👤 ${d.customerName || "—"}\n` +
+    `#️⃣ Fs.No ${d.fsNo || "—"} · Att.No ${d.attNo || "—"}\n` +
+    `📦 ${d.productTy || "—"}\n` +
+    `🔢 ${d.qty} × ${money(d.unitPrice)} = ${money(d.subTotal)}\n` +
+    `➕ VAT 15% ${money(d.vat)}\n` +
+    `💰 Grand ${money(d.grandTotal)}\n` +
+    `➖ Withhold ${money(d.withhold)}\n` +
+    `✅ Net ${money(d.netPay)}\n` +
+    `🏦 ${d.depositedBank || "—"}\n\n` +
+    `ትክክл ከሆነ "${RECEIPT_BTN.approve}"፣ ካልሆነ "${RECEIPT_BTN.edit}" ይጫኑ።`
+  );
+}
+
+/** Applies "field: value" edit lines onto a draft, then recomputes totals. */
+function applyReceiptEdits(draft: SalesReceiptDraft, text: string): SalesReceiptDraft {
+  const next = { ...draft };
+  const num = (v: string) => Number(v.replace(/[^0-9.\-]/g, "")) || 0;
+  for (const line of text.split(/\n+/)) {
+    const idx = line.indexOf(":");
+    if (idx === -1) continue;
+    const key = line.slice(0, idx).trim().toLowerCase().replace(/[.\s_-]/g, "");
+    const val = line.slice(idx + 1).trim();
+    if (!val) continue;
+    if (["date", "ቀን"].includes(key)) next.date = val;
+    else if (["customer", "customername", "ደንበኛ"].includes(key)) next.customerName = val;
+    else if (["fsno", "fs"].includes(key)) next.fsNo = val;
+    else if (["attno", "att"].includes(key)) next.attNo = val;
+    else if (["product", "productty", "ምርት"].includes(key)) next.productTy = val;
+    else if (["qty", "quantity", "ብዛት"].includes(key)) next.qty = num(val);
+    else if (["unitprice", "price", "ዋጋ"].includes(key)) next.unitPrice = num(val);
+    else if (["withhold", "withholding"].includes(key)) next.withhold = num(val);
+    else if (["bank", "depositedbank", "ባንክ"].includes(key)) next.depositedBank = val;
+  }
+  return computeReceipt(next);
+}
+
+/** Start of today in EAT as a Date, for "today's receipts" queries. */
+function eatDayStartDate(): Date {
+  return new Date(`${eatDateKey()}T00:00:00+03:00`);
+}
+
+async function todaysSalesReceipts(reportedBy: string): Promise<SalesReceiptRow[]> {
+  const rows = await sql`
+    select date, customer_name as "customerName", fs_no as "fsNo", att_no as "attNo", product_ty as "productTy",
+           qty, unit_price as "unitPrice", sub_total as "subTotal", vat, grand_total as "grandTotal",
+           withhold, net_pay as "netPay", deposited_bank as "depositedBank"
+      from sales_receipts
+     where reported_by = ${reportedBy} and created_at >= ${eatDayStartDate()}
+     order by created_at asc`;
+  return rows as unknown as SalesReceiptRow[];
+}
+
 function isMongoAccessError(e: unknown) {
   const message = e instanceof Error ? e.message : String(e);
   return message.includes("MongoDB Atlas") || message.includes("IP") || message.includes("whitelist");
@@ -968,6 +1074,7 @@ export async function POST(req: NextRequest) {
         session.mode = "unknown";
         session.draft = undefined;
         session.capture = undefined;
+        session.receiptScan = undefined;
         session.history = [];
         await persist(session);
         await sendMessage(chatId, `🔐 <b>ለውስጥ ሰራተኛ ብቻ</b>\n\n${MSG.askLoginName}`, { reply_markup: BACK_KEYBOARD });
@@ -1013,6 +1120,7 @@ export async function POST(req: NextRequest) {
       session.state = "idle";
       session.draft = undefined;
       session.capture = undefined;
+      session.receiptScan = undefined;
       session.history = [];
       // Abandoning a correction must not delete the original submission.
       if (session.editState?.pending) session.editState = { ...session.editState, pending: undefined };
@@ -1069,6 +1177,163 @@ export async function POST(req: NextRequest) {
     }
 
     const submitterName = user.fullName;
+
+    /* ── Sales receipt-scan: collect up to 3 photos, then extract ── */
+    if (session.state === "receipt_collect" && session.receiptScan) {
+      const rs = session.receiptScan as { images: string[]; draft?: SalesReceiptDraft };
+      rs.images = rs.images || [];
+
+      if (hasPhoto(msg)) {
+        if (rs.images.length >= 3) {
+          await sendMessage(chatId, `⚠️ ከ3 ፎቶ በላይ አይፈቀድም። "${RECEIPT_BTN.done}" ይጫኑ።`, { reply_markup: receiptCollectKeyboard });
+          return NextResponse.json({ ok: true });
+        }
+        const stored = await storeIncomingPhoto(msg);
+        if (!stored) {
+          await sendMessage(chatId, "⚠️ ፎቶውን ማውረድ አልተቻለም። ድጋሚ ይሞክሩ።", { reply_markup: receiptCollectKeyboard });
+          return NextResponse.json({ ok: true });
+        }
+        rs.images = [...rs.images, stored.id];
+        session.receiptScan = rs;
+        await persist(session);
+        if (rs.images.length < 3) {
+          await sendMessage(chatId, `📷 ${rs.images.length}/3 ተጨምሯል። ተጨማሪ ይላኩ ወይም "${RECEIPT_BTN.done}" ይጫኑ።`, {
+            reply_markup: receiptCollectKeyboard,
+          });
+          return NextResponse.json({ ok: true });
+        }
+        // 3 photos reached → fall through to extraction
+      } else if (normText !== NORM_RECEIPT.done) {
+        await sendMessage(chatId, `📷 የደረሰኙን ፎቶ ይላኩ (እስከ 3)፣ ከዚያ "${RECEIPT_BTN.done}"።`, { reply_markup: receiptCollectKeyboard });
+        return NextResponse.json({ ok: true });
+      }
+
+      if (rs.images.length === 0) {
+        await sendMessage(chatId, "📷 ቢያንስ አንድ ፎቶ ይላኩ።", { reply_markup: receiptCollectKeyboard });
+        return NextResponse.json({ ok: true });
+      }
+
+      await sendMessage(chatId, "⏳ ደረሰኙን በማንበብ ላይ...");
+      const imgs: { base64: string; contentType: string }[] = [];
+      for (const id of rs.images.slice(0, 3)) {
+        const bytes = await getFileBytes(id).catch(() => null);
+        if (bytes) imgs.push({ base64: bytes.base64, contentType: bytes.contentType });
+      }
+      const draft = await extractSalesReceipt(imgs, text || undefined);
+      rs.draft = draft;
+      session.receiptScan = rs;
+      session.state = "receipt_action";
+      await persist(session);
+      await sendMessage(chatId, receiptPreview(draft), { reply_markup: receiptActionKeyboard });
+      return NextResponse.json({ ok: true });
+    }
+
+    /* ── Sales receipt-scan: preview → approve / edit ── */
+    if (session.state === "receipt_action" && session.receiptScan?.draft) {
+      const rs = session.receiptScan as { images: string[]; draft: SalesReceiptDraft };
+      if (normText === NORM_RECEIPT.edit) {
+        session.state = "receipt_edit";
+        await persist(session);
+        await sendMessage(
+          chatId,
+          '✏️ የሚስተካከለውን በ"መስክ: እሴት" መልኩ ይላኩ። ምሳሌ፦\ncustomer: Abebe\nqty: 5\nunitPrice: 24000\nbank: CBE\n(fields: date, customer, fsNo, attNo, product, qty, unitPrice, withhold, bank)',
+          { reply_markup: CHANGE_CANCEL_KEYBOARD }
+        );
+        return NextResponse.json({ ok: true });
+      }
+      if (normText === NORM_RECEIPT.approve) {
+        const d = rs.draft;
+        await sql`
+          insert into sales_receipts (date, customer_name, fs_no, att_no, product_ty, qty, unit_price,
+                                      sub_total, vat, grand_total, withhold, net_pay, deposited_bank,
+                                      status, reported_by, photo_file_ids)
+          values (${parseReportDate(d.date)}, ${d.customerName || null}, ${d.fsNo || null}, ${d.attNo || null},
+                  ${d.productTy || null}, ${d.qty}, ${d.unitPrice}, ${d.subTotal}, ${d.vat}, ${d.grandTotal},
+                  ${d.withhold}, ${d.netPay}, ${d.depositedBank || null}, 'processed', ${submitterName},
+                  ${rs.images || []})
+        `;
+        await logActivity({
+          chatId,
+          actor: submitterName,
+          userId: String(user._id),
+          positions: user.positions,
+          audience: "internal",
+          action: "submission",
+          detail: "sales_receipt",
+        });
+        session.receiptScan = { images: [] };
+        session.state = "receipt_next";
+        await persist(session);
+        await sendMessage(
+          chatId,
+          `✅ ተቀምጧል · ${money(d.netPay)} ETB (net)።\n📊 የዛሬውን ወደ Excel ማውጣት ወይም ወደ ዳሽቦርድ ማስገባት ይችላሉ።`,
+          { reply_markup: receiptNextKeyboard }
+        );
+        return NextResponse.json({ ok: true });
+      }
+      await sendMessage(chatId, receiptPreview(rs.draft), { reply_markup: receiptActionKeyboard });
+      return NextResponse.json({ ok: true });
+    }
+
+    /* ── Sales receipt-scan: apply field edits ── */
+    if (session.state === "receipt_edit" && session.receiptScan?.draft && text) {
+      const rs = session.receiptScan as { images: string[]; draft: SalesReceiptDraft };
+      rs.draft = applyReceiptEdits(rs.draft, text);
+      session.receiptScan = rs;
+      session.state = "receipt_action";
+      await persist(session);
+      await sendMessage(chatId, receiptPreview(rs.draft), { reply_markup: receiptActionKeyboard });
+      return NextResponse.json({ ok: true });
+    }
+
+    /* ── Sales receipt-scan: export today / submit / new ── */
+    if (session.state === "receipt_next") {
+      if (normText === NORM_RECEIPT.export) {
+        const rows = await todaysSalesReceipts(submitterName);
+        if (rows.length === 0) {
+          await sendMessage(chatId, "ዛሬ ምንም የተመዘገበ ደረሰኝ የለም።", { reply_markup: receiptNextKeyboard });
+          return NextResponse.json({ ok: true });
+        }
+        const buf = await buildSalesReceiptsWorkbook(rows, `Sales Report ${eatDateKey()}`);
+        await sendDocument(
+          chatId,
+          {
+            buffer: buf,
+            filename: `sales-report-${eatDateKey()}.xlsx`,
+            contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          },
+          `📊 የዛሬው የሽያጭ ሪፖርት (${rows.length} ደረሰኝ)`
+        );
+        await sendMessage(chatId, "ተጨማሪ ማድረግ ይችላሉ።", { reply_markup: receiptNextKeyboard });
+        return NextResponse.json({ ok: true });
+      }
+      if (normText === NORM_RECEIPT.submit) {
+        const updated = await sql<{ id: string }[]>`
+          update sales_receipts set status = 'submitted', updated_at = now()
+           where reported_by = ${submitterName} and status = 'processed' and created_at >= ${eatDayStartDate()}
+          returning id`;
+        await sendMessage(chatId, `📤 ${updated.length} ደረሰኝ ወደ ዳሽቦርድ ገብቷል።`, { reply_markup: receiptNextKeyboard });
+        return NextResponse.json({ ok: true });
+      }
+      if (normText === NORM_RECEIPT.again) {
+        session.state = "receipt_collect";
+        session.receiptScan = { images: [] };
+        await persist(session);
+        await sendMessage(chatId, `<b>${CAPABILITIES.sales_receipt_scan.button}</b>\n\n${CAPABILITIES.sales_receipt_scan.question}`, {
+          reply_markup: receiptCollectKeyboard,
+        });
+        return NextResponse.json({ ok: true });
+      }
+      if (normText === NORM.back) {
+        session.state = "idle";
+        session.receiptScan = undefined;
+        await persist(session);
+        await sendRoleMenu(chatId, user);
+        return NextResponse.json({ ok: true });
+      }
+      await sendMessage(chatId, "ከታች ካሉት አንዱን ይምረጡ።", { reply_markup: receiptNextKeyboard });
+      return NextResponse.json({ ok: true });
+    }
 
     /* ── HR subtype choice ── */
     if (session.state === "awaiting_hr_kind" && text) {
@@ -1144,6 +1409,17 @@ export async function POST(req: NextRequest) {
 
       if (cap.captureMode === "capture") {
         await startCapture(session, chatId, cap);
+        return NextResponse.json({ ok: true });
+      }
+
+      if (cap.captureMode === "receipt_scan") {
+        session.state = "receipt_collect";
+        session.draft = undefined;
+        session.capture = undefined;
+        session.history = [];
+        session.receiptScan = { images: [] };
+        await persist(session);
+        await sendMessage(chatId, `<b>${cap.button}</b>\n\n${cap.question}`, { reply_markup: receiptCollectKeyboard });
         return NextResponse.json({ ok: true });
       }
 

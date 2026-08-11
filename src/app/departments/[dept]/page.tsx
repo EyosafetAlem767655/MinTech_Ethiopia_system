@@ -17,6 +17,7 @@ import StockStatusPanel from "@/components/panels/StockStatusPanel";
 import RawMaterialReceivedPanel from "@/components/panels/RawMaterialReceivedPanel";
 import DeliveryReportPanel from "@/components/panels/DeliveryReportPanel";
 import PurchaseItemsPanel from "@/components/panels/PurchaseItemsPanel";
+import SalesReceiptsPanel from "@/components/panels/SalesReceiptsPanel";
 
 /**
  * Detailed reports per department, below the range summary. The company report
@@ -26,7 +27,7 @@ import PurchaseItemsPanel from "@/components/panels/PurchaseItemsPanel";
 const PANELS: Record<DepartmentKey, ComponentType[]> = {
   production: [ProductionGridPanel, StockStatusPanel, ProductionOpsPanel, ShiftPanel, GatePanel],
   asset_management: [RawMaterialReceivedPanel, PurchaseItemsPanel, StockStatusPanel, BagControlPanel, PurchasesPanel],
-  sales: [DeliveryReportPanel, ReceiptsPanel],
+  sales: [DeliveryReportPanel, SalesReceiptsPanel, ReceiptsPanel],
   finance: [ReceivablesPanel],
 };
 

@@ -32,20 +32,25 @@ async function checkSupabase(): Promise<LiveStatus> {
   }
 }
 
-async function checkOpenAI(): Promise<LiveStatus> {
-  const apiKey = envValue("OPENAI_API_KEY");
-  if (!apiKey) return { ok: false, error: "OPENAI_API_KEY is missing." };
+async function checkAi(): Promise<LiveStatus> {
+  const nvidiaKey = envValue("NIVIDA_API_KEY") || envValue("NVIDIA_API_KEY");
+  const qwenKey = envValue("QWEN_API");
+  const missing: string[] = [];
+  if (!nvidiaKey) missing.push("NIVIDA_API_KEY (text)");
+  if (!qwenKey) missing.push("QWEN_API (images)");
+  if (missing.length) return { ok: false, error: `Missing: ${missing.join(", ")}` };
 
+  const base = (envValue("NVIDIA_BASE_URL") || "https://integrate.api.nvidia.com/v1").replace(/\/+$/, "");
   try {
-    const res = await fetch("https://api.openai.com/v1/models", {
-      headers: { Authorization: `Bearer ${apiKey}` },
+    const res = await fetch(`${base}/models`, {
+      headers: { Authorization: `Bearer ${nvidiaKey}` },
       cache: "no-store",
     });
     if (!res.ok) {
       const body = await res.text();
-      return { ok: false, error: `OpenAI returned ${res.status}: ${body.slice(0, 300)}` };
+      return { ok: false, error: `NVIDIA returned ${res.status}: ${body.slice(0, 300)}` };
     }
-    return { ok: true };
+    return { ok: true, details: { textConfigured: true, imagesConfigured: Boolean(qwenKey) } };
   } catch (e) {
     return { ok: false, error: errorMessage(e) };
   }
@@ -90,7 +95,7 @@ export async function GET(req: NextRequest) {
 
   if (live) {
     liveChecks.supabase = await checkSupabase();
-    liveChecks.openai = await checkOpenAI();
+    liveChecks.ai = await checkAi();
     liveChecks.telegram = await checkTelegram();
   }
 

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { POSITIONS, POSITION_GROUPS, capabilitiesFor, type PositionKey } from "@/lib/positions";
 import { InstallButton } from "@/components/InstallPrompt";
 
@@ -52,23 +53,40 @@ const ACTION_STYLES: Record<string, string> = {
   error: "bg-red-200 text-red-900",
 };
 
-type Tab = "users" | "activity";
+type Tab = "users" | "activity" | "devices";
 
 export default function SettingsPage() {
   const [tab, setTab] = useState<Tab>("users");
+  const router = useRouter();
+
+  const logout = async () => {
+    if (!confirm("Log out of this browser?")) return;
+    await fetch("/api/logout", { method: "POST" }).catch(() => {});
+    router.push("/login");
+  };
 
   return (
     <main className="max-w-4xl mx-auto px-4 pb-10">
       <header className="hero-gradient -mx-4 px-5 pb-7 pt-10 text-white sm:mx-0 sm:mt-4 sm:rounded-2xl">
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src="/logo.png"
-          alt="MinTech"
-          className="mb-3 h-10 w-auto drop-shadow-[0_3px_10px_rgba(0,0,0,0.25)]"
-        />
-        <p className="text-xs font-bold tracking-[0.24em] uppercase text-clay-100">Settings</p>
-        <h1 className="font-display text-2xl font-bold">Telegram bot access</h1>
-        <p className="mt-1 text-sm text-clay-100/90">Employees · positions · passwords · full audit trail</p>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src="/logo.png"
+              alt="MinTech"
+              className="mb-3 h-10 w-auto drop-shadow-[0_3px_10px_rgba(0,0,0,0.25)]"
+            />
+            <p className="text-xs font-bold tracking-[0.24em] uppercase text-clay-100">Settings</p>
+            <h1 className="font-display text-2xl font-bold">Telegram bot access</h1>
+            <p className="mt-1 text-sm text-clay-100/90">Employees · positions · passwords · devices</p>
+          </div>
+          <button
+            onClick={logout}
+            className="shrink-0 rounded-full border border-white/25 bg-white/15 px-3 py-1.5 text-xs font-bold hover:bg-white/25 active:scale-95"
+          >
+            🚪 Log out
+          </button>
+        </div>
       </header>
 
       <div className="pt-5">
@@ -76,7 +94,7 @@ export default function SettingsPage() {
       </div>
 
       <div className="flex gap-1.5 py-5">
-        {(["users", "activity"] as const).map((t) => (
+        {(["users", "activity", "devices"] as const).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -84,14 +102,80 @@ export default function SettingsPage() {
               tab === t ? "bg-clay-700 text-white" : "bg-stone-100 text-stone-600"
             }`}
           >
-            {t === "users" ? "Employees" : "Bot activity"}
+            {t === "users" ? "Employees" : t === "activity" ? "Bot activity" : "Devices"}
           </button>
         ))}
       </div>
 
       {tab === "users" && <UsersTab />}
       {tab === "activity" && <ActivityTab />}
+      {tab === "devices" && <DevicesTab />}
     </main>
+  );
+}
+
+/* ─────────────────────────────────── Devices ──────────────────────────────── */
+
+interface WebSession {
+  _id: string;
+  label: string | null;
+  userAgent: string | null;
+  ip: string | null;
+  createdAt: string;
+  lastSeenAt: string;
+  current: boolean;
+}
+
+function DevicesTab() {
+  const [sessions, setSessions] = useState<WebSession[] | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    const res = await fetch("/api/web-sessions");
+    if (res.ok) setSessions((await res.json()).sessions);
+    else setSessions([]);
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const revoke = async (s: WebSession) => {
+    if (!confirm(s.current ? "Revoke THIS device? You'll be logged out." : "Revoke this device's access?")) return;
+    setBusy(true);
+    await fetch(`/api/web-sessions/${s._id}`, { method: "DELETE" }).catch(() => {});
+    setBusy(false);
+    await load();
+  };
+
+  if (!sessions) return <p className="py-10 text-center text-sm text-stone-400">Loading…</p>;
+
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-stone-500">
+        Browsers currently signed into the dashboard. Revoke any you don&apos;t recognise — that device is signed out
+        on its next request.
+      </p>
+      {sessions.length === 0 && <p className="py-8 text-center text-sm text-stone-400">No active devices.</p>}
+      {sessions.map((s) => (
+        <div key={s._id} className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-stone-200 bg-white p-4">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 className="text-sm font-bold text-stone-900">{s.label || "Device"}</h3>
+              {s.current && (
+                <span className="rounded-full bg-green-100 px-2 py-0.5 text-[11px] font-bold text-green-800">
+                  This device
+                </span>
+              )}
+            </div>
+            <p className="mt-0.5 text-[11px] text-stone-400">
+              {s.ip ? `IP ${s.ip} · ` : ""}last active {fmtTime(s.lastSeenAt)} · since {fmtTime(s.createdAt)}
+            </p>
+          </div>
+          <SmallBtn label={s.current ? "Log out" : "Revoke"} tone="red" disabled={busy} onClick={() => revoke(s)} />
+        </div>
+      ))}
+    </div>
   );
 }
 

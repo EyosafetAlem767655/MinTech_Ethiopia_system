@@ -26,7 +26,8 @@ export type CapabilityKey =
   | "stock_status"
   | "raw_material_received"
   | "finished_goods_delivery"
-  | "purchase_items";
+  | "purchase_items"
+  | "sales_receipt_scan";
 
 /** How the bot collects a capability's payload. */
 export type CaptureMode =
@@ -36,6 +37,8 @@ export type CaptureMode =
   | "capture"
   /** Pasted multi-day operations report. */
   | "ops_paste"
+  /** Scan receipt photo(s) → OCR + Qwen → preview/edit → Excel (sales). */
+  | "receipt_scan"
   /** Free-form question answered by the company chat model. */
   | "chat";
 
@@ -175,6 +178,14 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
     question:
       "🧾 የተገዙ ዕቃዎችን ይላኩ — ጽሑፍ፣ ፎቶ ወይም Excel። መግለጫ፣ መለኪያ (uom)፣ ብዛት፣ አቅራቢ፣ ዋጋ፣ የወጪ ማዕከል እና ገዢ ያካትቱ።",
   },
+  sales_receipt_scan: {
+    key: "sales_receipt_scan",
+    button: "🧾 ደረሰኝ ስካን → Excel",
+    captureMode: "receipt_scan",
+    input: "photo",
+    question:
+      "🧾 የደረሰኙን ፎቶ(ዎች) ይላኩ — እስከ 3 ፎቶ። ከጨረሱ በኋላ \"✅ ጨርሻለሁ\" የሚለውን ይጫኑ።",
+  },
   materials: {
     key: "materials",
     button: "📦 የዕቃ ቆጠራ",
@@ -304,7 +315,7 @@ export const POSITIONS: Record<PositionKey, Position> = {
     en: "Sales report & receipts",
     am: "የሽያጭ ሪፖርትና ደረሰኝ",
     description: "Files the daily sales report together with receipts.",
-    capabilities: ["daily_report", "sales", "receipt", "finished_goods_delivery", "question"],
+    capabilities: ["daily_report", "sales", "receipt", "finished_goods_delivery", "sales_receipt_scan", "question"],
     dailyRequired: true,
   },
   finance_daily: {

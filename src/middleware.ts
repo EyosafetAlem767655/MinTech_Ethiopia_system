@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { AUTH_COOKIE, authToken, isAuthDisabled } from "@/lib/auth";
+import { AUTH_COOKIE, isAuthDisabled } from "@/lib/auth";
+import { isValidSession } from "@/lib/websession";
 
 // Routes reachable without the dashboard password.
 // Keep these as specific as possible: a bare "/api/telegram" prefix would also
@@ -12,6 +13,8 @@ const PUBLIC_PREFIXES = [
   "/manifest.json",
   "/sw.js",
   "/icons",
+  "/logo.png",
+  "/screenshots",
   "/_next",
   "/favicon",
 ];
@@ -22,7 +25,7 @@ export async function middleware(req: NextRequest) {
   if (PUBLIC_PREFIXES.some((p) => pathname.startsWith(p))) return NextResponse.next();
 
   const cookie = req.cookies.get(AUTH_COOKIE)?.value;
-  if (cookie === (await authToken())) return NextResponse.next();
+  if (cookie && (await isValidSession(cookie))) return NextResponse.next();
 
   if (pathname.startsWith("/api/")) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });

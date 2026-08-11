@@ -1,24 +1,117 @@
 import OpenAI from "openai";
-import { envValue, requireEnv } from "@/lib/env";
+import { envValue } from "@/lib/env";
 
-let _client: OpenAI | null = null;
-let _clientKey = "";
+/* ─────────────────────────────── AI providers ──────────────────────────────
+ * Text (chat, morning brief, report extraction) → NVIDIA Nemotron-3.
+ * Images (receipts, stone quality, damage photos, photo extraction) → Qwen-VL.
+ * Both speak the OpenAI-compatible API, so we use the OpenAI SDK with two
+ * baseURL/key pairs. Base URL + model are env-overridable because the exact
+ * provider behind QWEN_API / the NVIDIA key can vary.
+ */
 
-export function isOpenAIConfigured(): boolean {
-  return envValue("OPENAI_API_KEY").length > 0;
+const NVIDIA_BASE = envValue("NVIDIA_BASE_URL") || "https://integrate.api.nvidia.com/v1";
+export const TEXT_MODEL = envValue("NEMOTRON_MODEL") || "nvidia/nemotron-3-ultra-550b-a55b";
+
+const QWEN_BASE = envValue("QWEN_BASE_URL") || "https://dashscope-intl.aliyuncs.com/compatible-mode/v1";
+export const VISION_MODEL = envValue("QWEN_MODEL") || "qwen-vl-max-latest";
+
+function nvidiaKey(): string {
+  return envValue("NIVIDA_API_KEY") || envValue("NVIDIA_API_KEY");
 }
 
-export function openai(): OpenAI {
-  const apiKey = requireEnv("OPENAI_API_KEY", "AI chat, Telegram document reading, photo checks and morning brief generation");
-  if (!_client || _clientKey !== apiKey) {
-    _client = new OpenAI({ apiKey });
-    _clientKey = apiKey;
+/** True when the text model (Nemotron) key is configured. */
+export function isAiConfigured(): boolean {
+  return nvidiaKey().length > 0;
+}
+// Back-compat: some call sites still import isOpenAIConfigured.
+export const isOpenAIConfigured = isAiConfigured;
+
+let _textClient: OpenAI | null = null;
+let _textKey = "";
+/** Nemotron (NVIDIA) — text / reasoning only. */
+export function textAI(): OpenAI {
+  const apiKey = nvidiaKey();
+  if (!apiKey) {
+    throw new Error(
+      "NIVIDA_API_KEY is required for AI text (chat, morning brief, report extraction). Add it in Vercel env and redeploy."
+    );
   }
-  return _client;
+  if (!_textClient || _textKey !== apiKey) {
+    _textClient = new OpenAI({ apiKey, baseURL: NVIDIA_BASE });
+    _textKey = apiKey;
+  }
+  return _textClient;
 }
 
-export const VISION_MODEL = "gpt-4o-mini";
-export const TEXT_MODEL = "gpt-4o-mini";
+let _visionClient: OpenAI | null = null;
+let _visionKey = "";
+/** Qwen-VL — reads images. */
+export function visionAI(): OpenAI {
+  const apiKey = envValue("QWEN_API");
+  if (!apiKey) {
+    throw new Error(
+      "QWEN_API is required for image reading (receipts, stone quality, damage photos). Add it in Vercel env and redeploy."
+    );
+  }
+  if (!_visionClient || _visionKey !== apiKey) {
+    _visionClient = new OpenAI({ apiKey, baseURL: QWEN_BASE });
+    _visionKey = apiKey;
+  }
+  return _visionClient;
+}
+
+/**
+ * Robust JSON extraction. Off-OpenAI models don't reliably honour json_object
+ * mode, and reasoning models can wrap output in <think> tags or ``` fences —
+ * so pull out the first balanced {...} object.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function extractJson(raw?: string | null): any {
+  if (!raw) return {};
+  let s = String(raw).trim();
+  s = s.replace(/<think>[\s\S]*?<\/think>/gi, "");
+  s = s.replace(/```(?:json)?/gi, "");
+  const start = s.indexOf("{");
+  if (start === -1) return {};
+  let depth = 0;
+  for (let i = start; i < s.length; i++) {
+    if (s[i] === "{") depth++;
+    else if (s[i] === "}") {
+      depth--;
+      if (depth === 0) {
+        try {
+          return JSON.parse(s.slice(start, i + 1));
+        } catch {
+          return {};
+        }
+      }
+    }
+  }
+  try {
+    return JSON.parse(s.slice(start));
+  } catch {
+    return {};
+  }
+}
+
+/** Nemotron text completion with thinking disabled (structured/JSON friendly). */
+async function nemotronComplete(
+  messages: OpenAI.Chat.ChatCompletionMessageParam[],
+  opts: { maxTokens?: number; temperature?: number } = {}
+): Promise<string> {
+  const params: Record<string, unknown> = {
+    model: TEXT_MODEL,
+    messages,
+    max_tokens: opts.maxTokens ?? 600,
+    temperature: opts.temperature ?? 0.2,
+    top_p: 0.95,
+    // NVIDIA/Nemotron extras — harmless if ignored by another provider.
+    chat_template_kwargs: { enable_thinking: false },
+  };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const res = (await textAI().chat.completions.create(params as any)) as any;
+  return res.choices[0]?.message?.content?.trim() || "";
+}
 
 /* ───────────────────── Claim photo fraud / validity check ─────────────────── */
 
@@ -50,9 +143,8 @@ export async function checkClaimPhoto(
   bagType: string
 ): Promise<PhotoVerdict> {
   try {
-    const res = await openai().chat.completions.create({
+    const res = await visionAI().chat.completions.create({
       model: VISION_MODEL,
-      response_format: { type: "json_object" },
       max_tokens: 500,
       messages: [
         {
@@ -77,7 +169,7 @@ export async function checkClaimPhoto(
         },
       ],
     });
-    const parsed = JSON.parse(res.choices[0]?.message?.content || "{}");
+    const parsed = extractJson(res.choices[0]?.message?.content);
     const rawCount = parsed.counted_bags;
     return {
       bag_visible: !!parsed.bag_visible,
@@ -105,21 +197,17 @@ export interface QRCheckResult {
   notes: string;
 }
 
-export async function checkReceiptQRCode(
-  imageBase64: string,
-  contentType: string
-): Promise<QRCheckResult> {
+export async function checkReceiptQRCode(imageBase64: string, contentType: string): Promise<QRCheckResult> {
   try {
-    const res = await openai().chat.completions.create({
+    const res = await visionAI().chat.completions.create({
       model: VISION_MODEL,
-      response_format: { type: "json_object" },
       max_tokens: 200,
       messages: [
         {
           role: "system",
           content:
             "You inspect receipt photos submitted to an Ethiopian mining company's accounting system. " +
-            "Return STRICT JSON: { \"hasQRCode\": boolean, \"confidence\": 0-1, \"notes\": \"one short sentence\" }. " +
+            'Return STRICT JSON: { "hasQRCode": boolean, "confidence": 0-1, "notes": "one short sentence" }. ' +
             "Set hasQRCode=true ONLY if a QR code (square matrix barcode with dark squares on a white background) " +
             "is clearly visible anywhere on the receipt. " +
             "Ethiopian ERCA tax receipts always include a QR code — that is the standard to check against. " +
@@ -134,7 +222,7 @@ export async function checkReceiptQRCode(
         },
       ],
     });
-    const parsed = JSON.parse(res.choices[0]?.message?.content || "{}");
+    const parsed = extractJson(res.choices[0]?.message?.content);
     return {
       hasQRCode: !!parsed.hasQRCode,
       confidence: Math.max(0, Math.min(1, Number(parsed.confidence) || 0.5)),
@@ -167,9 +255,8 @@ const STONE_SCORE_FALLBACK: StoneScore = {
 
 export async function scoreStonePhoto(imageBase64: string, contentType: string): Promise<StoneScore> {
   try {
-    const res = await openai().chat.completions.create({
+    const res = await visionAI().chat.completions.create({
       model: VISION_MODEL,
-      response_format: { type: "json_object" },
       max_tokens: 350,
       messages: [
         {
@@ -189,10 +276,8 @@ export async function scoreStonePhoto(imageBase64: string, contentType: string):
         },
       ],
     });
-    const parsed = JSON.parse(res.choices[0]?.message?.content || "{}");
-    const qualityGrade = ["good", "fair", "dark/weathered"].includes(parsed.qualityGrade)
-      ? parsed.qualityGrade
-      : "fair";
+    const parsed = extractJson(res.choices[0]?.message?.content);
+    const qualityGrade = ["good", "fair", "dark/weathered"].includes(parsed.qualityGrade) ? parsed.qualityGrade : "fair";
     return {
       visible_stone: !!parsed.visible_stone,
       qualityGrade,
@@ -210,11 +295,8 @@ export async function scoreStonePhoto(imageBase64: string, contentType: string):
 
 export async function writeBriefNarrative(structured: Record<string, unknown>): Promise<string> {
   try {
-    const res = await openai().chat.completions.create({
-      model: TEXT_MODEL,
-      max_tokens: 500,
-      temperature: 0.4,
-      messages: [
+    return await nemotronComplete(
+      [
         {
           role: "system",
           content:
@@ -227,8 +309,8 @@ export async function writeBriefNarrative(structured: Record<string, unknown>): 
         },
         { role: "user", content: JSON.stringify(structured) },
       ],
-    });
-    return res.choices[0]?.message?.content?.trim() || "";
+      { maxTokens: 500, temperature: 0.4 }
+    );
   } catch (e) {
     console.error("writeBriefNarrative failed:", e);
     return "";
@@ -265,9 +347,8 @@ export async function verifyRequestLegitimacy(
   const docDesc = typeDescriptions[docType] || typeDescriptions.other;
 
   try {
-    const res = await openai().chat.completions.create({
+    const res = await visionAI().chat.completions.create({
       model: VISION_MODEL,
-      response_format: { type: "json_object" },
       max_tokens: 400,
       messages: [
         {
@@ -293,7 +374,7 @@ export async function verifyRequestLegitimacy(
         },
       ],
     });
-    const parsed = JSON.parse(res.choices[0]?.message?.content || "{}");
+    const parsed = extractJson(res.choices[0]?.message?.content);
     return {
       score: Math.max(0, Math.min(100, Math.round(Number(parsed.score) || 50))),
       flags: Array.isArray(parsed.flags) ? parsed.flags.map(String).slice(0, 8) : [],
@@ -378,27 +459,35 @@ export async function classifyIngestion(opts: {
   }
   if (userContent.length === 0) userContent.push({ type: "text", text: "(no content)" });
 
+  const useVision = Boolean(opts.imageBase64);
+
   try {
-    const res = await openai().chat.completions.create({
-      model: VISION_MODEL,
-      response_format: { type: "json_object" },
-      max_tokens: 500,
-      messages: [
-        {
-          role: "system",
-          content:
-            "You are the data-intake assistant for MinTech Ethiopia (a mining company). Workers send you photos, " +
-            "typed messages, or the text of an Excel sheet covering receipts, purchase requests, damaged bags, " +
-            "truck/stone deliveries, shifts, and the department reports (production, stock status, raw-material " +
-            "received, finished-goods delivery, purchased items). Tabular reports may contain many rows — read " +
-            "them all. Classify what was sent, extract every field you can read, and ask for whatever is missing. " +
-            INGESTION_SCHEMA,
-        },
-        ...(opts.history || []).slice(-6).map((h) => ({ role: h.role, content: h.content } as const)),
-        { role: "user", content: userContent },
-      ],
-    });
-    const parsed = JSON.parse(res.choices[0]?.message?.content || "{}");
+    const messages = [
+      {
+        role: "system",
+        content:
+          "You are the data-intake assistant for MinTech Ethiopia (a mining company). Workers send you photos, " +
+          "typed messages, or the text of an Excel sheet covering receipts, purchase requests, damaged bags, " +
+          "truck/stone deliveries, shifts, and the department reports (production, stock status, raw-material " +
+          "received, finished-goods delivery, purchased items). Tabular reports may contain many rows — read " +
+          "them all. Classify what was sent, extract every field you can read, and ask for whatever is missing. " +
+          INGESTION_SCHEMA,
+      },
+      ...(opts.history || []).slice(-6).map((h) => ({ role: h.role, content: h.content })),
+      { role: "user", content: userContent },
+    ];
+
+    const params: Record<string, unknown> = {
+      model: useVision ? VISION_MODEL : TEXT_MODEL,
+      max_tokens: 900,
+      messages,
+    };
+    if (!useVision) params.chat_template_kwargs = { enable_thinking: false };
+
+    const client = useVision ? visionAI() : textAI();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const res = (await client.chat.completions.create(params as any)) as any;
+    const parsed = extractJson(res.choices[0]?.message?.content);
     return {
       docType: parsed.docType || "other",
       fields: parsed.fields || {},
