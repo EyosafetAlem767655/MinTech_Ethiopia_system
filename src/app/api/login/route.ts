@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { AUTH_COOKIE, authToken } from "@/lib/auth";
-import { deviceLabel, generateSessionToken } from "@/lib/websession";
+import { randomUUID } from "crypto";
+import { AUTH_COOKIE, signSession } from "@/lib/auth";
+import { deviceLabel } from "@/lib/websession";
 import { createSession } from "@/lib/websession-node";
 
 export const dynamic = "force-dynamic";
@@ -15,22 +16,20 @@ export async function POST(req: NextRequest) {
   const ip =
     (req.headers.get("x-forwarded-for") || "").split(",")[0].trim() || req.headers.get("x-real-ip") || "";
 
-  // Preferred path: a per-device session row so Settings ▸ Devices can list/revoke.
-  // Fallback path: if the session store isn't configured or the write fails (e.g.
-  // the migration hasn't been applied), we must NOT lock the user out — fall back
-  // to the deterministic password-derived token, which the middleware also accepts.
-  let cookieValue: string;
+  // Preferred path: record a per-device row so Settings ▸ Devices can list/revoke,
+  // and sign that row's id into the cookie. Fallback: if the DB write fails, sign
+  // a throwaway id so login STILL succeeds — the signature is what authenticates,
+  // the row is only for device management. Either way the cookie is valid.
+  let sid: string;
   try {
-    const token = generateSessionToken();
-    await createSession({ token, label: deviceLabel(ua), userAgent: ua.slice(0, 300), ip });
-    cookieValue = token;
+    sid = await createSession({ label: deviceLabel(ua), userAgent: ua.slice(0, 300), ip });
   } catch (e) {
-    console.error("web session create failed, using fallback token:", e);
-    cookieValue = await authToken();
+    console.error("web session create failed, signing throwaway id:", e);
+    sid = randomUUID();
   }
 
   const res = NextResponse.json({ ok: true });
-  res.cookies.set(AUTH_COOKIE, cookieValue, {
+  res.cookies.set(AUTH_COOKIE, await signSession(sid), {
     httpOnly: true,
     sameSite: "lax",
     secure: process.env.NODE_ENV === "production",

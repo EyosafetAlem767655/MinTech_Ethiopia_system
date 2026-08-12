@@ -1,5 +1,5 @@
 import sql from "@/lib/sql";
-import type { WebSessionRow } from "@/lib/websession";
+import { generateSessionToken, type WebSessionRow } from "@/lib/websession";
 
 /**
  * Node-only (postgres.js) side of the web-session store. The login / logout /
@@ -42,17 +42,20 @@ export async function ensureWebSessionsTable(): Promise<void> {
   _ensured = true;
 }
 
+/** Records a device and returns the new row id — that id is what the login route
+ *  signs into the cookie (the per-device session handle). */
 export async function createSession(input: {
-  token: string;
   label: string;
   userAgent: string;
   ip: string;
-}): Promise<void> {
+}): Promise<string> {
   await ensureWebSessionsTable();
-  await sql`
+  const rows = await sql<{ id: string }[]>`
     insert into web_sessions (token, label, user_agent, ip)
-    values (${input.token}, ${input.label}, ${input.userAgent}, ${input.ip})
+    values (${generateSessionToken()}, ${input.label}, ${input.userAgent}, ${input.ip})
+    returning id
   `;
+  return rows[0].id;
 }
 
 export async function listSessions(): Promise<WebSessionRow[]> {
@@ -68,20 +71,4 @@ export async function listSessions(): Promise<WebSessionRow[]> {
 
 export async function revokeSession(id: string): Promise<void> {
   await sql`update web_sessions set revoked_at = now() where id = ${id}`.catch(() => {});
-}
-
-export async function revokeByToken(token: string): Promise<void> {
-  await sql`update web_sessions set revoked_at = now() where token = ${token}`.catch(() => {});
-}
-
-export async function sessionIdForToken(token: string): Promise<string | null> {
-  const rows = await sql<{ id: string }[]>`
-    select id from web_sessions where token = ${token} limit 1
-  `.catch(() => [] as { id: string }[]);
-  return rows[0]?.id ?? null;
-}
-
-/** Revoke every active web session — forces a re-login on all devices. */
-export async function revokeAllSessions(): Promise<void> {
-  await sql`update web_sessions set revoked_at = now() where revoked_at is null`.catch(() => {});
 }

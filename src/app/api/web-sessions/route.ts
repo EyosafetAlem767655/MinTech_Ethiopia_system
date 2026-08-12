@@ -1,16 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
-import { AUTH_COOKIE } from "@/lib/auth";
-import { listSessions, sessionIdForToken } from "@/lib/websession-node";
+import { AUTH_COOKIE, verifySession } from "@/lib/auth";
+import { listSessions } from "@/lib/websession-node";
 
 export const dynamic = "force-dynamic";
 
 /** GET — active devices/sessions, marking the caller's current one. */
 export async function GET(req: NextRequest) {
-  const token = req.cookies.get(AUTH_COOKIE)?.value || "";
-  const [rows, currentId] = await Promise.all([
-    listSessions(),
-    token ? sessionIdForToken(token) : Promise.resolve(null),
-  ]);
+  // The current device's id is recovered from the signed cookie — no DB lookup.
+  const currentId = await verifySession(req.cookies.get(AUTH_COOKIE)?.value);
+  const rows = await listSessions();
   const sessions = rows.map((r) => ({
     _id: r.id,
     label: r.label,
