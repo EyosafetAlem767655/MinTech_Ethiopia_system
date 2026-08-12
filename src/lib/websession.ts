@@ -1,24 +1,15 @@
-import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-
 /**
  * Web (dashboard) session store — Edge-safe half. The mt_auth cookie holds an
  * opaque random token that maps to a `web_sessions` row. The Edge middleware
- * imports this file to validate a token, so it must NOT pull in postgres.js
- * (which can't run on Edge). Validation therefore goes through Supabase REST with
- * the service ("secret") key, which is fetch-based and bypasses RLS.
+ * imports this file to validate a token, so it must stay dependency-light and
+ * must NOT pull in postgres.js (which can't run on Edge).
  *
- * Table creation and all writes live in websession-node.ts (postgres.js, Node
- * runtime only) so the store can self-heal even if migration 0007 was skipped.
+ * Validation goes straight to Supabase's PostgREST endpoint with a plain,
+ * timeout-bounded `fetch` (NOT @supabase/supabase-js — that client can hang
+ * inside Edge middleware, which stalls every dashboard request). The service
+ * ("secret") key bypasses RLS. Table creation and all other writes live in
+ * websession-node.ts (postgres.js, Node runtime only).
  */
-
-let _admin: SupabaseClient | null = null;
-export function supabaseAdmin(): SupabaseClient | null {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.SUPABASE_SECRET_KEY;
-  if (!url || !key) return null;
-  if (!_admin) _admin = createClient(url, key, { auth: { persistSession: false } });
-  return _admin;
-}
 
 export function generateSessionToken(): string {
   const bytes = new Uint8Array(32);
@@ -64,18 +55,43 @@ export interface WebSessionRow {
   revoked_at: string | null;
 }
 
-/** Middleware gate (Edge): true when the token is an active, non-revoked session. */
+/**
+ * Middleware gate (Edge): true when the token is an active, non-revoked session.
+ *
+ * Uses a single PATCH that both filters (token matches, not revoked) and refreshes
+ * last_seen_at, returning the matched rows — so validation and the "last active"
+ * bump are one round-trip. Bounded by a 3s AbortController so a slow/unreachable
+ * database fails fast (→ redirect to login) instead of hanging the page.
+ */
 export async function isValidSession(token: string): Promise<boolean> {
-  const db = supabaseAdmin();
-  if (!db) return false;
-  const { data, error } = await db
-    .from("web_sessions")
-    .select("id")
-    .eq("token", token)
-    .is("revoked_at", null)
-    .maybeSingle();
-  if (error || !data) return false;
-  // Best-effort last-seen refresh; never block the request on it.
-  void db.from("web_sessions").update({ last_seen_at: new Date().toISOString() }).eq("token", token);
-  return true;
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key = process.env.SUPABASE_SECRET_KEY;
+  if (!url || !key || !token) return false;
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 3000);
+  try {
+    const res = await fetch(
+      `${url}/rest/v1/web_sessions?token=eq.${encodeURIComponent(token)}&revoked_at=is.null&select=id`,
+      {
+        method: "PATCH",
+        headers: {
+          apikey: key,
+          Authorization: `Bearer ${key}`,
+          "Content-Type": "application/json",
+          Prefer: "return=representation",
+        },
+        body: JSON.stringify({ last_seen_at: new Date().toISOString() }),
+        signal: ctrl.signal,
+        cache: "no-store",
+      }
+    );
+    if (!res.ok) return false;
+    const rows = (await res.json()) as unknown[];
+    return Array.isArray(rows) && rows.length > 0;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
 }
