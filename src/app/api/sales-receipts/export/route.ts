@@ -8,9 +8,9 @@ export const maxDuration = 30;
 /** GET — download the submitted sales receipts as the Cash Sales Excel report. */
 export async function GET() {
   const rows = await sql`
-    select date, customer_name as "customerName", fs_no as "fsNo", att_no as "attNo", product_ty as "productTy",
+    select date, customer_name as "customerName", product_ty as "productTy",
            qty, unit_price as "unitPrice", sub_total as "subTotal", vat, grand_total as "grandTotal",
-           withhold, net_pay as "netPay", deposited_bank as "depositedBank"
+           withhold, net_pay as "netPay", remark
       from sales_receipts
      where status = 'submitted'
      order by date asc, created_at asc

@@ -27,7 +27,8 @@ export type CapabilityKey =
   | "raw_material_received"
   | "finished_goods_delivery"
   | "purchase_items"
-  | "sales_receipt_scan";
+  | "sales_receipt_scan"
+  | "sales_report_entry";
 
 /** How the bot collects a capability's payload. */
 export type CaptureMode =
@@ -39,6 +40,8 @@ export type CaptureMode =
   | "ops_paste"
   /** Scan receipt photo(s) → OCR + Qwen → preview/edit → Excel (sales). */
   | "receipt_scan"
+  /** Guided field-by-field sales report entry (+ attached receipts) → Excel. */
+  | "sales_entry"
   /** Free-form question answered by the company chat model. */
   | "chat";
 
@@ -178,13 +181,21 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
     question:
       "🧾 የተገዙ ዕቃዎችን ይላኩ — ጽሑፍ፣ ፎቶ ወይም Excel። መግለጫ፣ መለኪያ (uom)፣ ብዛት፣ አቅራቢ፣ ዋጋ፣ የወጪ ማዕከል እና ገዢ ያካትቱ።",
   },
+  sales_report_entry: {
+    key: "sales_report_entry",
+    button: "🧾 የሽያጭ ሪፖርት",
+    captureMode: "sales_entry",
+    input: "any",
+    question:
+      "🧾 የሽያጭ ሪፖርት በደረጃ እናስገባለን። መጀመሪያ የደንበኛውን ስም ይፃፉ።",
+  },
   sales_receipt_scan: {
     key: "sales_receipt_scan",
-    button: "🧾 ደረሰኝ ስካን → Excel",
+    button: "📷 ደረሰኝ ስካን",
     captureMode: "receipt_scan",
     input: "photo",
     question:
-      "🧾 የደረሰኙን ፎቶ(ዎች) ይላኩ — እስከ 3 ፎቶ። ከጨረሱ በኋላ \"✅ ጨርሻለሁ\" የሚለውን ይጫኑ።",
+      "📷 የደረሰኙን ፎቶ(ዎች) ይላኩ — እስከ 3 ፎቶ። ከጨረሱ በኋላ \"✅ ጨርሻለሁ\" የሚለውን ይጫኑ።",
   },
   materials: {
     key: "materials",
@@ -315,7 +326,7 @@ export const POSITIONS: Record<PositionKey, Position> = {
     en: "Sales report & receipts",
     am: "የሽያጭ ሪፖርትና ደረሰኝ",
     description: "Files the daily sales report together with receipts.",
-    capabilities: ["daily_report", "sales", "receipt", "finished_goods_delivery", "sales_receipt_scan", "question"],
+    capabilities: ["daily_report", "sales_report_entry", "sales_receipt_scan", "receipt", "question"],
     dailyRequired: true,
   },
   finance_daily: {

@@ -80,10 +80,12 @@ export async function saveSession(s: Session): Promise<void> {
       where chat_id = ${s.chatId}
     `;
   } catch (e) {
-    // The receipt_scan column ships in migration 0008. If it hasn't been applied
-    // yet, Postgres raises undefined_column (42703). Rather than let every bot
-    // action fail (which bricks even /start), retry the save without that one
-    // column — the receipt-scanner is the only feature that needs it.
+    // The optional jsonb columns arrive in later migrations — edit_state (0005)
+    // and receipt_scan (0008). If a deployment is running ahead of its migrations,
+    // Postgres raises undefined_column (42703) and every bot action would fail,
+    // bricking even /start. Fall back to the core columns only so the session
+    // still persists; the edit-window and receipt-scan features simply stay
+    // dormant until their migrations are applied.
     if ((e as { code?: string })?.code !== "42703") throw e;
     await sql`
       update telegram_sessions set
@@ -97,7 +99,6 @@ export async function saveSession(s: Session): Promise<void> {
         login_locked_until = ${s.loginLockedUntil ?? null},
         capture            = ${s.capture ? sql.json(s.capture) : null},
         draft              = ${s.draft ? sql.json(s.draft) : null},
-        edit_state         = ${s.editState ? sql.json(s.editState) : null},
         history            = ${sql.json(s.history ?? [])}
       where chat_id = ${s.chatId}
     `;

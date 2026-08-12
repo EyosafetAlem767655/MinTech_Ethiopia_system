@@ -2,25 +2,26 @@ import ExcelJS from "exceljs";
 import { visionAI, VISION_MODEL } from "@/lib/llm";
 
 /**
- * Sales receipt scanner: OCR (best-effort tesseract) + Qwen-VL to read the key
- * fields off a photographed receipt, then compute the money columns in code.
- * VAT/Grand/Net are derived, so only a handful of fields need reading.
+ * Sales report rows — entered field-by-field on the bot or read off a receipt
+ * photo (OCR + Qwen-VL). Either way the money columns (Sub Total, VAT, Grand
+ * Total, Net Payable) are derived in code from qty · unit price · withholding.
+ *
+ * Report columns: Date · Customer's Name · Product/Qty · Unit Price · Sub Total ·
+ * VAT 15% · Grand Total · Withholding · Net Payable · Remark.
  */
 
 export interface SalesReceiptDraft {
   date: string; // YYYY-MM-DD
   customerName: string;
-  fsNo: string;
-  attNo: string;
-  productTy: string;
+  productTy: string; // product code (ETL-9, 3-EL, EC-15, Talc …)
   qty: number;
   unitPrice: number;
   subTotal: number;
   vat: number;
   grandTotal: number;
-  withhold: number;
-  netPay: number;
-  depositedBank: string;
+  withhold: number; // Withholding
+  netPay: number; // Net Payable
+  remark: string;
 }
 
 function toNum(v: unknown): number {
@@ -60,10 +61,10 @@ async function ocrImage(base64: string): Promise<string> {
 
 const RECEIPT_SYSTEM =
   "You read Ethiopian sales receipts / cash-sale invoices for a mining company and return STRICT JSON. " +
-  'Return: { "date": "YYYY-MM-DD", "customerName": string, "fsNo": string (the Fs.No / receipt number), ' +
-  '"attNo": string (the Att.No / attached voucher or TIN number), "productTy": string (product type code such as ETL-9, 3-EL, EC-15, Talc), ' +
+  'Return: { "date": "YYYY-MM-DD", "customerName": string, ' +
+  '"productTy": string (product type code such as ETL-9, 3-EL, EC-15, Talc), ' +
   '"qty": number, "unitPrice": number (ETB), "withhold": number (ETB withholding if shown, else 0), ' +
-  '"depositedBank": string (bank name/abbreviation such as CBE, Awash, Dashen, if shown) }. ' +
+  '"remark": string (any note, else "") }. ' +
   "Read numbers exactly. If a field is not visible, use an empty string (or 0 for numbers). " +
   "If OCR text is provided, use it to cross-check the image.";
 
@@ -106,19 +107,17 @@ export async function extractSalesReceipt(
   return computeReceipt({
     date: String(f.date || new Date().toISOString().slice(0, 10)),
     customerName: String(f.customerName || ""),
-    fsNo: String(f.fsNo || ""),
-    attNo: String(f.attNo || ""),
     productTy: String(f.productTy || ""),
     qty: toNum(f.qty),
     unitPrice: toNum(f.unitPrice),
     withhold: toNum(f.withhold),
-    depositedBank: String(f.depositedBank || ""),
+    remark: String(f.remark || ""),
   });
 }
 
 /** Recompute the derived money columns from qty · unitPrice · withhold. */
 export function computeReceipt(
-  d: Pick<SalesReceiptDraft, "date" | "customerName" | "fsNo" | "attNo" | "productTy" | "qty" | "unitPrice" | "withhold" | "depositedBank">
+  d: Pick<SalesReceiptDraft, "date" | "customerName" | "productTy" | "qty" | "unitPrice" | "withhold" | "remark">
 ): SalesReceiptDraft {
   const subTotal = Math.round(d.qty * d.unitPrice * 100) / 100;
   const vat = Math.round(subTotal * 0.15 * 100) / 100;
@@ -132,8 +131,6 @@ export function computeReceipt(
 export interface SalesReceiptRow {
   date: string | Date;
   customerName: string | null;
-  fsNo: string | null;
-  attNo: string | null;
   productTy: string | null;
   qty: number | null;
   unitPrice: number | null;
@@ -142,26 +139,31 @@ export interface SalesReceiptRow {
   grandTotal: number | null;
   withhold: number | null;
   netPay: number | null;
-  depositedBank: string | null;
+  remark: string | null;
 }
 
 const HEADERS = [
   "Date",
-  "Customer Name",
-  "Fs.No",
-  "Att.No",
-  "Product Ty",
-  "Qty",
+  "Customer's Name",
+  "Product/Qty",
   "Unit Price",
   "Sub Total",
-  "Vat 15%",
+  "VAT 15%",
   "Grand Total",
-  "Withhold",
-  "Net Pay",
-  "Deposited Bank",
+  "Withholding",
+  "Net Payable",
+  "Remark",
 ];
 
 const fmtDate = (d: string | Date) => new Date(d).toLocaleDateString("en-GB");
+
+/** "ETL-9 / 120" — the combined Product/Qty cell. */
+export function productQty(product: string | null, qty: number | null): string {
+  const p = (product || "").trim();
+  const q = qty == null || qty === 0 ? "" : String(qty);
+  if (p && q) return `${p} / ${q}`;
+  return p || q || "";
+}
 
 export async function buildSalesReceiptsWorkbook(rows: SalesReceiptRow[], subtitle: string): Promise<Buffer> {
   const wb = new ExcelJS.Workbook();
@@ -171,7 +173,7 @@ export async function buildSalesReceiptsWorkbook(rows: SalesReceiptRow[], subtit
 
   ws.addRow(["MIN-TECH ETHIOPIA P.L.C."]).font = { bold: true, size: 14 };
   ws.addRow([subtitle]).font = { italic: true };
-  ws.addRow(["Cash Sales"]);
+  ws.addRow(["Sales Report"]);
   ws.addRow([]);
   const head = ws.addRow(HEADERS);
   head.font = { bold: true };
@@ -180,17 +182,14 @@ export async function buildSalesReceiptsWorkbook(rows: SalesReceiptRow[], subtit
     ws.addRow([
       fmtDate(r.date),
       r.customerName ?? "",
-      r.fsNo ?? "",
-      r.attNo ?? "",
-      r.productTy ?? "",
-      Number(r.qty) || 0,
+      productQty(r.productTy, r.qty),
       Number(r.unitPrice) || 0,
       Number(r.subTotal) || 0,
       Number(r.vat) || 0,
       Number(r.grandTotal) || 0,
       Number(r.withhold) || 0,
       Number(r.netPay) || 0,
-      r.depositedBank ?? "",
+      r.remark ?? "",
     ]);
   }
 
@@ -202,9 +201,6 @@ export async function buildSalesReceiptsWorkbook(rows: SalesReceiptRow[], subtit
       "Total",
       "",
       "",
-      "",
-      "",
-      sum("qty"),
       "",
       sum("subTotal"),
       sum("vat"),
@@ -218,6 +214,7 @@ export async function buildSalesReceiptsWorkbook(rows: SalesReceiptRow[], subtit
 
   ws.columns.forEach((c) => (c.width = 15));
   ws.getColumn(2).width = 26;
+  ws.getColumn(10).width = 22;
   ws.views = [{ state: "frozen", ySplit: 5 }];
 
   return Buffer.from(await wb.xlsx.writeBuffer());

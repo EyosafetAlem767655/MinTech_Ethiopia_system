@@ -32,6 +32,9 @@ export async function GET() {
   // them once and hand them down rather than letting it re-query.
   const [aging, flaggedLots] = await Promise.all([receivablesAging(), getLotGaps()]);
 
+  // Start of today in East Africa Time, for the sales-of-the-day summary.
+  const eatMidnight = new Date(`${new Date(Date.now() + 3 * 3600_000).toISOString().slice(0, 10)}T00:00:00+03:00`);
+
   const [
     yesterday,
     exceptions,
@@ -40,6 +43,7 @@ export async function GET() {
     latestBrief,
     pendingClaimsRows,
     tripwires,
+    salesTodayRows,
   ] = await Promise.all([
     getYesterdayNumbers(),
     detectExceptions(new Date(), { aging, lotGaps: flaggedLots }),
@@ -48,8 +52,23 @@ export async function GET() {
     fetchLatestBrief(),
     sql<{ n: string }[]>`select count(*) as n from damage_claims where status in ('pending','cosign_required')`,
     damageTripwires(),
+    sql<{ n: string; grand: string; net: string; wht: string }[]>`
+      select count(*) as n,
+             coalesce(sum(grand_total), 0) as grand,
+             coalesce(sum(net_pay), 0) as net,
+             coalesce(sum(withhold), 0) as wht
+        from sales_receipts
+       where status = 'submitted' and created_at >= ${eatMidnight}
+    `,
   ]);
   const pendingClaims = Number(pendingClaimsRows[0]?.n) || 0;
+  const s = salesTodayRows[0];
+  const salesToday = {
+    count: Number(s?.n) || 0,
+    grandTotal: Number(s?.grand) || 0,
+    netPayable: Number(s?.net) || 0,
+    withholding: Number(s?.wht) || 0,
+  };
 
   return NextResponse.json({
     yesterday,
@@ -68,5 +87,6 @@ export async function GET() {
     flaggedLots,
     pendingClaims,
     tripwires,
+    salesToday,
   });
 }

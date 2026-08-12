@@ -10,9 +10,17 @@ import { DEPARTMENTS } from "@/lib/departments";
 import { type RangeKey } from "@/lib/ranges";
 import type { DepartmentSummary, Kpi } from "@/lib/department-metrics";
 
+interface SalesToday {
+  count: number;
+  grandTotal: number;
+  netPayable: number;
+  withholding: number;
+}
+
 interface BriefData {
   exceptions: string[];
   brief: { date: string; narrative: string; fiveLines: string[] } | null;
+  salesToday: SalesToday | null;
 }
 
 export default function OwnerDashboard() {
@@ -27,7 +35,7 @@ export default function OwnerDashboard() {
     fetch("/api/dashboard")
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
-        if (d) setBrief({ exceptions: d.exceptions ?? [], brief: d.brief ?? null });
+        if (d) setBrief({ exceptions: d.exceptions ?? [], brief: d.brief ?? null, salesToday: d.salesToday ?? null });
       })
       .catch(() => {});
   }, []);
@@ -109,6 +117,36 @@ export default function OwnerDashboard() {
                 ))}
               </ul>
             </div>
+          </section>
+        )}
+
+        {/* Sales of the day summary */}
+        {brief?.salesToday && brief.salesToday.count > 0 && (
+          <section className="card p-4 animate-fade-up">
+            <p className="text-[11px] font-bold uppercase tracking-widest text-clay-500 mb-2">
+              💰 Sales today · {brief.salesToday.count} report{brief.salesToday.count > 1 ? "s" : ""}
+            </p>
+            <div className="grid grid-cols-3 gap-2 text-center">
+              <div>
+                <p className="font-display text-lg font-bold text-stone-900">
+                  {Math.round(brief.salesToday.grandTotal).toLocaleString()}
+                </p>
+                <p className="text-[10px] uppercase tracking-wide text-stone-400">Grand total</p>
+              </div>
+              <div>
+                <p className="font-display text-lg font-bold text-clay-800">
+                  {Math.round(brief.salesToday.netPayable).toLocaleString()}
+                </p>
+                <p className="text-[10px] uppercase tracking-wide text-stone-400">Net payable</p>
+              </div>
+              <div>
+                <p className="font-display text-lg font-bold text-stone-900">
+                  {Math.round(brief.salesToday.withholding).toLocaleString()}
+                </p>
+                <p className="text-[10px] uppercase tracking-wide text-stone-400">Withholding</p>
+              </div>
+            </div>
+            <p className="mt-2 text-center text-[10px] text-stone-400">ETB · submitted today</p>
           </section>
         )}
 

@@ -8,14 +8,12 @@ import { isDepartmentKey, type DepartmentKey } from "@/lib/departments";
 import BagControlPanel from "@/components/panels/BagControlPanel";
 import PurchasesPanel from "@/components/panels/PurchasesPanel";
 import ReceivablesPanel from "@/components/panels/ReceivablesPanel";
-import ReceiptsPanel from "@/components/panels/ReceiptsPanel";
 import GatePanel from "@/components/panels/GatePanel";
 import ShiftPanel from "@/components/panels/ShiftPanel";
 import ProductionOpsPanel from "@/components/panels/ProductionOpsPanel";
 import ProductionGridPanel from "@/components/panels/ProductionGridPanel";
 import StockStatusPanel from "@/components/panels/StockStatusPanel";
 import RawMaterialReceivedPanel from "@/components/panels/RawMaterialReceivedPanel";
-import DeliveryReportPanel from "@/components/panels/DeliveryReportPanel";
 import PurchaseItemsPanel from "@/components/panels/PurchaseItemsPanel";
 import SalesReceiptsPanel from "@/components/panels/SalesReceiptsPanel";
 
@@ -27,7 +25,7 @@ import SalesReceiptsPanel from "@/components/panels/SalesReceiptsPanel";
 const PANELS: Record<DepartmentKey, ComponentType[]> = {
   production: [ProductionGridPanel, StockStatusPanel, ProductionOpsPanel, ShiftPanel, GatePanel],
   asset_management: [RawMaterialReceivedPanel, PurchaseItemsPanel, StockStatusPanel, BagControlPanel, PurchasesPanel],
-  sales: [DeliveryReportPanel, SalesReceiptsPanel, ReceiptsPanel],
+  sales: [SalesReceiptsPanel],
   finance: [ReceivablesPanel],
 };
 
