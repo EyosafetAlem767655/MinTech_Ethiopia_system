@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { AUTH_COOKIE } from "@/lib/auth";
-import { revokeByToken } from "@/lib/websession";
+import { revokeByToken } from "@/lib/websession-node";
 
 export const dynamic = "force-dynamic";
 

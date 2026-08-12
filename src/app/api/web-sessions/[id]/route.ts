@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isUuid } from "@/lib/sql";
-import { revokeSession } from "@/lib/websession";
+import { revokeSession } from "@/lib/websession-node";
 
 export const dynamic = "force-dynamic";
 

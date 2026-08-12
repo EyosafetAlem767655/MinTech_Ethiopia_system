@@ -61,21 +61,45 @@ export async function loadSession(chatId: string, userName: string): Promise<Ses
 }
 
 export async function saveSession(s: Session): Promise<void> {
-  await sql`
-    update telegram_sessions set
-      user_name          = ${s.userName ?? null},
-      mode               = ${s.mode ?? "unknown"},
-      state              = ${s.state ?? "idle"},
-      auth               = ${s.auth ? sql.json(s.auth) : null},
-      external           = ${s.external ? sql.json(s.external) : null},
-      login_name         = ${s.loginName ?? null},
-      login_attempts     = ${s.loginAttempts ?? 0},
-      login_locked_until = ${s.loginLockedUntil ?? null},
-      capture            = ${s.capture ? sql.json(s.capture) : null},
-      draft              = ${s.draft ? sql.json(s.draft) : null},
-      edit_state         = ${s.editState ? sql.json(s.editState) : null},
-      receipt_scan       = ${s.receiptScan ? sql.json(s.receiptScan) : null},
-      history            = ${sql.json(s.history ?? [])}
-    where chat_id = ${s.chatId}
-  `;
+  try {
+    await sql`
+      update telegram_sessions set
+        user_name          = ${s.userName ?? null},
+        mode               = ${s.mode ?? "unknown"},
+        state              = ${s.state ?? "idle"},
+        auth               = ${s.auth ? sql.json(s.auth) : null},
+        external           = ${s.external ? sql.json(s.external) : null},
+        login_name         = ${s.loginName ?? null},
+        login_attempts     = ${s.loginAttempts ?? 0},
+        login_locked_until = ${s.loginLockedUntil ?? null},
+        capture            = ${s.capture ? sql.json(s.capture) : null},
+        draft              = ${s.draft ? sql.json(s.draft) : null},
+        edit_state         = ${s.editState ? sql.json(s.editState) : null},
+        receipt_scan       = ${s.receiptScan ? sql.json(s.receiptScan) : null},
+        history            = ${sql.json(s.history ?? [])}
+      where chat_id = ${s.chatId}
+    `;
+  } catch (e) {
+    // The receipt_scan column ships in migration 0008. If it hasn't been applied
+    // yet, Postgres raises undefined_column (42703). Rather than let every bot
+    // action fail (which bricks even /start), retry the save without that one
+    // column — the receipt-scanner is the only feature that needs it.
+    if ((e as { code?: string })?.code !== "42703") throw e;
+    await sql`
+      update telegram_sessions set
+        user_name          = ${s.userName ?? null},
+        mode               = ${s.mode ?? "unknown"},
+        state              = ${s.state ?? "idle"},
+        auth               = ${s.auth ? sql.json(s.auth) : null},
+        external           = ${s.external ? sql.json(s.external) : null},
+        login_name         = ${s.loginName ?? null},
+        login_attempts     = ${s.loginAttempts ?? 0},
+        login_locked_until = ${s.loginLockedUntil ?? null},
+        capture            = ${s.capture ? sql.json(s.capture) : null},
+        draft              = ${s.draft ? sql.json(s.draft) : null},
+        edit_state         = ${s.editState ? sql.json(s.editState) : null},
+        history            = ${sql.json(s.history ?? [])}
+      where chat_id = ${s.chatId}
+    `;
+  }
 }

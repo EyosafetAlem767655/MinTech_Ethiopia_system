@@ -249,6 +249,19 @@ function UsersTab() {
     await load();
   };
 
+  const purge = async (id: string, name: string) => {
+    if (
+      !confirm(
+        `Permanently delete ${name}? Their account record is removed and they disappear from this list. All reports they submitted stay on the dashboard. This cannot be undone.`
+      )
+    )
+      return;
+    setBusy(true);
+    await fetch(`/api/bot-users/${id}?hard=true`, { method: "DELETE" });
+    setBusy(false);
+    await load();
+  };
+
   const resetPassword = async (id: string, name: string) => {
     const pw = prompt(`New password for ${name} (min 6 characters).\nThey will be signed out of Telegram immediately.`);
     if (!pw) return;
@@ -408,7 +421,10 @@ function UsersTab() {
                       {u.archivedAt ? `Archived ${fmtTime(u.archivedAt)}` : ""} · reports kept
                     </p>
                   </div>
-                  <SmallBtn label="Restore" tone="green" onClick={() => patch(u._id, { restore: true })} />
+                  <div className="flex items-center gap-2">
+                    <SmallBtn label="Restore" tone="green" onClick={() => patch(u._id, { restore: true })} />
+                    <SmallBtn label="Delete" tone="red" onClick={() => purge(u._id, u.fullName)} />
+                  </div>
                 </div>
               ))}
           </div>

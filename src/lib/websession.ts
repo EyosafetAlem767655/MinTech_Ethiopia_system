@@ -1,11 +1,14 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 /**
- * Web (dashboard) session store. The mt_auth cookie holds an opaque random token
- * that maps to a `web_sessions` row. Used by the Edge middleware (validation) and
- * the login/logout/device routes (create/list/revoke). Reads/writes go through
- * the Supabase service ("secret") key, which bypasses RLS and — being fetch-based
- * — works inside Edge middleware where the postgres.js client cannot run.
+ * Web (dashboard) session store — Edge-safe half. The mt_auth cookie holds an
+ * opaque random token that maps to a `web_sessions` row. The Edge middleware
+ * imports this file to validate a token, so it must NOT pull in postgres.js
+ * (which can't run on Edge). Validation therefore goes through Supabase REST with
+ * the service ("secret") key, which is fetch-based and bypasses RLS.
+ *
+ * Table creation and all writes live in websession-node.ts (postgres.js, Node
+ * runtime only) so the store can self-heal even if migration 0007 was skipped.
  */
 
 let _admin: SupabaseClient | null = null;
@@ -75,46 +78,4 @@ export async function isValidSession(token: string): Promise<boolean> {
   // Best-effort last-seen refresh; never block the request on it.
   void db.from("web_sessions").update({ last_seen_at: new Date().toISOString() }).eq("token", token);
   return true;
-}
-
-export async function createSession(input: { token: string; label: string; userAgent: string; ip: string }): Promise<void> {
-  const db = supabaseAdmin();
-  if (!db) throw new Error("Session store not configured (NEXT_PUBLIC_SUPABASE_URL + SUPABASE_SECRET_KEY).");
-  const { error } = await db.from("web_sessions").insert({
-    token: input.token,
-    label: input.label,
-    user_agent: input.userAgent,
-    ip: input.ip,
-  });
-  if (error) throw new Error(error.message);
-}
-
-export async function listSessions(): Promise<WebSessionRow[]> {
-  const db = supabaseAdmin();
-  if (!db) return [];
-  const { data } = await db
-    .from("web_sessions")
-    .select("id,label,user_agent,ip,created_at,last_seen_at,revoked_at")
-    .is("revoked_at", null)
-    .order("last_seen_at", { ascending: false });
-  return (data || []) as WebSessionRow[];
-}
-
-export async function revokeSession(id: string): Promise<void> {
-  const db = supabaseAdmin();
-  if (!db) return;
-  await db.from("web_sessions").update({ revoked_at: new Date().toISOString() }).eq("id", id);
-}
-
-export async function revokeByToken(token: string): Promise<void> {
-  const db = supabaseAdmin();
-  if (!db) return;
-  await db.from("web_sessions").update({ revoked_at: new Date().toISOString() }).eq("token", token);
-}
-
-export async function sessionIdForToken(token: string): Promise<string | null> {
-  const db = supabaseAdmin();
-  if (!db) return null;
-  const { data } = await db.from("web_sessions").select("id").eq("token", token).maybeSingle();
-  return data?.id ?? null;
 }

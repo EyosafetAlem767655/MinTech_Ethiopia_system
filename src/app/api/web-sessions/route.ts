@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { AUTH_COOKIE } from "@/lib/auth";
-import { listSessions, sessionIdForToken } from "@/lib/websession";
+import { listSessions, sessionIdForToken } from "@/lib/websession-node";
 
 export const dynamic = "force-dynamic";
 

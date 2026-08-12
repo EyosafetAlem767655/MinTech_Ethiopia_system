@@ -28,7 +28,19 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
   if (Array.isArray(body.positions)) {
     const positions = body.positions.filter(isPositionKey);
     if (positions.length === 0) return NextResponse.json({ error: "Pick at least one position." }, { status: 400 });
+    // Read the current positions so we only disrupt the bot session when the role
+    // set actually changed. A live session caches the role menu, so on any change
+    // we bump session_epoch — the next bot action fails resolveSession and the
+    // user is forced to sign out and /start again, picking up the new positions.
+    const before = first(await sql<{ positions: string[] }[]>`
+      select positions from telegram_users where id = ${user.id}
+    `);
     await sql`update telegram_users set positions = ${positions} where id = ${user.id}`;
+    const changed =
+      !before ||
+      before.positions.length !== positions.length ||
+      [...positions].sort().join("|") !== [...before.positions].sort().join("|");
+    if (changed) await revokeUserSessions(user.id);
   }
 
   if (typeof body.note === "string") {
@@ -74,17 +86,37 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
 }
 
 /**
- * "Remove" is a soft archive, not a hard delete. The row is kept so the person's
- * name, positions and full submission history stay visible on the dashboard; the
- * session is revoked and the account is deactivated so they can no longer sign
- * into the bot. Restore is handled by PATCH { restore: true }.
+ * By default "Remove" is a soft archive, not a hard delete. The row is kept so
+ * the person's name, positions and full submission history stay visible on the
+ * dashboard; the session is revoked and the account is deactivated so they can no
+ * longer sign into the bot. Restore is handled by PATCH { restore: true }.
+ *
+ * DELETE ...?hard=true performs a true delete of the employee record. This is
+ * safe for history: every report table references telegram_users(id) with
+ * ON DELETE SET NULL and denormalises full_name/positions onto each row, so the
+ * submitted data stays — only the person's account record is removed.
  */
-export async function DELETE(_req: NextRequest, { params }: { params: { id: string } }) {
+export async function DELETE(req: NextRequest, { params }: { params: { id: string } }) {
   if (!isUuid(params.id)) return NextResponse.json({ error: "Not found" }, { status: 404 });
-  const user = first(await sql`select id from telegram_users where id = ${params.id}`);
+  const user = first(await sql<{ id: string; chat_id: string | null }[]>`
+    select id, chat_id from telegram_users where id = ${params.id}
+  `);
   if (!user) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
+  const hard = req.nextUrl.searchParams.get("hard") === "true";
+
   await revokeUserSessions(params.id);
+
+  if (hard) {
+    // Drop the live bot session row (keyed by chat_id, no FK), then delete the
+    // employee. Report rows keep their data via ON DELETE SET NULL.
+    if (user.chat_id) {
+      await sql`delete from telegram_sessions where chat_id = ${user.chat_id}`.catch(() => {});
+    }
+    await sql`delete from telegram_users where id = ${params.id}`;
+    return NextResponse.json({ ok: true, deleted: true });
+  }
+
   await sql`
     update telegram_users
        set active = false, archived_at = coalesce(archived_at, now())

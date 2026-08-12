@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { AUTH_COOKIE, authToken } from "@/lib/auth";
-import { createSession, deviceLabel, generateSessionToken } from "@/lib/websession";
+import { deviceLabel, generateSessionToken } from "@/lib/websession";
+import { createSession } from "@/lib/websession-node";
 
 export const dynamic = "force-dynamic";
 

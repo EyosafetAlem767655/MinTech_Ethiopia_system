@@ -51,6 +51,13 @@ export default function OwnerDashboard() {
   }, [loadSummaries]);
 
   const today = new Date().toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long" });
+  const hour = new Date().getHours();
+  const greeting =
+    hour < 12
+      ? { emoji: "☀️", text: "Good morning" }
+      : hour < 17
+      ? { emoji: "🌤️", text: "Good afternoon" }
+      : { emoji: "🌙", text: "Good evening" };
 
   return (
     <main className="max-w-lg mx-auto">
@@ -65,7 +72,9 @@ export default function OwnerDashboard() {
             alt="MinTech Ethiopia"
             className="h-16 w-auto max-w-[88%] drop-shadow-[0_4px_12px_rgba(0,0,0,0.25)]"
           />
-          <h1 className="font-display text-3xl font-bold mt-5 leading-tight">☀️ Good morning, Mr. Anteneh</h1>
+          <h1 className="font-display text-3xl font-bold mt-5 leading-tight">
+            {greeting.emoji} {greeting.text}, Mr. Anteneh
+          </h1>
           <p className="text-clay-100/90 text-sm mt-2">{today} · Department activity</p>
           <button
             onClick={async () => setPushState(await enablePushNotifications())}
