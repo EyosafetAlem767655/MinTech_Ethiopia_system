@@ -30,16 +30,27 @@ export default function ChatPage() {
     setMessages(next);
     setInput("");
     setBusy(true);
+    // Never let the UI hang forever: abort the request if the server hasn't
+    // responded in time (it should fail much sooner via its own timeouts).
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 65000);
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages: next }),
+        signal: ctrl.signal,
       });
       const json = await res.json();
       setMessages([...next, { role: "assistant", content: json.reply || json.error || "No reply." }]);
-    } catch {
-      setMessages([...next, { role: "assistant", content: "⚠️ Network error — please try again." }]);
+    } catch (e) {
+      const msg =
+        e instanceof DOMException && e.name === "AbortError"
+          ? "⚠️ The assistant took too long to respond. Please try again."
+          : "⚠️ Network error — please try again.";
+      setMessages([...next, { role: "assistant", content: msg }]);
+    } finally {
+      clearTimeout(timer);
     }
     setBusy(false);
   };

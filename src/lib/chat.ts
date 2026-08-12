@@ -157,14 +157,30 @@ export async function companyChat(
     ...messages.slice(-12),
   ];
 
-  for (let round = 0; round < 4; round++) {
-    const res = await textAI().chat.completions.create({
-      model: TEXT_MODEL,
-      messages: convo,
-      tools,
-      max_tokens: 800,
-    });
-    const msg = res.choices[0]?.message;
+  // Nemotron is a reasoning model; leaving "thinking" on makes each call slow
+  // enough that a multi-round tool loop blows the function's time budget. Disable
+  // it for these structured calls.
+  const extra = { chat_template_kwargs: { enable_thinking: false } };
+
+  // Two tool rounds is enough for these queries and keeps us inside maxDuration.
+  for (let round = 0; round < 2; round++) {
+    let msg: OpenAI.Chat.ChatCompletionMessage | undefined;
+    try {
+      const res = await textAI().chat.completions.create({
+        model: TEXT_MODEL,
+        messages: convo,
+        tools,
+        max_tokens: 800,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ...(extra as any),
+      });
+      msg = res.choices[0]?.message;
+    } catch (e) {
+      // The endpoint may not support tool-calling, or it timed out. Don't hang or
+      // fail the whole chat — break out and answer without tools below.
+      console.error("chat tool round failed, falling back to plain answer:", e);
+      break;
+    }
     if (!msg) break;
     convo.push(msg);
 
@@ -186,11 +202,20 @@ export async function companyChat(
     }
   }
 
-  // Final pass without tools so the model must answer.
-  const final = await textAI().chat.completions.create({
-    model: TEXT_MODEL,
-    messages: convo,
-    max_tokens: 800,
-  });
-  return final.choices[0]?.message?.content || "I could not produce an answer.";
+  // Final pass: keep the full conversation (including any tool results already
+  // fetched) so the answer is grounded, and nudge the model to reply in prose.
+  // Errors here shouldn't hang the request — surface a clean message instead.
+  try {
+    const final = await textAI().chat.completions.create({
+      model: TEXT_MODEL,
+      messages: [...convo, { role: "user", content: "Answer my question now using the data above. Do not call any more tools." }],
+      max_tokens: 800,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ...(extra as any),
+    });
+    return final.choices[0]?.message?.content || "I could not produce an answer.";
+  } catch (e) {
+    console.error("chat final pass failed:", e);
+    return "The assistant is taking too long to respond right now. Please try again in a moment.";
+  }
 }

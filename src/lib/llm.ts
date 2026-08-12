@@ -37,7 +37,10 @@ export function textAI(): OpenAI {
     );
   }
   if (!_textClient || _textKey !== apiKey) {
-    _textClient = new OpenAI({ apiKey, baseURL: NVIDIA_BASE });
+    // Hard timeout + no retry storm: a slow or unresponsive endpoint must fail
+    // fast (surfaced as an error) rather than hang the serverless function past
+    // its maxDuration, which leaves the UI spinner stuck forever.
+    _textClient = new OpenAI({ apiKey, baseURL: NVIDIA_BASE, timeout: 20000, maxRetries: 0 });
     _textKey = apiKey;
   }
   return _textClient;
@@ -54,7 +57,7 @@ export function visionAI(): OpenAI {
     );
   }
   if (!_visionClient || _visionKey !== apiKey) {
-    _visionClient = new OpenAI({ apiKey, baseURL: QWEN_BASE });
+    _visionClient = new OpenAI({ apiKey, baseURL: QWEN_BASE, timeout: 40000, maxRetries: 0 });
     _visionKey = apiKey;
   }
   return _visionClient;
