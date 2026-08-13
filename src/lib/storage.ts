@@ -138,3 +138,27 @@ export async function deleteFile(id: string): Promise<void> {
   await storage().remove([row.storage_path]).catch(() => {});
   await sql`delete from stored_files where id = ${row.id}`;
 }
+
+/**
+ * Delete uploaded images older than `hours` (default 72) — the raw photos in the
+ * bucket, one batch at a time. Only the binary + its stored_files metadata row go;
+ * the EXTRACTED data (sales_receipts, daily_reports, …) is untouched, so the
+ * numbers/text stay forever and only the heavy image is reclaimed. Returns how
+ * many files were removed in this batch (0 = nothing left to purge).
+ */
+export async function purgeOldPhotos(hours = 72, batch = 500): Promise<{ deleted: number }> {
+  const rows = await sql<{ id: string; storage_path: string }[]>`
+    select id, storage_path
+      from stored_files
+     where created_at < now() - (${hours} || ' hours')::interval
+     limit ${batch}
+  `;
+  if (rows.length === 0) return { deleted: 0 };
+
+  await storage()
+    .remove(rows.map((r) => r.storage_path))
+    .catch((e) => console.error("purgeOldPhotos: storage remove failed:", e));
+
+  await sql`delete from stored_files where id = any(${rows.map((r) => r.id)})`;
+  return { deleted: rows.length };
+}

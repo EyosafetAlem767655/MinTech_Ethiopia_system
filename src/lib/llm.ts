@@ -15,8 +15,9 @@ export const TEXT_MODEL = envValue("NEMOTRON_MODEL") || "nvidia/nemotron-3-ultra
 const QWEN_BASE = envValue("QWEN_BASE_URL") || "https://dashscope-intl.aliyuncs.com/compatible-mode/v1";
 export const VISION_MODEL = envValue("QWEN_MODEL") || "qwen-vl-max-latest";
 
-// Google Gemini (OpenAI-compatible endpoint) — used to read sales receipts.
-const GEMINI_BASE = envValue("GEMINI_BASE_URL") || "https://generativelanguage.googleapis.com/v1beta/openai";
+// Google Gemini — used to read sales receipts. Uses the NATIVE generateContent
+// REST API (not the OpenAI-compat shim, which can be flaky with AI-Studio keys).
+const GEMINI_BASE = envValue("GEMINI_BASE_URL") || "https://generativelanguage.googleapis.com/v1beta";
 export const GEMINI_MODEL = envValue("GEMINI_MODEL") || "gemini-2.0-flash";
 
 function nvidiaKey(): string {
@@ -25,19 +26,6 @@ function nvidiaKey(): string {
 
 export function isGeminiConfigured(): boolean {
   return envValue("GEMINI_API_KEY").length > 0;
-}
-
-let _geminiClient: OpenAI | null = null;
-let _geminiKey = "";
-/** Gemini — reads/extracts sales receipts. */
-export function geminiAI(): OpenAI {
-  const apiKey = envValue("GEMINI_API_KEY");
-  if (!apiKey) throw new Error("GEMINI_API_KEY is required for receipt extraction. Add it in Vercel env and redeploy.");
-  if (!_geminiClient || _geminiKey !== apiKey) {
-    _geminiClient = new OpenAI({ apiKey, baseURL: GEMINI_BASE, timeout: 40000, maxRetries: 0 });
-    _geminiKey = apiKey;
-  }
-  return _geminiClient;
 }
 
 /** True when the text model (Nemotron) key is configured. */
@@ -244,28 +232,45 @@ function receiptNum(v: unknown): number {
   return isNaN(n) ? 0 : n;
 }
 
-/** Extract a sales receipt with Gemini (fields + stamp + confidence in one call). */
+/**
+ * Extract a sales receipt with Gemini (fields + stamp + confidence in one call),
+ * via the NATIVE generateContent REST API — inline_data parts, exactly like the
+ * google-genai SDK sends. This is more reliable than the OpenAI-compat shim.
+ */
 export async function extractReceiptGemini(
   images: { base64: string; contentType: string }[],
   caption?: string
 ): Promise<GeminiReceipt | null> {
-  if (!isGeminiConfigured() || images.length === 0) return null;
+  const key = envValue("GEMINI_API_KEY");
+  if (!key || images.length === 0) return null;
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 40000);
   try {
-    const content: OpenAI.Chat.ChatCompletionContentPart[] = [
-      { type: "text", text: "Extract the receipt fields and check for an official stamp." + (caption ? `\nNote: ${caption}` : "") },
-    ];
-    for (const img of images.slice(0, 3)) {
-      content.push({ type: "image_url", image_url: { url: `data:${img.contentType};base64,${img.base64}` } });
-    }
-    const res = await geminiAI().chat.completions.create({
-      model: GEMINI_MODEL,
-      max_tokens: 700,
-      messages: [
-        { role: "system", content: GEMINI_RECEIPT_SYSTEM },
-        { role: "user", content },
-      ],
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const parts: any[] = images.slice(0, 3).map((img) => ({
+      inline_data: { mime_type: img.contentType || "image/jpeg", data: img.base64 },
+    }));
+    parts.push({ text: GEMINI_RECEIPT_SYSTEM + (caption ? `\nNote: ${caption}` : "") });
+
+    const res = await fetch(`${GEMINI_BASE}/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(key)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts }],
+        generationConfig: { responseMimeType: "application/json", temperature: 0 },
+      }),
+      signal: ctrl.signal,
     });
-    const p = extractJson(res.choices[0]?.message?.content);
+    if (!res.ok) {
+      console.error("Gemini generateContent failed:", res.status, (await res.text().catch(() => "")).slice(0, 500));
+      return null;
+    }
+    const data = (await res.json()) as {
+      candidates?: { content?: { parts?: { text?: string }[] } }[];
+    };
+    const text = (data.candidates?.[0]?.content?.parts || []).map((pt) => pt.text || "").join("");
+    const p = extractJson(text);
     return {
       date: String(p.date || ""),
       customerName: String(p.customerName || ""),
@@ -281,6 +286,8 @@ export async function extractReceiptGemini(
   } catch (e) {
     console.error("extractReceiptGemini failed:", e);
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 

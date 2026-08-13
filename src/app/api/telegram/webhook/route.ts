@@ -1468,12 +1468,21 @@ export async function POST(req: NextRequest) {
       } else {
         // Scan mode still needs one read to fill the fields from the photo.
         const imgs: { base64: string; contentType: string }[] = [];
+        let readErr = "";
         for (const id of rs.images.slice(0, 3)) {
-          const bytes = await getFileBytes(id).catch(() => null);
-          if (bytes) imgs.push({ base64: bytes.base64, contentType: bytes.contentType });
+          try {
+            const bytes = await getFileBytes(id);
+            if (bytes) imgs.push({ base64: bytes.base64, contentType: bytes.contentType });
+            else readErr = "file record not found";
+          } catch (e) {
+            readErr = e instanceof Error ? e.message : String(e);
+            console.error("getFileBytes (scan) failed:", e);
+          }
         }
         if (imgs.length === 0) {
-          await sendMessage(chatId, "⚠️ ደረሰኙን ማንበብ አልተቻለም። እባክዎ ድጋሚ ይላኩ።", { reply_markup: receiptCollectKeyboard });
+          await sendMessage(chatId, `⚠️ ደረሰኙን ማንበብ አልተቻለም${readErr ? `፦ ${readErr.slice(0, 200)}` : ""}። እባክዎ ድጋሚ ይላኩ።`, {
+            reply_markup: receiptCollectKeyboard,
+          });
           return NextResponse.json({ ok: true });
         }
         await sendMessage(chatId, "⏳ ደረሰኙን በማንበብ ላይ...");
