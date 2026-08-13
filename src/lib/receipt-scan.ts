@@ -1,5 +1,5 @@
 import ExcelJS from "exceljs";
-import { visionAI, VISION_MODEL } from "@/lib/llm";
+import { extractReceiptGemini, isGeminiConfigured, visionAI, VISION_MODEL } from "@/lib/llm";
 
 /**
  * Sales report rows — entered field-by-field on the bot or read off a receipt
@@ -82,6 +82,22 @@ export async function extractSalesReceipt(
   images: { base64: string; contentType: string }[],
   caption?: string
 ): Promise<SalesReceiptDraft> {
+  // Prefer Gemini when configured — it reads the receipt directly.
+  if (isGeminiConfigured() && images.length) {
+    const g = await extractReceiptGemini(images, caption).catch(() => null);
+    if (g) {
+      return computeReceipt({
+        date: g.date || new Date().toISOString().slice(0, 10),
+        customerName: g.customerName,
+        productTy: g.productTy,
+        qty: g.qty,
+        unitPrice: g.unitPrice,
+        withhold: g.withhold,
+        remark: "",
+      });
+    }
+  }
+
   const ocr = images.length ? await ocrImage(images[0].base64) : "";
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

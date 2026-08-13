@@ -5,8 +5,8 @@ import { loadSession, saveSession } from "@/lib/sessions";
 import { latestBrief } from "@/lib/brief";
 import {
   checkReceiptQRCode,
-  checkReceiptStamp,
   classifyIngestion,
+  extractReceiptGemini,
   scoreStonePhoto,
   verifyRequestLegitimacy,
   type IngestionExtraction,
@@ -417,24 +417,27 @@ async function backgroundReceiptCheck(opts: {
     }
     if (imgs.length === 0) return;
 
-    const first = imgs[0];
-    const ctx =
-      `The salesperson entered: customer ${opts.entered.customerName}, product ${opts.entered.productTy}, ` +
-      `qty ${opts.entered.qty}, unit price ${opts.entered.unitPrice}, grand total ${opts.entered.grandTotal}. ` +
-      `Read the receipt and check whether these match.`;
-    const [legit, stamp, extracted] = await Promise.all([
-      verifyRequestLegitimacy(first.base64, first.contentType, "receipt", ctx).catch(() => null),
-      checkReceiptStamp(first.base64, first.contentType).catch(() => ({ hasStamp: false, confidence: 0, notes: "stamp_check_failed" })),
-      extractSalesReceipt(imgs).catch(() => null),
-    ]);
+    // Gemini reads the receipt (fields + stamp + confidence) in a single call.
+    const g = await extractReceiptGemini(imgs).catch(() => null);
+    const extracted = g
+      ? computeReceipt({
+          date: g.date || new Date().toISOString().slice(0, 10),
+          customerName: g.customerName,
+          productTy: g.productTy,
+          qty: g.qty,
+          unitPrice: g.unitPrice,
+          withhold: g.withhold,
+          remark: "",
+        })
+      : null;
     // Cross-check only makes sense in the guided flow, where the numbers were
     // typed by hand; in scan mode the entered values ARE the extraction.
     const mismatches = opts.guided && extracted ? compareReceipt(opts.entered, extracted) : [];
     const check: ReceiptCheck = {
-      hasStamp: stamp.hasStamp,
-      score: legit ? legit.score : 50,
-      flags: legit ? legit.flags : ["ai_check_failed"],
-      reasoning: legit ? legit.reasoning : "Automatic check failed; manual review required.",
+      hasStamp: g ? g.hasStamp : false,
+      score: g ? g.confidence : 50,
+      flags: g ? [] : ["ai_check_failed"],
+      reasoning: g ? g.notes : "Automatic receipt check failed; manual review required.",
       extracted: extracted
         ? { productTy: extracted.productTy, qty: extracted.qty, unitPrice: extracted.unitPrice, grandTotal: extracted.grandTotal }
         : null,
@@ -1404,9 +1407,23 @@ export async function POST(req: NextRequest) {
           await sendMessage(chatId, `⚠️ ከ3 ፎቶ በላይ አይፈቀድም። "${RECEIPT_BTN.done}" ይጫኑ።`, { reply_markup: receiptCollectKeyboard });
           return NextResponse.json({ ok: true });
         }
-        const stored = await storeIncomingPhoto(msg).catch(() => null);
+        let stored: { id: string } | null = null;
+        try {
+          stored = await storeIncomingPhoto(msg);
+        } catch (e) {
+          // Storage-side failure (Supabase upload / metadata insert). Surface the
+          // real reason so it's diagnosable instead of a vague "download failed".
+          const detail = e instanceof Error ? e.message.slice(0, 300) : String(e);
+          console.error("storeIncomingPhoto (receipt) failed:", e);
+          await sendMessage(chatId, `⚠️ ፎቶ ማስቀመጥ አልተቻለም (storage)፦\n${detail}`, { reply_markup: receiptCollectKeyboard });
+          return NextResponse.json({ ok: true });
+        }
         if (!stored) {
-          await sendMessage(chatId, "⚠️ ፎቶውን ማውረድ አልተቻለም። ድጋሚ ይሞክሩ።", { reply_markup: receiptCollectKeyboard });
+          // Telegram-side: getFile/download returned nothing (token, file size, or
+          // the message carried no downloadable photo/document).
+          await sendMessage(chatId, "⚠️ ፎቶውን ከቴሌግራም ማውረድ አልተቻለም። እባክዎ ምስሉን እንደ ፎቶ (እንደ ፋይл ሳይሆን) ይላኩ።", {
+            reply_markup: receiptCollectKeyboard,
+          });
           return NextResponse.json({ ok: true });
         }
         rs.images = [...rs.images, stored.id];

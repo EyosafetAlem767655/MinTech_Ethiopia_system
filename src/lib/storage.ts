@@ -11,7 +11,9 @@ import sql, { first, isUuid, jsonb } from "@/lib/sql";
  * Never import this from a client component.
  */
 
-export const BUCKET = "mintech-files";
+// Defaults to "mintech-files"; override with STORAGE_BUCKET if your bucket is
+// named differently (the name must match EXACTLY, including hyphens).
+export const BUCKET = process.env.STORAGE_BUCKET || "mintech-files";
 
 let _client: ReturnType<typeof createClient> | null = null;
 
@@ -34,7 +36,12 @@ let _bucketEnsured = false;
  *  un-provisioned Supabase project doesn't break every photo upload). */
 async function ensureBucket(): Promise<void> {
   if (_bucketEnsured) return;
-  await client().storage.createBucket(BUCKET, { public: false }).catch(() => {});
+  const { error } = await client().storage.createBucket(BUCKET, { public: false });
+  // "already exists" is the happy path on a warm project; anything else is worth
+  // logging because it means uploads will keep failing.
+  if (error && !/exist/i.test(error.message)) {
+    console.error(`ensureBucket(${BUCKET}) failed:`, error.message);
+  }
   _bucketEnsured = true;
 }
 

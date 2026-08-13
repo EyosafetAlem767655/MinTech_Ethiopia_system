@@ -15,8 +15,29 @@ export const TEXT_MODEL = envValue("NEMOTRON_MODEL") || "nvidia/nemotron-3-ultra
 const QWEN_BASE = envValue("QWEN_BASE_URL") || "https://dashscope-intl.aliyuncs.com/compatible-mode/v1";
 export const VISION_MODEL = envValue("QWEN_MODEL") || "qwen-vl-max-latest";
 
+// Google Gemini (OpenAI-compatible endpoint) — used to read sales receipts.
+const GEMINI_BASE = envValue("GEMINI_BASE_URL") || "https://generativelanguage.googleapis.com/v1beta/openai";
+export const GEMINI_MODEL = envValue("GEMINI_MODEL") || "gemini-2.0-flash";
+
 function nvidiaKey(): string {
   return envValue("NIVIDA_API_KEY") || envValue("NVIDIA_API_KEY");
+}
+
+export function isGeminiConfigured(): boolean {
+  return envValue("GEMINI_API_KEY").length > 0;
+}
+
+let _geminiClient: OpenAI | null = null;
+let _geminiKey = "";
+/** Gemini — reads/extracts sales receipts. */
+export function geminiAI(): OpenAI {
+  const apiKey = envValue("GEMINI_API_KEY");
+  if (!apiKey) throw new Error("GEMINI_API_KEY is required for receipt extraction. Add it in Vercel env and redeploy.");
+  if (!_geminiClient || _geminiKey !== apiKey) {
+    _geminiClient = new OpenAI({ apiKey, baseURL: GEMINI_BASE, timeout: 40000, maxRetries: 0 });
+    _geminiKey = apiKey;
+  }
+  return _geminiClient;
 }
 
 /** True when the text model (Nemotron) key is configured. */
@@ -189,6 +210,77 @@ export async function checkClaimPhoto(
   } catch (e) {
     console.error("checkClaimPhoto failed:", e);
     return PHOTO_VERDICT_FALLBACK;
+  }
+}
+
+/* ───────────────────── Gemini sales-receipt extraction ─────────────────────── */
+
+export interface GeminiReceipt {
+  date: string;
+  customerName: string;
+  productTy: string;
+  qty: number;
+  unitPrice: number;
+  grandTotal: number;
+  withhold: number;
+  hasStamp: boolean;
+  confidence: number; // 0-100, how legible / genuine the receipt looks
+  notes: string;
+}
+
+const GEMINI_RECEIPT_SYSTEM =
+  "You read an Ethiopian sales receipt / cash-sale invoice photo and return STRICT JSON only. " +
+  'Return: { "date": "YYYY-MM-DD", "customerName": string, ' +
+  '"productTy": string (product code such as ETL-9, 3-EL, EC-15, Talc), "qty": number, ' +
+  '"unitPrice": number (ETB), "grandTotal": number (ETB total incl. VAT), ' +
+  '"withhold": number (ETB withholding if shown, else 0), ' +
+  '"hasStamp": boolean (true ONLY if an official ink stamp/seal is clearly visible — ignore printed ' +
+  'logos, signatures, barcodes and QR codes), ' +
+  '"confidence": number (0-100 — how clearly legible and genuine the receipt looks), ' +
+  '"notes": string (one short sentence) }. Read numbers exactly; use "" or 0 when a field is not visible.';
+
+function receiptNum(v: unknown): number {
+  const n = Number(String(v ?? "").replace(/[^0-9.\-]/g, ""));
+  return isNaN(n) ? 0 : n;
+}
+
+/** Extract a sales receipt with Gemini (fields + stamp + confidence in one call). */
+export async function extractReceiptGemini(
+  images: { base64: string; contentType: string }[],
+  caption?: string
+): Promise<GeminiReceipt | null> {
+  if (!isGeminiConfigured() || images.length === 0) return null;
+  try {
+    const content: OpenAI.Chat.ChatCompletionContentPart[] = [
+      { type: "text", text: "Extract the receipt fields and check for an official stamp." + (caption ? `\nNote: ${caption}` : "") },
+    ];
+    for (const img of images.slice(0, 3)) {
+      content.push({ type: "image_url", image_url: { url: `data:${img.contentType};base64,${img.base64}` } });
+    }
+    const res = await geminiAI().chat.completions.create({
+      model: GEMINI_MODEL,
+      max_tokens: 700,
+      messages: [
+        { role: "system", content: GEMINI_RECEIPT_SYSTEM },
+        { role: "user", content },
+      ],
+    });
+    const p = extractJson(res.choices[0]?.message?.content);
+    return {
+      date: String(p.date || ""),
+      customerName: String(p.customerName || ""),
+      productTy: String(p.productTy || ""),
+      qty: receiptNum(p.qty),
+      unitPrice: receiptNum(p.unitPrice),
+      grandTotal: receiptNum(p.grandTotal),
+      withhold: receiptNum(p.withhold),
+      hasStamp: !!p.hasStamp,
+      confidence: Math.max(0, Math.min(100, Math.round(Number(p.confidence) || 50))),
+      notes: String(p.notes || ""),
+    };
+  } catch (e) {
+    console.error("extractReceiptGemini failed:", e);
+    return null;
   }
 }
 
