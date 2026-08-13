@@ -10,6 +10,16 @@ import { visionAI, VISION_MODEL } from "@/lib/llm";
  * VAT 15% · Grand Total · Withholding · Net Payable · Remark.
  */
 
+/** AI verdict on an attached receipt photo: stamp validity + authenticity + cross-check. */
+export interface ReceiptCheck {
+  hasStamp: boolean; // an unstamped receipt is not valid
+  score: number; // 0-100 authenticity/legitimacy
+  flags: string[];
+  reasoning: string;
+  extracted: { productTy: string; qty: number; unitPrice: number; grandTotal: number } | null;
+  mismatches: string[];
+}
+
 export interface SalesReceiptDraft {
   date: string; // YYYY-MM-DD
   customerName: string;
@@ -113,6 +123,34 @@ export async function extractSalesReceipt(
     withhold: toNum(f.withhold),
     remark: String(f.remark || ""),
   });
+}
+
+/**
+ * Cross-check the figures read off the receipt against what was entered by hand.
+ * Returns human-readable mismatch strings (empty array = everything agrees).
+ * Only compares fields the receipt actually yielded (0/"" means "not read"), and
+ * tolerates small rounding differences on money.
+ */
+export function compareReceipt(entered: SalesReceiptDraft, extracted: SalesReceiptDraft): string[] {
+  const out: string[] = [];
+  const near = (a: number, b: number, tol: number) => Math.abs(a - b) <= tol;
+
+  if (extracted.productTy && entered.productTy) {
+    const norm = (s: string) => s.toLowerCase().replace(/[\s\-_]/g, "");
+    if (norm(extracted.productTy) !== norm(entered.productTy)) {
+      out.push(`product: receipt "${extracted.productTy}" vs entered "${entered.productTy}"`);
+    }
+  }
+  if (extracted.qty > 0 && entered.qty > 0 && !near(extracted.qty, entered.qty, 0.001)) {
+    out.push(`qty: receipt ${extracted.qty} vs entered ${entered.qty}`);
+  }
+  if (extracted.unitPrice > 0 && entered.unitPrice > 0 && !near(extracted.unitPrice, entered.unitPrice, 1)) {
+    out.push(`unit price: receipt ${extracted.unitPrice} vs entered ${entered.unitPrice}`);
+  }
+  if (extracted.grandTotal > 0 && entered.grandTotal > 0 && !near(extracted.grandTotal, entered.grandTotal, 1)) {
+    out.push(`grand total: receipt ${Math.round(extracted.grandTotal)} vs entered ${Math.round(entered.grandTotal)}`);
+  }
+  return out;
 }
 
 /** Recompute the derived money columns from qty · unitPrice · withhold. */

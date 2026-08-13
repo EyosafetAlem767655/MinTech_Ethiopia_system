@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import sql, { first, isUuid } from "@/lib/sql";
+import sql, { first, isUuid, jsonb } from "@/lib/sql";
 import { getFileBytes, putFile } from "@/lib/storage";
 import { loadSession, saveSession } from "@/lib/sessions";
 import { latestBrief } from "@/lib/brief";
 import {
   checkReceiptQRCode,
+  checkReceiptStamp,
   classifyIngestion,
   scoreStonePhoto,
   verifyRequestLegitimacy,
@@ -47,13 +48,14 @@ import {
   type HrKind,
 } from "@/lib/positions";
 import { insertClaimPhotos, processClaimPhoto } from "@/lib/claims";
-import { companyChat } from "@/lib/chat";
 import { ingestOpsReport, isOpsReportText } from "@/lib/ops-report";
 import { spreadsheetToText, isSpreadsheetMime } from "@/lib/spreadsheet";
 import {
   buildSalesReceiptsWorkbook,
+  compareReceipt,
   computeReceipt,
   extractSalesReceipt,
+  type ReceiptCheck,
   type SalesReceiptDraft,
   type SalesReceiptRow,
 } from "@/lib/receipt-scan";
@@ -876,7 +878,20 @@ function parseProductQty(text: string): { product: string; qty: number } {
   return { product, qty };
 }
 
-function receiptPreview(d: SalesReceiptDraft): string {
+/** Short receipt-verdict lines for the preview (stamp validity + authenticity). */
+function checkLine(c?: ReceiptCheck | null): string {
+  if (!c) return "";
+  let line = c.hasStamp
+    ? "🔖 ማህተም ተገኝቷል — ተቀባይነት አለው\n"
+    : "❌ ማህተም አልተገኘም — ደረሰኙ ተቀባይነት የለውም\n";
+  const label = c.score >= 75 ? "የተረጋገጠ" : c.score >= 50 ? "ማጣራት ይፈልጋል" : "አጠራጣሪ";
+  const icon = c.score >= 75 ? "🔒" : c.score >= 50 ? "🔎" : "⚠️";
+  line += `${icon} ማረጋገጫ ${c.score}% · ${label}\n`;
+  if (c.mismatches.length > 0) line += `⚠️ ልዩነት: ${c.mismatches.join("; ")}\n`;
+  return line;
+}
+
+function receiptPreview(d: SalesReceiptDraft, check?: ReceiptCheck | null): string {
   return (
     `🧾 <b>የሽያጭ ሪፖርት</b>\n` +
     `📅 ${d.date}\n` +
@@ -888,8 +903,9 @@ function receiptPreview(d: SalesReceiptDraft): string {
     `💰 Grand Total ${money(d.grandTotal)}\n` +
     `➖ Withholding ${money(d.withhold)}\n` +
     `✅ Net Payable ${money(d.netPay)}\n` +
-    `📝 ${d.remark || "—"}\n\n` +
-    `ትክክл ከሆነ "${RECEIPT_BTN.approve}"፣ ካልሆነ "${RECEIPT_BTN.edit}" ይጫኑ።`
+    `📝 ${d.remark || "—"}\n` +
+    checkLine(check) +
+    `\nትክክл ከሆነ "${RECEIPT_BTN.approve}"፣ ካልሆነ "${RECEIPT_BTN.edit}" ይጫኑ።`
   );
 }
 
@@ -1256,7 +1272,13 @@ export async function POST(req: NextRequest) {
 
     /* ── Attach receipt photo(s), then finalise (guided compute or scan extract) ── */
     if (session.state === "receipt_collect" && session.receiptScan) {
-      const rs = session.receiptScan as { mode?: string; step?: SalesStep; images: string[]; draft?: Partial<SalesReceiptDraft> };
+      const rs = session.receiptScan as {
+        mode?: string;
+        step?: SalesStep;
+        images: string[];
+        draft?: Partial<SalesReceiptDraft>;
+        check?: ReceiptCheck | null;
+      };
       rs.images = rs.images || [];
       const guided = rs.mode === "guided";
 
@@ -1287,6 +1309,25 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true });
       }
 
+      // A receipt is MANDATORY — a sales report cannot be filed without one.
+      if (rs.images.length === 0) {
+        await sendMessage(chatId, "📷 ደረሰኝ ማያያዝ ግዴታ ነው። ቢያንስ አንድ የደረሰኝ ፎቶ ይላኩ፣ ከዚያ \"" + RECEIPT_BTN.done + "\" ይጫኑ።", {
+          reply_markup: receiptCollectKeyboard,
+        });
+        return NextResponse.json({ ok: true });
+      }
+
+      // Load the attached receipt bytes once — used for extraction and the checks.
+      const imgs: { base64: string; contentType: string }[] = [];
+      for (const id of rs.images.slice(0, 3)) {
+        const bytes = await getFileBytes(id).catch(() => null);
+        if (bytes) imgs.push({ base64: bytes.base64, contentType: bytes.contentType });
+      }
+      if (imgs.length === 0) {
+        await sendMessage(chatId, "⚠️ ደረሰኙን ማንበብ አልተቻለም። እባክዎ ድጋሚ ይላኩ።", { reply_markup: receiptCollectKeyboard });
+        return NextResponse.json({ ok: true });
+      }
+
       let draft: SalesReceiptDraft;
       if (guided) {
         // Fields already collected — just compute the money columns.
@@ -1300,30 +1341,49 @@ export async function POST(req: NextRequest) {
           remark: rs.draft?.remark || "",
         });
       } else {
-        if (rs.images.length === 0) {
-          await sendMessage(chatId, "📷 ቢያንስ አንድ ፎቶ ይላኩ።", { reply_markup: receiptCollectKeyboard });
-          return NextResponse.json({ ok: true });
-        }
         await sendMessage(chatId, "⏳ ደረሰኙን በማንበብ ላይ...");
-        const imgs: { base64: string; contentType: string }[] = [];
-        for (const id of rs.images.slice(0, 3)) {
-          const bytes = await getFileBytes(id).catch(() => null);
-          if (bytes) imgs.push({ base64: bytes.base64, contentType: bytes.contentType });
-        }
         draft = await extractSalesReceipt(imgs, text || undefined);
       }
 
+      // Receipt checks: stamp validity (unstamped = invalid), authenticity score,
+      // and (guided) cross-check of the extracted figures vs. the entered ones.
+      if (guided) await sendMessage(chatId, "⏳ ደረሰኙን በማጣራት ላይ...");
+      const first = imgs[0];
+      const ctx = `customer: ${draft.customerName}, product: ${draft.productTy}, qty: ${draft.qty}, unit price: ${draft.unitPrice}, grand total: ${draft.grandTotal}`;
+      const [legit, stamp, extracted] = await Promise.all([
+        verifyRequestLegitimacy(first.base64, first.contentType, "receipt", ctx).catch(() => null),
+        checkReceiptStamp(first.base64, first.contentType).catch(() => ({ hasStamp: false, confidence: 0, notes: "stamp_check_failed" })),
+        // Guided path extracts to cross-check; scan path already IS the extraction.
+        guided ? extractSalesReceipt(imgs).catch(() => null) : Promise.resolve(draft),
+      ]);
+      const check: ReceiptCheck = {
+        hasStamp: stamp.hasStamp,
+        score: legit ? legit.score : 50,
+        flags: legit ? legit.flags : ["ai_check_failed"],
+        reasoning: legit ? legit.reasoning : "Automatic check failed; manual review required.",
+        extracted: extracted
+          ? { productTy: extracted.productTy, qty: extracted.qty, unitPrice: extracted.unitPrice, grandTotal: extracted.grandTotal }
+          : null,
+        mismatches: guided && extracted ? compareReceipt(draft, extracted) : [],
+      };
+
       rs.draft = draft;
+      rs.check = check;
       session.receiptScan = rs;
       session.state = "receipt_action";
       await persist(session);
-      await sendMessage(chatId, receiptPreview(draft), { reply_markup: receiptActionKeyboard });
+      await sendMessage(chatId, receiptPreview(draft, check), { reply_markup: receiptActionKeyboard });
       return NextResponse.json({ ok: true });
     }
 
     /* ── Sales report: preview → approve / edit ── */
     if (session.state === "receipt_action" && session.receiptScan?.draft) {
-      const rs = session.receiptScan as { mode?: string; images: string[]; draft: SalesReceiptDraft };
+      const rs = session.receiptScan as {
+        mode?: string;
+        images: string[];
+        draft: SalesReceiptDraft;
+        check?: ReceiptCheck | null;
+      };
       if (normText === NORM_RECEIPT.edit) {
         session.state = "receipt_edit";
         await persist(session);
@@ -1336,19 +1396,20 @@ export async function POST(req: NextRequest) {
       }
       if (normText === NORM_RECEIPT.approve) {
         const d = rs.draft;
+        const check = rs.check ? jsonb(rs.check) : null;
         try {
           await sql`
             insert into sales_receipts (date, customer_name, product_ty, qty, unit_price,
-                                        sub_total, vat, grand_total, withhold, net_pay, remark,
+                                        sub_total, vat, grand_total, withhold, net_pay, remark, receipt_check,
                                         status, reported_by, photo_file_ids)
             values (${parseReportDate(d.date)}, ${d.customerName || null},
                     ${d.productTy || null}, ${d.qty}, ${d.unitPrice}, ${d.subTotal}, ${d.vat}, ${d.grandTotal},
-                    ${d.withhold}, ${d.netPay}, ${d.remark || null}, 'processed', ${submitterName},
+                    ${d.withhold}, ${d.netPay}, ${d.remark || null}, ${check}, 'processed', ${submitterName},
                     ${rs.images || []})
           `;
         } catch (e) {
-          // remark column ships in migration 0009; if not applied yet (42703),
-          // save without it rather than failing the whole submission.
+          // remark (0009) / receipt_check (0010) may not be applied yet (42703);
+          // save the core columns rather than failing the whole submission.
           if ((e as { code?: string })?.code !== "42703") throw e;
           await sql`
             insert into sales_receipts (date, customer_name, product_ty, qty, unit_price,
@@ -1379,18 +1440,39 @@ export async function POST(req: NextRequest) {
         );
         return NextResponse.json({ ok: true });
       }
-      await sendMessage(chatId, receiptPreview(rs.draft), { reply_markup: receiptActionKeyboard });
+      await sendMessage(chatId, receiptPreview(rs.draft, rs.check), { reply_markup: receiptActionKeyboard });
       return NextResponse.json({ ok: true });
     }
 
     /* ── Sales report: apply field edits ── */
     if (session.state === "receipt_edit" && session.receiptScan?.draft && text) {
-      const rs = session.receiptScan as { mode?: string; images: string[]; draft: SalesReceiptDraft };
+      const rs = session.receiptScan as {
+        mode?: string;
+        images: string[];
+        draft: SalesReceiptDraft;
+        check?: ReceiptCheck | null;
+      };
       rs.draft = applyReceiptEdits(rs.draft, text);
+      // Re-run the cross-check against the receipt's extracted figures, if we have them.
+      if (rs.check) {
+        const ex = rs.check.extracted;
+        rs.check = {
+          ...rs.check,
+          mismatches: ex
+            ? compareReceipt(rs.draft, {
+                ...rs.draft,
+                productTy: ex.productTy,
+                qty: ex.qty,
+                unitPrice: ex.unitPrice,
+                grandTotal: ex.grandTotal,
+              })
+            : [],
+        };
+      }
       session.receiptScan = rs;
       session.state = "receipt_action";
       await persist(session);
-      await sendMessage(chatId, receiptPreview(rs.draft), { reply_markup: receiptActionKeyboard });
+      await sendMessage(chatId, receiptPreview(rs.draft, rs.check), { reply_markup: receiptActionKeyboard });
       return NextResponse.json({ ok: true });
     }
 
@@ -1501,15 +1583,6 @@ export async function POST(req: NextRequest) {
         session.capture = undefined;
         await persist(session);
         await sendMessage(chatId, `👥 <b>${cap.button}</b>\n\n${cap.question}`, { reply_markup: HR_KIND_KEYBOARD });
-        return NextResponse.json({ ok: true });
-      }
-
-      if (cap.captureMode === "chat") {
-        session.state = "idle";
-        session.draft = undefined;
-        session.capture = undefined;
-        await persist(session);
-        await sendMessage(chatId, cap.question);
         return NextResponse.json({ ok: true });
       }
 
@@ -1845,17 +1918,9 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true });
       }
 
-      const reply = await companyChat([{ role: "user", content: text }]);
-      await logActivity({
-        chatId,
-        actor: user.fullName,
-        userId: String(user._id),
-        positions: user.positions,
-        audience: "internal",
-        action: "chat_question",
-        detail: text.slice(0, 200),
-      });
-      await sendMessage(chatId, reply);
+      // The bot is a structured input system, not a chatbot: stray free text is
+      // not answered by an AI. Guide the user back to their menu instead.
+      await sendRoleMenu(chatId, user, "እባክዎ ከታች ካሉት ሜኑዎች ውስጥ ይምረጡ። ይህ ቦት ለሪፖርት ማስገቢያ ብቻ ነው።");
       return NextResponse.json({ ok: true });
     }
 

@@ -4,6 +4,15 @@ import { useEffect, useState } from "react";
 
 /** Sales reports submitted from the Telegram bot → agreed Sales report table. */
 
+interface ReceiptCheck {
+  hasStamp: boolean;
+  score: number;
+  flags: string[];
+  reasoning: string;
+  extracted: { productTy: string; qty: number; unitPrice: number; grandTotal: number } | null;
+  mismatches: string[];
+}
+
 interface Row {
   _id: string;
   date: string;
@@ -17,6 +26,7 @@ interface Row {
   withhold: number | null;
   netPay: number | null;
   remark: string | null;
+  receiptCheck: ReceiptCheck | null;
 }
 
 const fmtDate = (d: string) => new Date(d).toLocaleDateString("en-GB");
@@ -26,6 +36,37 @@ const productQty = (p?: string | null, q?: number | null) => {
   const qty = q ? String(q) : "";
   return prod && qty ? `${prod} / ${qty}` : prod || qty || "";
 };
+
+/** Compact receipt validity badge: stamp (validity) first, then authenticity score. */
+function CheckBadge({ check }: { check: ReceiptCheck | null }) {
+  if (!check) return <span className="text-stone-300">—</span>;
+  const { hasStamp, score, mismatches, flags, reasoning } = check;
+  // No stamp ⇒ the receipt is not valid, regardless of the authenticity score.
+  const tone = !hasStamp
+    ? "bg-red-100 text-red-800"
+    : score >= 75
+    ? "bg-green-100 text-green-800"
+    : score >= 50
+    ? "bg-amber-100 text-amber-800"
+    : "bg-red-100 text-red-800";
+  const title = [
+    hasStamp ? "stamp: present" : "NO STAMP — not valid",
+    reasoning,
+    flags.length ? `flags: ${flags.join(", ")}` : "",
+    mismatches.length ? `mismatch: ${mismatches.join("; ")}` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return (
+    <span
+      title={title}
+      className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold ${tone}`}
+    >
+      {hasStamp ? `🔖 ${score}%` : "❌ No stamp"}
+      {hasStamp && mismatches.length > 0 && <span>⚠️</span>}
+    </span>
+  );
+}
 
 export default function SalesReceiptsPanel() {
   const [rows, setRows] = useState<Row[] | null>(null);
@@ -56,7 +97,7 @@ export default function SalesReceiptsPanel() {
         <p className="card p-4 text-sm text-stone-400">No submitted sales reports yet.</p>
       ) : (
         <div className="card overflow-x-auto p-0">
-          <table className="w-full min-w-[820px] text-right text-xs">
+          <table className="w-full min-w-[900px] text-right text-xs">
             <thead className="bg-clay-50/70 text-[10px] uppercase tracking-wide text-stone-500">
               <tr>
                 <th className="p-2 text-left font-bold">Date</th>
@@ -69,6 +110,7 @@ export default function SalesReceiptsPanel() {
                 <th className="p-2 font-bold">Withholding</th>
                 <th className="p-2 font-bold">Net Payable</th>
                 <th className="p-2 text-left font-bold">Remark</th>
+                <th className="p-2 font-bold">Check</th>
               </tr>
             </thead>
             <tbody>
@@ -84,6 +126,9 @@ export default function SalesReceiptsPanel() {
                   <td className="p-2 tabular-nums">{num(r.withhold)}</td>
                   <td className="p-2 tabular-nums font-bold text-clay-900">{num(r.netPay)}</td>
                   <td className="p-2 text-left text-stone-500">{r.remark || ""}</td>
+                  <td className="p-2 text-center">
+                    <CheckBadge check={r.receiptCheck} />
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -97,6 +142,7 @@ export default function SalesReceiptsPanel() {
                 <td className="p-2 tabular-nums">{num(sum("grandTotal"))}</td>
                 <td className="p-2 tabular-nums">{num(sum("withhold"))}</td>
                 <td className="p-2 tabular-nums text-clay-900">{num(sum("netPay"))}</td>
+                <td className="p-2" />
                 <td className="p-2" />
               </tr>
             </tfoot>

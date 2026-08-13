@@ -52,8 +52,9 @@ export default function DepartmentPage() {
         ← Brief
       </Link>
 
-      {/* Range-driven summary (KPIs, trend, contributors, submissions) */}
-      <DepartmentReport dept={dept} />
+      {/* Range-driven summary (KPIs, trend, contributors, submissions). The Sales
+          tab is intentionally report-only — no KPIs/trend/feed — so skip it there. */}
+      {dept !== "sales" && <DepartmentReport dept={dept} />}
 
       {/* Detailed module reports */}
       <div className="mt-4 space-y-8">

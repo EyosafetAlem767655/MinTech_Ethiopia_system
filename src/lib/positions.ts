@@ -20,7 +20,6 @@ export type CapabilityKey =
   | "ops"
   | "materials"
   | "hr"
-  | "question"
   // Structured department report formats (text / photo / Excel).
   | "production_report"
   | "stock_status"
@@ -41,9 +40,7 @@ export type CaptureMode =
   /** Scan receipt photo(s) → OCR + Qwen → preview/edit → Excel (sales). */
   | "receipt_scan"
   /** Guided field-by-field sales report entry (+ attached receipts) → Excel. */
-  | "sales_entry"
-  /** Free-form question answered by the company chat model. */
-  | "chat";
+  | "sales_entry";
 
 export interface Capability {
   key: CapabilityKey;
@@ -212,13 +209,6 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
     input: "any",
     question: "👥 የሪፖርቱን ዓይነት ይምረጡ።",
   },
-  question: {
-    key: "question",
-    button: "🤖 የድርጅት ጥያቄ",
-    captureMode: "chat",
-    input: "any",
-    question: "💬 የድርጅት ጥያቄዎን በአንድ መልዕክት ብቻ ይፃፉ።",
-  },
 };
 
 /* ─────────────────────────── HR report subtypes ──────────────────────────── */
@@ -299,7 +289,7 @@ export const POSITIONS: Record<PositionKey, Position> = {
     en: "Daily production report",
     am: "የዕለት ምርት ሪፖርት",
     description: "Reports production output every day (shift and daily operations).",
-    capabilities: ["daily_report", "shift", "ops", "production_report", "stock_status", "question"],
+    capabilities: ["daily_report", "shift", "ops", "production_report", "stock_status"],
     dailyRequired: true,
   },
   asset_materials: {
@@ -308,7 +298,7 @@ export const POSITIONS: Record<PositionKey, Position> = {
     en: "Raw materials weight report",
     am: "የጥሬ ዕቃ ክብደት ሪፖርት",
     description: "Reports the weight of imported raw materials every day.",
-    capabilities: ["daily_report", "materials", "raw_material_received", "stock_status", "question"],
+    capabilities: ["daily_report", "materials", "raw_material_received", "stock_status"],
     dailyRequired: true,
   },
   asset_purchase: {
@@ -317,7 +307,7 @@ export const POSITIONS: Record<PositionKey, Position> = {
     en: "Tool purchase request",
     am: "የመሣሪያ ግዢ ጥያቄ",
     description: "Raises tool and equipment purchase requests when needed (not daily).",
-    capabilities: ["purchase", "purchase_items", "question"],
+    capabilities: ["purchase", "purchase_items"],
     dailyRequired: false,
   },
   sales_daily: {
@@ -326,7 +316,7 @@ export const POSITIONS: Record<PositionKey, Position> = {
     en: "Sales report & receipts",
     am: "የሽያጭ ሪፖርትና ደረሰኝ",
     description: "Files the daily sales report together with receipts.",
-    capabilities: ["daily_report", "sales_report_entry", "sales_receipt_scan", "receipt", "question"],
+    capabilities: ["sales_report_entry", "sales_receipt_scan"],
     dailyRequired: true,
   },
   finance_daily: {
@@ -335,7 +325,7 @@ export const POSITIONS: Record<PositionKey, Position> = {
     en: "Daily financial report",
     am: "የዕለታዊ ፋይናንስ ሪፖርት",
     description: "Files the daily financial report and 3% withholding (WHT) receipts.",
-    capabilities: ["daily_report", "sales", "wht", "question"],
+    capabilities: ["daily_report", "sales", "wht"],
     dailyRequired: true,
   },
   finance_monthly: {
@@ -344,7 +334,7 @@ export const POSITIONS: Record<PositionKey, Position> = {
     en: "Monthly financial report",
     am: "የወርሃዊ ፋይናንስ ሪፖርት",
     description: "Files the monthly financial summary (monthly, not daily).",
-    capabilities: ["sales", "question"],
+    capabilities: ["sales"],
     dailyRequired: false,
   },
   hr: {
@@ -354,7 +344,7 @@ export const POSITIONS: Record<PositionKey, Position> = {
     am: "የሰው ኃይል",
     description:
       "Receives the morning report of who did and didn't submit, plus tool purchase requests. Can also file HR/customer reports.",
-    capabilities: ["hr", "purchase", "question"],
+    capabilities: ["hr", "purchase"],
     dailyRequired: false,
   },
   admin: {

@@ -238,6 +238,57 @@ export async function checkReceiptQRCode(imageBase64: string, contentType: strin
   }
 }
 
+/* ───────────────────────── Receipt stamp/seal check ────────────────────────── */
+
+export interface StampCheckResult {
+  hasStamp: boolean;
+  confidence: number; // 0–1
+  notes: string;
+}
+
+/**
+ * Detects an official company stamp/seal on a sales receipt. A receipt without a
+ * stamp is not valid, so on an AI error we return hasStamp=false with a clear
+ * note — the row surfaces for manual review rather than silently passing.
+ */
+export async function checkReceiptStamp(imageBase64: string, contentType: string): Promise<StampCheckResult> {
+  try {
+    const res = await visionAI().chat.completions.create({
+      model: VISION_MODEL,
+      max_tokens: 200,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You inspect sales receipts / invoices submitted to an Ethiopian mining company. " +
+            'Return STRICT JSON: { "hasStamp": boolean, "confidence": 0-1, "notes": "one short sentence" }. ' +
+            "Set hasStamp=true ONLY if an official company stamp or seal is clearly visible on the receipt: " +
+            "a round or rectangular INKED stamp/seal imprint (often blue, red, purple or black), a rubber-stamp " +
+            "mark, or an embossed seal — usually containing a company name/logo and sometimes a date. " +
+            "Do NOT count printed logos, letterheads, handwritten signatures, barcodes, or QR codes as a stamp. " +
+            "A receipt without such a stamp is NOT valid.",
+        },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Is there an official ink stamp or seal on this receipt? Inspect the whole image carefully." },
+            { type: "image_url", image_url: { url: `data:${contentType};base64,${imageBase64}`, detail: "high" } },
+          ],
+        },
+      ],
+    });
+    const parsed = extractJson(res.choices[0]?.message?.content);
+    return {
+      hasStamp: !!parsed.hasStamp,
+      confidence: Math.max(0, Math.min(1, Number(parsed.confidence) || 0)),
+      notes: String(parsed.notes || ""),
+    };
+  } catch (e) {
+    console.error("checkReceiptStamp failed:", e);
+    return { hasStamp: false, confidence: 0, notes: "stamp_check_failed" };
+  }
+}
+
 /* ───────────────────────── Gate stone quality scoring ─────────────────────── */
 
 export interface StoneScore {
