@@ -50,6 +50,7 @@ function CheckBadge({ check }: { check: ReceiptCheck | null }) {
     ? "bg-amber-100 text-amber-800"
     : "bg-red-100 text-red-800";
   const title = [
+    `confidence: ${score}%`,
     hasStamp ? "stamp: present" : "NO STAMP — not valid",
     reasoning,
     flags.length ? `flags: ${flags.join(", ")}` : "",
@@ -110,7 +111,7 @@ export default function SalesReceiptsPanel() {
                 <th className="p-2 font-bold">Withholding</th>
                 <th className="p-2 font-bold">Net Payable</th>
                 <th className="p-2 text-left font-bold">Remark</th>
-                <th className="p-2 font-bold">Check</th>
+                <th className="p-2 font-bold">Confidence</th>
               </tr>
             </thead>
             <tbody>

@@ -395,6 +395,79 @@ async function ensureSalesReceiptsSchema(): Promise<void> {
   _salesSchemaEnsured = true;
 }
 
+/**
+ * Background receipt verification (runs after the report is already saved, so the
+ * submitter isn't blocked). Reads the receipt photo with the AI, cross-checks the
+ * extracted numbers against the figures the salesperson typed, stores a confidence
+ * verdict on the row for the dashboard, and — if the receipt has no stamp or the
+ * numbers disagree — messages the submitter to correct the data.
+ */
+async function backgroundReceiptCheck(opts: {
+  chatId: string;
+  receiptId: string;
+  images: string[];
+  entered: SalesReceiptDraft;
+  guided: boolean;
+}): Promise<void> {
+  try {
+    const imgs: { base64: string; contentType: string }[] = [];
+    for (const id of opts.images.slice(0, 3)) {
+      const b = await getFileBytes(id).catch(() => null);
+      if (b) imgs.push({ base64: b.base64, contentType: b.contentType });
+    }
+    if (imgs.length === 0) return;
+
+    const first = imgs[0];
+    const ctx =
+      `The salesperson entered: customer ${opts.entered.customerName}, product ${opts.entered.productTy}, ` +
+      `qty ${opts.entered.qty}, unit price ${opts.entered.unitPrice}, grand total ${opts.entered.grandTotal}. ` +
+      `Read the receipt and check whether these match.`;
+    const [legit, stamp, extracted] = await Promise.all([
+      verifyRequestLegitimacy(first.base64, first.contentType, "receipt", ctx).catch(() => null),
+      checkReceiptStamp(first.base64, first.contentType).catch(() => ({ hasStamp: false, confidence: 0, notes: "stamp_check_failed" })),
+      extractSalesReceipt(imgs).catch(() => null),
+    ]);
+    // Cross-check only makes sense in the guided flow, where the numbers were
+    // typed by hand; in scan mode the entered values ARE the extraction.
+    const mismatches = opts.guided && extracted ? compareReceipt(opts.entered, extracted) : [];
+    const check: ReceiptCheck = {
+      hasStamp: stamp.hasStamp,
+      score: legit ? legit.score : 50,
+      flags: legit ? legit.flags : ["ai_check_failed"],
+      reasoning: legit ? legit.reasoning : "Automatic check failed; manual review required.",
+      extracted: extracted
+        ? { productTy: extracted.productTy, qty: extracted.qty, unitPrice: extracted.unitPrice, grandTotal: extracted.grandTotal }
+        : null,
+      mismatches,
+    };
+
+    try {
+      await sql`update sales_receipts set receipt_check = ${jsonb(check)}, updated_at = now() where id = ${opts.receiptId}`;
+    } catch (e) {
+      if ((e as { code?: string })?.code === "42703") {
+        await ensureSalesReceiptsSchema();
+        await sql`update sales_receipts set receipt_check = ${jsonb(check)} where id = ${opts.receiptId}`.catch(() => {});
+      }
+    }
+
+    // Ping the submitter if the receipt is invalid (no stamp) or its numbers
+    // disagree with what they typed.
+    const problems: string[] = [];
+    if (!check.hasStamp) problems.push("❌ ደረሰኙ ማህተም የለውም — ተቀባይነት የለውም።");
+    if (mismatches.length > 0) {
+      problems.push("⚠️ ያስገቡት መረጃ ከደረሰኙ ጋር አይመሳሰልም፦\n" + mismatches.map((m) => `• ${m}`).join("\n"));
+    }
+    if (problems.length > 0) {
+      await sendMessage(
+        opts.chatId,
+        `🔎 <b>የደረሰኝ ማጣራት ውጤት</b> · Confidence ${check.score}%\n\n${problems.join("\n\n")}\n\nእባክዎ ትክክለኛውን መረጃ አስተካክለው በድጋሚ ያስገቡ።`
+      ).catch(() => {});
+    }
+  } catch (e) {
+    console.error("backgroundReceiptCheck failed:", e);
+  }
+}
+
 /** Fold an LLM `items` array (e.g. [{product,tons}]) into a { key: number } jsonb map. */
 function itemsToMap(items: unknown, keyField: string, valField: string): Record<string, number> {
   const map: Record<string, number> = {};
@@ -1361,20 +1434,11 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true });
       }
 
-      // Load the attached receipt bytes once — used for extraction and the checks.
-      const imgs: { base64: string; contentType: string }[] = [];
-      for (const id of rs.images.slice(0, 3)) {
-        const bytes = await getFileBytes(id).catch(() => null);
-        if (bytes) imgs.push({ base64: bytes.base64, contentType: bytes.contentType });
-      }
-      if (imgs.length === 0) {
-        await sendMessage(chatId, "⚠️ ደረሰኙን ማንበብ አልተቻለም። እባክዎ ድጋሚ ይላኩ።", { reply_markup: receiptCollectKeyboard });
-        return NextResponse.json({ ok: true });
-      }
-
       let draft: SalesReceiptDraft;
       if (guided) {
-        // Fields already collected — just compute the money columns.
+        // Fields already entered — compute the money columns. No AI here: the
+        // receipt is verified in the background after approval, so the preview is
+        // instant and the submitter isn't kept waiting.
         draft = computeReceipt({
           date: rs.draft?.date || new Date().toISOString().slice(0, 10),
           customerName: rs.draft?.customerName || "",
@@ -1385,38 +1449,26 @@ export async function POST(req: NextRequest) {
           remark: rs.draft?.remark || "",
         });
       } else {
+        // Scan mode still needs one read to fill the fields from the photo.
+        const imgs: { base64: string; contentType: string }[] = [];
+        for (const id of rs.images.slice(0, 3)) {
+          const bytes = await getFileBytes(id).catch(() => null);
+          if (bytes) imgs.push({ base64: bytes.base64, contentType: bytes.contentType });
+        }
+        if (imgs.length === 0) {
+          await sendMessage(chatId, "⚠️ ደረሰኙን ማንበብ አልተቻለም። እባክዎ ድጋሚ ይላኩ።", { reply_markup: receiptCollectKeyboard });
+          return NextResponse.json({ ok: true });
+        }
         await sendMessage(chatId, "⏳ ደረሰኙን በማንበብ ላይ...");
         draft = await extractSalesReceipt(imgs, text || undefined);
       }
 
-      // Receipt checks: stamp validity (unstamped = invalid), authenticity score,
-      // and (guided) cross-check of the extracted figures vs. the entered ones.
-      if (guided) await sendMessage(chatId, "⏳ ደረሰኙን በማጣራት ላይ...");
-      const first = imgs[0];
-      const ctx = `customer: ${draft.customerName}, product: ${draft.productTy}, qty: ${draft.qty}, unit price: ${draft.unitPrice}, grand total: ${draft.grandTotal}`;
-      const [legit, stamp, extracted] = await Promise.all([
-        verifyRequestLegitimacy(first.base64, first.contentType, "receipt", ctx).catch(() => null),
-        checkReceiptStamp(first.base64, first.contentType).catch(() => ({ hasStamp: false, confidence: 0, notes: "stamp_check_failed" })),
-        // Guided path extracts to cross-check; scan path already IS the extraction.
-        guided ? extractSalesReceipt(imgs).catch(() => null) : Promise.resolve(draft),
-      ]);
-      const check: ReceiptCheck = {
-        hasStamp: stamp.hasStamp,
-        score: legit ? legit.score : 50,
-        flags: legit ? legit.flags : ["ai_check_failed"],
-        reasoning: legit ? legit.reasoning : "Automatic check failed; manual review required.",
-        extracted: extracted
-          ? { productTy: extracted.productTy, qty: extracted.qty, unitPrice: extracted.unitPrice, grandTotal: extracted.grandTotal }
-          : null,
-        mismatches: guided && extracted ? compareReceipt(draft, extracted) : [],
-      };
-
       rs.draft = draft;
-      rs.check = check;
+      rs.check = null; // authenticity + cross-check run in the background after approval
       session.receiptScan = rs;
       session.state = "receipt_action";
       await persist(session);
-      await sendMessage(chatId, receiptPreview(draft, check), { reply_markup: receiptActionKeyboard });
+      await sendMessage(chatId, receiptPreview(draft, null), { reply_markup: receiptActionKeyboard });
       return NextResponse.json({ ok: true });
     }
 
@@ -1440,26 +1492,29 @@ export async function POST(req: NextRequest) {
       }
       if (normText === NORM_RECEIPT.approve) {
         const d = rs.draft;
-        const insertReceipt = () => sql`
+        const imagesForCheck = rs.images || [];
+        const guided = rs.mode !== "scan";
+        const insertReceipt = () => sql<{ id: string }[]>`
           insert into sales_receipts (date, customer_name, product_ty, qty, unit_price,
-                                      sub_total, vat, grand_total, withhold, net_pay, remark, receipt_check,
+                                      sub_total, vat, grand_total, withhold, net_pay, remark,
                                       status, reported_by, photo_file_ids)
           values (${parseReportDate(d.date)}, ${d.customerName || null},
                   ${d.productTy || null}, ${d.qty}, ${d.unitPrice}, ${d.subTotal}, ${d.vat}, ${d.grandTotal},
-                  ${d.withhold}, ${d.netPay}, ${d.remark || null}, ${rs.check ? jsonb(rs.check) : null},
-                  'processed', ${submitterName}, ${rs.images || []})
+                  ${d.withhold}, ${d.netPay}, ${d.remark || null},
+                  'processed', ${submitterName}, ${imagesForCheck})
+          returning id
         `;
+        let savedId: string | null = null;
         try {
-          await insertReceipt();
+          savedId = (await insertReceipt())[0]?.id ?? null;
         } catch (e) {
-          // The sales_receipts table (0008) or its remark/receipt_check columns
-          // (0009/0010) may not be migrated yet — undefined_table (42P01) or
-          // undefined_column (42703). Self-heal the schema and retry so the report
-          // and its stamp/auth verdict reach the dashboard instead of erroring.
+          // The sales_receipts table (0008) / remark column (0009) may not be
+          // migrated yet — undefined_table (42P01) / undefined_column (42703).
+          // Self-heal the schema and retry so the report reaches the dashboard.
           const code = (e as { code?: string })?.code;
           if (code !== "42P01" && code !== "42703") throw e;
           await ensureSalesReceiptsSchema();
-          await insertReceipt();
+          savedId = (await insertReceipt())[0]?.id ?? null;
         }
         await logActivity({
           chatId,
@@ -1475,9 +1530,15 @@ export async function POST(req: NextRequest) {
         await persist(session);
         await sendMessage(
           chatId,
-          `✅ ተቀምጧል · Net Payable ${money(d.netPay)} ETB።\n📊 የዛሬውን ወደ Excel ማውጣት ወይም ወደ ዳሽቦርድ ማስገባት ይችላሉ።`,
+          `✅ ተቀምጧል · Net Payable ${money(d.netPay)} ETB።\n🔎 ደረሰኙ በጀርባ በኩл እየተጣራ ነው — ልዩነት ካለ እናሳውቅዎታለን።\n📊 የዛሬውን ወደ Excel ማውጣት ወይም ወደ ዳሽቦርድ ማስገባት ይችላሉ።`,
           { reply_markup: receiptNextKeyboard }
         );
+        // Background: verify the receipt (stamp + authenticity) and cross-check the
+        // entered figures against what the AI reads off the photo. Updates the
+        // row's confidence for the dashboard and pings the submitter on a mismatch.
+        if (savedId) {
+          await backgroundReceiptCheck({ chatId, receiptId: savedId, images: imagesForCheck, entered: d, guided });
+        }
         return NextResponse.json({ ok: true });
       }
       await sendMessage(chatId, receiptPreview(rs.draft, rs.check), { reply_markup: receiptActionKeyboard });

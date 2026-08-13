@@ -15,14 +15,27 @@ export const BUCKET = "mintech-files";
 
 let _client: ReturnType<typeof createClient> | null = null;
 
-function storage() {
+function client() {
   if (!_client) {
     const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
     const key = process.env.SUPABASE_SECRET_KEY;
     if (!url || !key) throw new Error("NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SECRET_KEY must be set");
     _client = createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
   }
-  return _client.storage.from(BUCKET);
+  return _client;
+}
+
+function storage() {
+  return client().storage.from(BUCKET);
+}
+
+let _bucketEnsured = false;
+/** Create the private storage bucket if it doesn't exist yet (self-heal, so an
+ *  un-provisioned Supabase project doesn't break every photo upload). */
+async function ensureBucket(): Promise<void> {
+  if (_bucketEnsured) return;
+  await client().storage.createBucket(BUCKET, { public: false }).catch(() => {});
+  _bucketEnsured = true;
 }
 
 const EXT: Record<string, string> = {
@@ -69,7 +82,12 @@ export async function putFile(
   const kind = opts.kind || "other";
   const path = buildPath(kind, contentType);
 
-  const { error } = await storage().upload(path, data, { contentType, upsert: false });
+  let { error } = await storage().upload(path, data, { contentType, upsert: false });
+  if (error) {
+    // The bucket may not have been provisioned yet — create it and retry once.
+    await ensureBucket();
+    ({ error } = await storage().upload(path, data, { contentType, upsert: false }));
+  }
   if (error) throw new Error(`Storage upload failed (${path}): ${error.message}`);
 
   try {
