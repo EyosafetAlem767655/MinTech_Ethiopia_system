@@ -52,6 +52,8 @@ interface ComplianceRow {
 const fmtTime = (d: string) =>
   new Date(d).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 
+type Collection = "daily" | "hr" | "materials";
+
 export default function DailyReportsPanel() {
   const [data, setData] = useState<{
     today: string;
@@ -63,12 +65,31 @@ export default function DailyReportsPanel() {
     summary: { total: number; submittedToday: number; missingToday: number };
   } | null>(null);
 
-  useEffect(() => {
+  const load = () =>
     fetch("/api/daily-reports")
       .then((r) => (r.ok ? r.json() : null))
       .then(setData)
       .catch(() => {});
+
+  useEffect(() => {
+    load();
   }, []);
+
+  // Edit / delete a submission, then refresh the feed.
+  const saveEdit = async (collection: Collection, id: string, text: string) => {
+    const res = await fetch(`/api/daily-reports/${collection}/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    if (res.ok) await load();
+    return res.ok;
+  };
+  const deleteRow = async (collection: Collection, id: string) => {
+    if (!confirm("Delete this submission? This cannot be undone.")) return;
+    await fetch(`/api/daily-reports/${collection}/${id}`, { method: "DELETE" }).catch(() => {});
+    await load();
+  };
 
   if (!data) return <div className="card h-40 animate-pulse bg-clay-50" />;
 
@@ -135,7 +156,15 @@ export default function DailyReportsPanel() {
 
       <Section title="Daily reports">
         {data.daily.map((r) => (
-          <Card key={r._id} who={r.fullName} when={r.createdAt} photos={r.photoFileIds} text={r.text} />
+          <Card
+            key={r._id}
+            who={r.fullName}
+            when={r.createdAt}
+            photos={r.photoFileIds}
+            text={r.text}
+            onSave={(t) => saveEdit("daily", r._id, t)}
+            onDelete={() => deleteRow("daily", r._id)}
+          />
         ))}
       </Section>
 
@@ -148,13 +177,23 @@ export default function DailyReportsPanel() {
             photos={r.photoFileIds}
             text={r.text}
             badge={HR_KINDS[r.kind]?.en}
+            onSave={(t) => saveEdit("hr", r._id, t)}
+            onDelete={() => deleteRow("hr", r._id)}
           />
         ))}
       </Section>
 
       <Section title="Material counts">
         {data.materials.map((r) => (
-          <Card key={r._id} who={r.countedBy} when={r.createdAt} photos={r.photoFileIds} text={r.rawText} />
+          <Card
+            key={r._id}
+            who={r.countedBy}
+            when={r.createdAt}
+            photos={r.photoFileIds}
+            text={r.rawText}
+            onSave={(t) => saveEdit("materials", r._id, t)}
+            onDelete={() => deleteRow("materials", r._id)}
+          />
         ))}
       </Section>
     </div>
@@ -181,13 +220,29 @@ function Card({
   text,
   photos,
   badge,
+  onSave,
+  onDelete,
 }: {
   who: string;
   when: string;
   text: string;
   photos: string[];
   badge?: string;
+  onSave: (text: string) => Promise<boolean>;
+  onDelete: () => void;
 }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(text);
+  const [busy, setBusy] = useState(false);
+
+  const save = async () => {
+    if (!draft.trim()) return;
+    setBusy(true);
+    const ok = await onSave(draft.trim());
+    setBusy(false);
+    if (ok) setEditing(false);
+  };
+
   return (
     <div className="rounded-2xl border border-stone-200 bg-white p-4">
       <div className="flex flex-wrap items-center gap-2">
@@ -196,8 +251,52 @@ function Card({
           <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-[11px] font-bold text-indigo-700">{badge}</span>
         )}
         <span className="text-[11px] text-stone-400">{fmtTime(when)}</span>
+        {!editing && (
+          <span className="ml-auto flex gap-2">
+            <button
+              onClick={() => {
+                setDraft(text);
+                setEditing(true);
+              }}
+              className="text-[11px] font-bold text-clay-600 hover:text-clay-800"
+            >
+              ✏️ Edit
+            </button>
+            <button onClick={onDelete} className="text-[11px] font-bold text-red-600 hover:text-red-700">
+              🗑 Delete
+            </button>
+          </span>
+        )}
       </div>
-      <p className="mt-1.5 whitespace-pre-wrap text-xs leading-relaxed text-stone-700">{text}</p>
+
+      {editing ? (
+        <div className="mt-2">
+          <textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            rows={4}
+            className="w-full rounded-xl border border-clay-200 p-2 text-xs leading-relaxed focus:outline-none focus:ring-2 focus:ring-clay-400"
+          />
+          <div className="mt-2 flex gap-2">
+            <button
+              onClick={save}
+              disabled={busy || !draft.trim()}
+              className="rounded-lg bg-clay-700 px-3 py-1 text-xs font-bold text-white disabled:opacity-50"
+            >
+              {busy ? "Saving…" : "Save"}
+            </button>
+            <button
+              onClick={() => setEditing(false)}
+              className="rounded-lg bg-stone-100 px-3 py-1 text-xs font-bold text-stone-600"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : (
+        <p className="mt-1.5 whitespace-pre-wrap text-xs leading-relaxed text-stone-700">{text}</p>
+      )}
+
       {photos.length > 0 && (
         <div className="mt-2 flex flex-wrap gap-2">
           {photos.map((id) => (

@@ -356,6 +356,45 @@ function parseReportDate(v: unknown): Date {
   return isNaN(d.getTime()) ? new Date() : d;
 }
 
+/**
+ * Self-heal the sales_receipts schema (migrations 0008 + 0009 + 0010). If a
+ * deployment is running ahead of its migrations the table/columns are missing and
+ * every sales submission fails with undefined_table (42P01) / undefined_column
+ * (42703). Creating it idempotently here lets the feature work without a manual
+ * migration step, matching how the session columns already self-heal.
+ */
+let _salesSchemaEnsured = false;
+async function ensureSalesReceiptsSchema(): Promise<void> {
+  if (_salesSchemaEnsured) return;
+  await sql`
+    create table if not exists sales_receipts (
+      id             uuid primary key default gen_random_uuid(),
+      date           timestamptz not null default now(),
+      customer_name  text,
+      fs_no          text,
+      att_no         text,
+      product_ty     text,
+      qty            numeric(14,3),
+      unit_price     numeric(14,2),
+      sub_total      numeric(16,2),
+      vat            numeric(16,2),
+      grand_total    numeric(16,2),
+      withhold       numeric(16,2) default 0,
+      net_pay        numeric(16,2),
+      deposited_bank text,
+      status         text not null default 'processed' check (status in ('processed','submitted')),
+      reported_by    text not null,
+      photo_file_ids uuid[] not null default '{}',
+      created_at     timestamptz not null default now(),
+      updated_at     timestamptz not null default now()
+    )
+  `;
+  await sql`create index if not exists sales_receipts_created_idx on sales_receipts (created_at desc)`.catch(() => {});
+  await sql`alter table sales_receipts add column if not exists remark text`.catch(() => {});
+  await sql`alter table sales_receipts add column if not exists receipt_check jsonb`.catch(() => {});
+  _salesSchemaEnsured = true;
+}
+
 /** Fold an LLM `items` array (e.g. [{product,tons}]) into a { key: number } jsonb map. */
 function itemsToMap(items: unknown, keyField: string, valField: string): Record<string, number> {
   const map: Record<string, number> = {};
@@ -863,7 +902,7 @@ const SALES_STEP_PROMPT: Record<SalesStep, string> = {
   product_qty: '📦 ምርት እና ብዛት ይፃፉ (ለምሳሌ፦ ETL-9 / 120)።',
   unit_price: "💲 የአንዱን ዋጋ (Unit Price, ETB) ይፃፉ።",
   withholding: '➖ ዊዝሆልዲንግ (Withholding, ETB) ይፃፉ። ከሌለ "የለም" ይፃፉ።',
-  remark: '📝 ማስታወሻ (Remark) ካለ ይፃፉ። ከሌለ "ዝለл" ይፃፉ።',
+  remark: '📝 ማስታወሻ (Remark) ካለ ይፃፉ። ከሌለ "None" ይፃፉ።',
 };
 const isToday = (t: string) => ["ዛሬ", "today", "-"].includes(t.trim().toLowerCase());
 const PHOTOS_PROMPT = '📷 የደረሰኙን ፎቶ(ዎች) ያያይዙ (እስከ 3) — ለማረጋገጫ። ከጨረሱ "✅ ጨርሻለሁ" ይጫኑ።';
@@ -1260,7 +1299,7 @@ export async function POST(req: NextRequest) {
         rs.draft.withhold = isNone(val) ? 0 : Number(val.replace(/[^0-9.\-]/g, "")) || 0;
         rs.step = "remark";
       } else if (step === "remark") {
-        rs.draft.remark = isSkip(val) ? "" : val;
+        rs.draft.remark = isSkip(val) || isNone(val) ? "" : val;
         // All fields captured → move to receipt attachment.
         session.receiptScan = rs;
         session.state = "receipt_collect";
@@ -1292,7 +1331,7 @@ export async function POST(req: NextRequest) {
           await sendMessage(chatId, `⚠️ ከ3 ፎቶ በላይ አይፈቀድም። "${RECEIPT_BTN.done}" ይጫኑ።`, { reply_markup: receiptCollectKeyboard });
           return NextResponse.json({ ok: true });
         }
-        const stored = await storeIncomingPhoto(msg);
+        const stored = await storeIncomingPhoto(msg).catch(() => null);
         if (!stored) {
           await sendMessage(chatId, "⚠️ ፎቶውን ማውረድ አልተቻለም። ድጋሚ ይሞክሩ።", { reply_markup: receiptCollectKeyboard });
           return NextResponse.json({ ok: true });
@@ -1413,12 +1452,13 @@ export async function POST(req: NextRequest) {
         try {
           await insertReceipt();
         } catch (e) {
-          // remark (0009) / receipt_check (0010) may not be applied yet (42703).
-          // Self-heal the columns and retry so the report — and its stamp/auth
-          // verdict — actually reach the dashboard, rather than being dropped.
-          if ((e as { code?: string })?.code !== "42703") throw e;
-          await sql`alter table sales_receipts add column if not exists remark text`.catch(() => {});
-          await sql`alter table sales_receipts add column if not exists receipt_check jsonb`.catch(() => {});
+          // The sales_receipts table (0008) or its remark/receipt_check columns
+          // (0009/0010) may not be migrated yet — undefined_table (42P01) or
+          // undefined_column (42703). Self-heal the schema and retry so the report
+          // and its stamp/auth verdict reach the dashboard instead of erroring.
+          const code = (e as { code?: string })?.code;
+          if (code !== "42P01" && code !== "42703") throw e;
+          await ensureSalesReceiptsSchema();
           await insertReceipt();
         }
         await logActivity({

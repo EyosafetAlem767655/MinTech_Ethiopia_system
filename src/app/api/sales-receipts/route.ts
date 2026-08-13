@@ -21,7 +21,11 @@ export async function GET() {
        limit 300
     `;
   } catch (e) {
-    if ((e as { code?: string })?.code !== "42703") throw e;
+    const code = (e as { code?: string })?.code;
+    // Table not created yet (42P01) → nothing submitted; return empty.
+    if (code === "42P01") return NextResponse.json([]);
+    if (code !== "42703") throw e;
+    // Optional columns not migrated yet → fall back to the core columns.
     rows = await sql<Record<string, unknown>[]>`
       select id as _id, date, customer_name as "customerName",
              product_ty as "productTy", qty, unit_price as "unitPrice", sub_total as "subTotal",

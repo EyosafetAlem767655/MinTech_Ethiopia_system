@@ -52,6 +52,8 @@ export async function GET() {
     fetchLatestBrief(),
     sql<{ n: string }[]>`select count(*) as n from damage_claims where status in ('pending','cosign_required')`,
     damageTripwires(),
+    // Guarded: the sales_receipts table may not be migrated yet — don't let a
+    // missing table break the whole brief.
     sql<{ n: string; grand: string; net: string; wht: string }[]>`
       select count(*) as n,
              coalesce(sum(grand_total), 0) as grand,
@@ -59,7 +61,7 @@ export async function GET() {
              coalesce(sum(withhold), 0) as wht
         from sales_receipts
        where status = 'submitted' and created_at >= ${eatMidnight}
-    `,
+    `.catch(() => [{ n: "0", grand: "0", net: "0", wht: "0" }]),
   ]);
   const pendingClaims = Number(pendingClaimsRows[0]?.n) || 0;
   const s = salesTodayRows[0];
