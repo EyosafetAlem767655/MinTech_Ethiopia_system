@@ -856,14 +856,16 @@ const salesEntryKeyboard = {
   resize_keyboard: true,
   one_time_keyboard: false,
 };
-type SalesStep = "customer" | "product_qty" | "unit_price" | "withholding" | "remark";
+type SalesStep = "date" | "customer" | "product_qty" | "unit_price" | "withholding" | "remark";
 const SALES_STEP_PROMPT: Record<SalesStep, string> = {
+  date: '📅 የሽያጩን ቀን ይፃፉ (ለምሳሌ 2018-06-01) ወይም ለዛሬ "ዛሬ" ይበሉ።',
   customer: "👤 የደንበኛውን ስም ይፃፉ።",
   product_qty: '📦 ምርት እና ብዛት ይፃፉ (ለምሳሌ፦ ETL-9 / 120)።',
   unit_price: "💲 የአንዱን ዋጋ (Unit Price, ETB) ይፃፉ።",
   withholding: '➖ ዊዝሆልዲንግ (Withholding, ETB) ይፃፉ። ከሌለ "የለም" ይፃፉ።',
   remark: '📝 ማስታወሻ (Remark) ካለ ይፃፉ። ከሌለ "ዝለл" ይፃፉ።',
 };
+const isToday = (t: string) => ["ዛሬ", "today", "-"].includes(t.trim().toLowerCase());
 const PHOTOS_PROMPT = '📷 የደረሰኙን ፎቶ(ዎች) ያያይዙ (እስከ 3) — ለማረጋገጫ። ከጨረሱ "✅ ጨርሻለሁ" ይጫኑ።';
 
 const isNone = (t: string) => ["የለም", "none", "no", "0", "-"].includes(t.trim().toLowerCase());
@@ -1231,7 +1233,10 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true });
       }
 
-      if (step === "customer") {
+      if (step === "date") {
+        rs.draft.date = isToday(val) ? new Date().toISOString().slice(0, 10) : val;
+        rs.step = "customer";
+      } else if (step === "customer") {
         rs.draft.customerName = val;
         rs.step = "product_qty";
       } else if (step === "product_qty") {
@@ -1332,7 +1337,7 @@ export async function POST(req: NextRequest) {
       if (guided) {
         // Fields already collected — just compute the money columns.
         draft = computeReceipt({
-          date: new Date().toISOString().slice(0, 10),
+          date: rs.draft?.date || new Date().toISOString().slice(0, 10),
           customerName: rs.draft?.customerName || "",
           productTy: rs.draft?.productTy || "",
           qty: Number(rs.draft?.qty) || 0,
@@ -1396,30 +1401,25 @@ export async function POST(req: NextRequest) {
       }
       if (normText === NORM_RECEIPT.approve) {
         const d = rs.draft;
-        const check = rs.check ? jsonb(rs.check) : null;
+        const insertReceipt = () => sql`
+          insert into sales_receipts (date, customer_name, product_ty, qty, unit_price,
+                                      sub_total, vat, grand_total, withhold, net_pay, remark, receipt_check,
+                                      status, reported_by, photo_file_ids)
+          values (${parseReportDate(d.date)}, ${d.customerName || null},
+                  ${d.productTy || null}, ${d.qty}, ${d.unitPrice}, ${d.subTotal}, ${d.vat}, ${d.grandTotal},
+                  ${d.withhold}, ${d.netPay}, ${d.remark || null}, ${rs.check ? jsonb(rs.check) : null},
+                  'processed', ${submitterName}, ${rs.images || []})
+        `;
         try {
-          await sql`
-            insert into sales_receipts (date, customer_name, product_ty, qty, unit_price,
-                                        sub_total, vat, grand_total, withhold, net_pay, remark, receipt_check,
-                                        status, reported_by, photo_file_ids)
-            values (${parseReportDate(d.date)}, ${d.customerName || null},
-                    ${d.productTy || null}, ${d.qty}, ${d.unitPrice}, ${d.subTotal}, ${d.vat}, ${d.grandTotal},
-                    ${d.withhold}, ${d.netPay}, ${d.remark || null}, ${check}, 'processed', ${submitterName},
-                    ${rs.images || []})
-          `;
+          await insertReceipt();
         } catch (e) {
-          // remark (0009) / receipt_check (0010) may not be applied yet (42703);
-          // save the core columns rather than failing the whole submission.
+          // remark (0009) / receipt_check (0010) may not be applied yet (42703).
+          // Self-heal the columns and retry so the report — and its stamp/auth
+          // verdict — actually reach the dashboard, rather than being dropped.
           if ((e as { code?: string })?.code !== "42703") throw e;
-          await sql`
-            insert into sales_receipts (date, customer_name, product_ty, qty, unit_price,
-                                        sub_total, vat, grand_total, withhold, net_pay,
-                                        status, reported_by, photo_file_ids)
-            values (${parseReportDate(d.date)}, ${d.customerName || null},
-                    ${d.productTy || null}, ${d.qty}, ${d.unitPrice}, ${d.subTotal}, ${d.vat}, ${d.grandTotal},
-                    ${d.withhold}, ${d.netPay}, 'processed', ${submitterName},
-                    ${rs.images || []})
-          `;
+          await sql`alter table sales_receipts add column if not exists remark text`.catch(() => {});
+          await sql`alter table sales_receipts add column if not exists receipt_check jsonb`.catch(() => {});
+          await insertReceipt();
         }
         await logActivity({
           chatId,
@@ -1516,9 +1516,9 @@ export async function POST(req: NextRequest) {
           });
         } else {
           session.state = "sales_entry";
-          session.receiptScan = { mode: "guided", step: "customer", images: [], draft: {} };
+          session.receiptScan = { mode: "guided", step: "date", images: [], draft: {} };
           await persist(session);
-          await sendMessage(chatId, `<b>${CAPABILITIES.sales_report_entry.button}</b>\n\n${SALES_STEP_PROMPT.customer}`, {
+          await sendMessage(chatId, `<b>${CAPABILITIES.sales_report_entry.button}</b>\n\n${SALES_STEP_PROMPT.date}`, {
             reply_markup: salesEntryKeyboard,
           });
         }
@@ -1608,9 +1608,9 @@ export async function POST(req: NextRequest) {
         session.draft = undefined;
         session.capture = undefined;
         session.history = [];
-        session.receiptScan = { mode: "guided", step: "customer", images: [], draft: {} };
+        session.receiptScan = { mode: "guided", step: "date", images: [], draft: {} };
         await persist(session);
-        await sendMessage(chatId, `<b>${cap.button}</b>\n\n${SALES_STEP_PROMPT.customer}`, { reply_markup: salesEntryKeyboard });
+        await sendMessage(chatId, `<b>${cap.button}</b>\n\n${SALES_STEP_PROMPT.date}`, { reply_markup: salesEntryKeyboard });
         return NextResponse.json({ ok: true });
       }
 

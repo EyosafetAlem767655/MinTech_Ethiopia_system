@@ -60,47 +60,45 @@ export async function loadSession(chatId: string, userName: string): Promise<Ses
   return rowToSession(created);
 }
 
+async function writeSession(s: Session): Promise<void> {
+  await sql`
+    update telegram_sessions set
+      user_name          = ${s.userName ?? null},
+      mode               = ${s.mode ?? "unknown"},
+      state              = ${s.state ?? "idle"},
+      auth               = ${s.auth ? sql.json(s.auth) : null},
+      external           = ${s.external ? sql.json(s.external) : null},
+      login_name         = ${s.loginName ?? null},
+      login_attempts     = ${s.loginAttempts ?? 0},
+      login_locked_until = ${s.loginLockedUntil ?? null},
+      capture            = ${s.capture ? sql.json(s.capture) : null},
+      draft              = ${s.draft ? sql.json(s.draft) : null},
+      edit_state         = ${s.editState ? sql.json(s.editState) : null},
+      receipt_scan       = ${s.receiptScan ? sql.json(s.receiptScan) : null},
+      history            = ${sql.json(s.history ?? [])}
+    where chat_id = ${s.chatId}
+  `;
+}
+
+let _healedSessionCols = false;
+
 export async function saveSession(s: Session): Promise<void> {
   try {
-    await sql`
-      update telegram_sessions set
-        user_name          = ${s.userName ?? null},
-        mode               = ${s.mode ?? "unknown"},
-        state              = ${s.state ?? "idle"},
-        auth               = ${s.auth ? sql.json(s.auth) : null},
-        external           = ${s.external ? sql.json(s.external) : null},
-        login_name         = ${s.loginName ?? null},
-        login_attempts     = ${s.loginAttempts ?? 0},
-        login_locked_until = ${s.loginLockedUntil ?? null},
-        capture            = ${s.capture ? sql.json(s.capture) : null},
-        draft              = ${s.draft ? sql.json(s.draft) : null},
-        edit_state         = ${s.editState ? sql.json(s.editState) : null},
-        receipt_scan       = ${s.receiptScan ? sql.json(s.receiptScan) : null},
-        history            = ${sql.json(s.history ?? [])}
-      where chat_id = ${s.chatId}
-    `;
+    await writeSession(s);
   } catch (e) {
     // The optional jsonb columns arrive in later migrations — edit_state (0005)
     // and receipt_scan (0008). If a deployment is running ahead of its migrations,
-    // Postgres raises undefined_column (42703) and every bot action would fail,
-    // bricking even /start. Fall back to the core columns only so the session
-    // still persists; the edit-window and receipt-scan features simply stay
-    // dormant until their migrations are applied.
+    // Postgres raises undefined_column (42703). We MUST NOT silently drop them:
+    // receipt_scan holds the multi-step scratch state for the guided sales flow
+    // and the receipt scanner, so dropping it makes those flows reset to the menu
+    // between messages. Instead self-heal — add the columns, then persist — so the
+    // features work even when the migration hasn't been applied by hand.
     if ((e as { code?: string })?.code !== "42703") throw e;
-    await sql`
-      update telegram_sessions set
-        user_name          = ${s.userName ?? null},
-        mode               = ${s.mode ?? "unknown"},
-        state              = ${s.state ?? "idle"},
-        auth               = ${s.auth ? sql.json(s.auth) : null},
-        external           = ${s.external ? sql.json(s.external) : null},
-        login_name         = ${s.loginName ?? null},
-        login_attempts     = ${s.loginAttempts ?? 0},
-        login_locked_until = ${s.loginLockedUntil ?? null},
-        capture            = ${s.capture ? sql.json(s.capture) : null},
-        draft              = ${s.draft ? sql.json(s.draft) : null},
-        history            = ${sql.json(s.history ?? [])}
-      where chat_id = ${s.chatId}
-    `;
+    if (!_healedSessionCols) {
+      await sql`alter table telegram_sessions add column if not exists edit_state jsonb`.catch(() => {});
+      await sql`alter table telegram_sessions add column if not exists receipt_scan jsonb`.catch(() => {});
+      _healedSessionCols = true;
+    }
+    await writeSession(s);
   }
 }
