@@ -4,6 +4,13 @@ import { readFileSync, existsSync } from "fs";
 // Usage:
 //   npx vercel env pull .env.local --environment=production
 //   npm run telegram:set-webhook
+//   npm run telegram:set-webhook -- --drop-pending
+//
+// --drop-pending discards every update Telegram is still holding. Use it once
+// after fixing a handler that was timing out: Telegram keeps retrying unanswered
+// updates, so without this the old backlog replays against the new deployment.
+// It permanently discards genuine unprocessed messages too, so it is opt-in.
+const dropPending = process.argv.includes("--drop-pending");
 
 for (const file of [".env.local", ".env"]) {
   if (!existsSync(file)) continue;
@@ -21,12 +28,24 @@ for (const file of [".env.local", ".env"]) {
 }
 
 const { TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET, APP_URL } = process.env;
-const missing = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_WEBHOOK_SECRET", "APP_URL"].filter(
-  (name) => !process.env[name]?.trim()
-);
-if (missing.length) {
-  console.error(`Missing required env var(s): ${missing.join(", ")}`);
-  console.error("Set them in Vercel, run `npx vercel env pull .env.local --environment=production`, then retry.");
+
+// Distinguish "never defined" from "defined but empty". `vercel env pull` writes
+// NAME="" for every variable it could not decrypt, which looks completely normal
+// in the file — so reporting these as simply "missing" sends you hunting for
+// variables that are visibly right there.
+const required = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_WEBHOOK_SECRET", "APP_URL"];
+const absent = required.filter((name) => process.env[name] === undefined);
+const blank = required.filter((name) => process.env[name] !== undefined && !process.env[name].trim());
+
+if (absent.length || blank.length) {
+  if (absent.length) console.error(`Missing env var(s): ${absent.join(", ")}`);
+  if (blank.length) {
+    console.error(`Present but EMPTY in .env.local: ${blank.join(", ")}`);
+    console.error("An empty value means the local file is stale — the values in Vercel are fine.");
+  }
+  console.error("\nRe-pull them, then retry:");
+  console.error("  npx vercel env pull .env.local --environment=production");
+  console.error("  npm run telegram:set-webhook -- --drop-pending");
   process.exit(1);
 }
 
@@ -46,9 +65,11 @@ const res = await fetch(`${endpoint}/setWebhook`, {
     url,
     secret_token: TELEGRAM_WEBHOOK_SECRET,
     allowed_updates: ["message", "callback_query"],
-    drop_pending_updates: false,
+    drop_pending_updates: dropPending,
   }),
 });
+
+if (dropPending) console.log("Pending updates dropped.");
 
 const json = await res.json();
 console.log(json);

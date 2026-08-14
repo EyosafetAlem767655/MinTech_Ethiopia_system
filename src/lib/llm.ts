@@ -15,17 +15,25 @@ export const TEXT_MODEL = envValue("NEMOTRON_MODEL") || "nvidia/nemotron-3-ultra
 const QWEN_BASE = envValue("QWEN_BASE_URL") || "https://dashscope-intl.aliyuncs.com/compatible-mode/v1";
 export const VISION_MODEL = envValue("QWEN_MODEL") || "qwen-vl-max-latest";
 
-// Google Gemini — used to read sales receipts. Uses the NATIVE generateContent
-// REST API (not the OpenAI-compat shim, which can be flaky with AI-Studio keys).
-const GEMINI_BASE = envValue("GEMINI_BASE_URL") || "https://generativelanguage.googleapis.com/v1beta";
-export const GEMINI_MODEL = envValue("GEMINI_MODEL") || "gemini-2.0-flash";
+// Google Gemini — the ONLY reader for sales receipts. Uses the NATIVE
+// generateContent REST API (not the OpenAI-compat shim, which can be flaky with
+// AI-Studio keys); this is the same request the google-genai SDK sends.
+export const GEMINI_BASE = envValue("GEMINI_BASE_URL") || "https://generativelanguage.googleapis.com/v1beta";
+export const GEMINI_MODEL = envValue("GEMINI_MODEL") || "gemini-3.5-flash-lite";
+
+/**
+ * Hard ceiling for a receipt read, in ms.
+ *
+ * This runs inside the Telegram webhook, and the webhook MUST answer 200 before
+ * the serverless function is killed — an unanswered update is redelivered
+ * forever. On Vercel Hobby the budget is small, so 8s leaves room for the
+ * storage downloads and the reply that follow. Never raise this above the
+ * function's maxDuration minus a comfortable margin.
+ */
+export const RECEIPT_BUDGET_MS = Number(envValue("GEMINI_TIMEOUT_MS")) || 8000;
 
 function nvidiaKey(): string {
   return envValue("NIVIDA_API_KEY") || envValue("NVIDIA_API_KEY");
-}
-
-export function isGeminiConfigured(): boolean {
-  return envValue("GEMINI_API_KEY").length > 0;
 }
 
 /** True when the text model (Nemotron) key is configured. */
@@ -206,26 +214,50 @@ export async function checkClaimPhoto(
 export interface GeminiReceipt {
   date: string;
   customerName: string;
+  fsNo: string; // "FS No" — fiscal receipt serial number
+  attNo: string; // "Att. No" — attachment / machine number
   productTy: string;
   qty: number;
   unitPrice: number;
+  subTotal: number;
+  vat: number;
   grandTotal: number;
   withhold: number;
+  netPay: number;
+  depositedBank: string;
   hasStamp: boolean;
   confidence: number; // 0-100, how legible / genuine the receipt looks
   notes: string;
 }
 
+/**
+ * One call reads every reported column plus the stamp verdict.
+ *
+ * The multi-image instruction matters: the bot sends up to 3 photos of the SAME
+ * receipt (front, back, a close-up) in a single request, and they have to be
+ * merged into ONE row — not read as three separate sales.
+ */
 const GEMINI_RECEIPT_SYSTEM =
-  "You read an Ethiopian sales receipt / cash-sale invoice photo and return STRICT JSON only. " +
-  'Return: { "date": "YYYY-MM-DD", "customerName": string, ' +
+  "You read Ethiopian sales receipts / cash-sale invoices and return STRICT JSON only.\n" +
+  "IMPORTANT: every image you are given is a page or angle of ONE SINGLE receipt. Merge what you can " +
+  "read across them into ONE result: if a field is legible in any image, use it. Never return several " +
+  "receipts, and never add quantities or totals across images.\n" +
+  'Return exactly: { "date": "YYYY-MM-DD", "customerName": string, ' +
+  '"fsNo": string (the "FS No" / fiscal receipt serial number, digits as printed), ' +
+  '"attNo": string (the "Att. No" / attachment or machine number), ' +
   '"productTy": string (product code such as ETL-9, 3-EL, EC-15, Talc), "qty": number, ' +
-  '"unitPrice": number (ETB), "grandTotal": number (ETB total incl. VAT), ' +
+  '"unitPrice": number (ETB), "subTotal": number (ETB before VAT), "vat": number (ETB VAT 15%), ' +
+  '"grandTotal": number (ETB total incl. VAT), ' +
   '"withhold": number (ETB withholding if shown, else 0), ' +
+  '"netPay": number (ETB payable after withholding; 0 if not printed), ' +
+  '"depositedBank": string (bank the money was deposited to, if the receipt shows one, else ""), ' +
   '"hasStamp": boolean (true ONLY if an official ink stamp/seal is clearly visible — ignore printed ' +
   'logos, signatures, barcodes and QR codes), ' +
   '"confidence": number (0-100 — how clearly legible and genuine the receipt looks), ' +
-  '"notes": string (one short sentence) }. Read numbers exactly; use "" or 0 when a field is not visible.';
+  '"notes": string (one short sentence) }.\n' +
+  "Read every number exactly as printed — do NOT calculate or correct them. A printed total that " +
+  "disagrees with its own line items must be reported as printed, because that disagreement is " +
+  'precisely what the cross-check looks for. Use "" for text and 0 for numbers that are not visible.';
 
 function receiptNum(v: unknown): number {
   const n = Number(String(v ?? "").replace(/[^0-9.\-]/g, ""));
@@ -233,19 +265,33 @@ function receiptNum(v: unknown): number {
 }
 
 /**
+ * Outcome of a receipt read. Deliberately NOT `GeminiReceipt | null`: a null
+ * cannot distinguish "the model read a blank receipt" from "the key was
+ * rejected" or "that model name does not exist", and the caller has to tell the
+ * salesperson which of those happened. Silently degrading a failed read into a
+ * zeroed draft is how an unreadable photo became a real sales row of 0 ETB.
+ */
+export type ReceiptReadResult =
+  | { ok: true; data: GeminiReceipt }
+  | { ok: false; error: string };
+
+/**
  * Extract a sales receipt with Gemini (fields + stamp + confidence in one call),
  * via the NATIVE generateContent REST API — inline_data parts, exactly like the
  * google-genai SDK sends. This is more reliable than the OpenAI-compat shim.
+ *
+ * Bounded by RECEIPT_BUDGET_MS because it runs inside the Telegram webhook.
  */
 export async function extractReceiptGemini(
   images: { base64: string; contentType: string }[],
   caption?: string
-): Promise<GeminiReceipt | null> {
+): Promise<ReceiptReadResult> {
   const key = envValue("GEMINI_API_KEY");
-  if (!key || images.length === 0) return null;
+  if (!key) return { ok: false, error: "GEMINI_API_KEY is not set" };
+  if (images.length === 0) return { ok: false, error: "no images to read" };
 
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 40000);
+  const timer = setTimeout(() => ctrl.abort(), RECEIPT_BUDGET_MS);
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const parts: any[] = images.slice(0, 3).map((img) => ({
@@ -253,9 +299,11 @@ export async function extractReceiptGemini(
     }));
     parts.push({ text: GEMINI_RECEIPT_SYSTEM + (caption ? `\nNote: ${caption}` : "") });
 
-    const res = await fetch(`${GEMINI_BASE}/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(key)}`, {
+    const res = await fetch(`${GEMINI_BASE}/models/${GEMINI_MODEL}:generateContent`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      // Key goes in the header, not the query string — a key in a URL ends up in
+      // every proxy and access log between here and Google.
+      headers: { "Content-Type": "application/json", "x-goog-api-key": key },
       body: JSON.stringify({
         contents: [{ role: "user", parts }],
         generationConfig: { responseMimeType: "application/json", temperature: 0 },
@@ -263,29 +311,48 @@ export async function extractReceiptGemini(
       signal: ctrl.signal,
     });
     if (!res.ok) {
-      console.error("Gemini generateContent failed:", res.status, (await res.text().catch(() => "")).slice(0, 500));
-      return null;
+      const body = (await res.text().catch(() => "")).slice(0, 500);
+      console.error("Gemini generateContent failed:", res.status, body);
+      // 404 here almost always means GEMINI_MODEL is wrong for this key, which
+      // is worth saying out loud rather than leaving as a bare status code.
+      const hint = res.status === 404 ? ` (model "${GEMINI_MODEL}" not available for this key)` : "";
+      return { ok: false, error: `Gemini HTTP ${res.status}${hint}` };
     }
     const data = (await res.json()) as {
       candidates?: { content?: { parts?: { text?: string }[] } }[];
     };
     const text = (data.candidates?.[0]?.content?.parts || []).map((pt) => pt.text || "").join("");
+    if (!text.trim()) return { ok: false, error: "Gemini returned an empty response" };
+
     const p = extractJson(text);
     return {
-      date: String(p.date || ""),
-      customerName: String(p.customerName || ""),
-      productTy: String(p.productTy || ""),
-      qty: receiptNum(p.qty),
-      unitPrice: receiptNum(p.unitPrice),
-      grandTotal: receiptNum(p.grandTotal),
-      withhold: receiptNum(p.withhold),
-      hasStamp: !!p.hasStamp,
-      confidence: Math.max(0, Math.min(100, Math.round(Number(p.confidence) || 50))),
-      notes: String(p.notes || ""),
+      ok: true,
+      data: {
+        date: String(p.date || ""),
+        customerName: String(p.customerName || ""),
+        fsNo: String(p.fsNo || "").trim(),
+        attNo: String(p.attNo || "").trim(),
+        productTy: String(p.productTy || ""),
+        qty: receiptNum(p.qty),
+        unitPrice: receiptNum(p.unitPrice),
+        subTotal: receiptNum(p.subTotal),
+        vat: receiptNum(p.vat),
+        grandTotal: receiptNum(p.grandTotal),
+        withhold: receiptNum(p.withhold),
+        netPay: receiptNum(p.netPay),
+        depositedBank: String(p.depositedBank || "").trim(),
+        hasStamp: !!p.hasStamp,
+        confidence: Math.max(0, Math.min(100, Math.round(Number(p.confidence) || 50))),
+        notes: String(p.notes || ""),
+      },
     };
   } catch (e) {
+    const aborted = e instanceof Error && e.name === "AbortError";
     console.error("extractReceiptGemini failed:", e);
-    return null;
+    return {
+      ok: false,
+      error: aborted ? `Gemini timed out after ${RECEIPT_BUDGET_MS}ms` : e instanceof Error ? e.message : String(e),
+    };
   } finally {
     clearTimeout(timer);
   }
@@ -334,57 +401,6 @@ export async function checkReceiptQRCode(imageBase64: string, contentType: strin
     console.error("checkReceiptQRCode failed:", e);
     // On AI failure, do not block a legitimate receipt — assume QR present
     return { hasQRCode: true, confidence: 0, notes: "check_failed" };
-  }
-}
-
-/* ───────────────────────── Receipt stamp/seal check ────────────────────────── */
-
-export interface StampCheckResult {
-  hasStamp: boolean;
-  confidence: number; // 0–1
-  notes: string;
-}
-
-/**
- * Detects an official company stamp/seal on a sales receipt. A receipt without a
- * stamp is not valid, so on an AI error we return hasStamp=false with a clear
- * note — the row surfaces for manual review rather than silently passing.
- */
-export async function checkReceiptStamp(imageBase64: string, contentType: string): Promise<StampCheckResult> {
-  try {
-    const res = await visionAI().chat.completions.create({
-      model: VISION_MODEL,
-      max_tokens: 200,
-      messages: [
-        {
-          role: "system",
-          content:
-            "You inspect sales receipts / invoices submitted to an Ethiopian mining company. " +
-            'Return STRICT JSON: { "hasStamp": boolean, "confidence": 0-1, "notes": "one short sentence" }. ' +
-            "Set hasStamp=true ONLY if an official company stamp or seal is clearly visible on the receipt: " +
-            "a round or rectangular INKED stamp/seal imprint (often blue, red, purple or black), a rubber-stamp " +
-            "mark, or an embossed seal — usually containing a company name/logo and sometimes a date. " +
-            "Do NOT count printed logos, letterheads, handwritten signatures, barcodes, or QR codes as a stamp. " +
-            "A receipt without such a stamp is NOT valid.",
-        },
-        {
-          role: "user",
-          content: [
-            { type: "text", text: "Is there an official ink stamp or seal on this receipt? Inspect the whole image carefully." },
-            { type: "image_url", image_url: { url: `data:${contentType};base64,${imageBase64}`, detail: "high" } },
-          ],
-        },
-      ],
-    });
-    const parsed = extractJson(res.choices[0]?.message?.content);
-    return {
-      hasStamp: !!parsed.hasStamp,
-      confidence: Math.max(0, Math.min(1, Number(parsed.confidence) || 0)),
-      notes: String(parsed.notes || ""),
-    };
-  } catch (e) {
-    console.error("checkReceiptStamp failed:", e);
-    return { hasStamp: false, confidence: 0, notes: "stamp_check_failed" };
   }
 }
 

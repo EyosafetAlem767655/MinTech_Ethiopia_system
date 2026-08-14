@@ -34,7 +34,10 @@ export interface EnvCheck {
 export function integrationEnvChecks(): Record<string, EnvCheck> {
   const checks: Record<string, EnvCheck> = {
     supabase: check(["SUPABASE_DB_URL", "SUPABASE_SECRET_KEY", "NEXT_PUBLIC_SUPABASE_URL"]),
-    ai: check(["NIVIDA_API_KEY", "QWEN_API"]),
+    // GEMINI_API_KEY belongs here: it is what reads every sales receipt. While it
+    // was missing from this list the settings page reported AI as fully
+    // configured whilst every receipt scan silently returned nothing.
+    ai: check(["NIVIDA_API_KEY", "QWEN_API", "GEMINI_API_KEY"]),
     telegram: check(["TELEGRAM_BOT_TOKEN", "TELEGRAM_CEO_CHAT_ID", "TELEGRAM_WEBHOOK_SECRET", "APP_URL"]),
     cron: check(["CRON_SECRET"]),
     push: check(["VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY", "VAPID_SUBJECT", "NEXT_PUBLIC_VAPID_PUBLIC_KEY"]),

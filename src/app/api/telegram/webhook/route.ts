@@ -9,6 +9,7 @@ import {
   extractReceiptGemini,
   scoreStonePhoto,
   verifyRequestLegitimacy,
+  type GeminiReceipt,
   type IngestionExtraction,
 } from "@/lib/llm";
 import {
@@ -81,6 +82,16 @@ function normaliseChoice(text: string) {
     .trim();
 }
 
+/**
+ * Every sendMessage goes out with parse_mode: "HTML", so any interpolated value
+ * that did not come from us has to be escaped — an error string containing a
+ * stray "<" makes Telegram reject the whole message with "can't parse entities",
+ * and the user then sees nothing at all.
+ */
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 /** Buttons are matched by their normalised label, so labels stay editable in one place. */
 const CAP_BY_LABEL = new Map<string, Capability>(
   Object.values(CAPABILITIES).map((c) => [normaliseChoice(c.button), c])
@@ -125,6 +136,51 @@ const MSG = {
 
 function lockedMessage(minutes: number) {
   return `⛔ በተደጋጋሚ የተሳሳተ ሙከራ ተደርጓል። እባክዎ ከ<b>${minutes}</b> ደቂቃ በኋላ ይሞክሩ።`;
+}
+
+/* ─────────────────────── Telegram update de-duplication ───────────────────── */
+
+/**
+ * Telegram retries an update until the webhook answers 200. A handler killed by
+ * the serverless time limit never answers, so the same update comes back, runs
+ * the same slow branch, and is killed again — the loop that made the receipt
+ * scanner repeat "reading the receipt…" once a minute forever.
+ *
+ * Claiming the update_id before any work makes the handler idempotent. The
+ * insert is the lock: whoever wins it processes the update, and a redelivery
+ * (or a concurrent duplicate) loses the race and is acknowledged instead.
+ *
+ * Fails OPEN — if the claim query itself errors we process the update rather
+ * than dropping a real message on the floor.
+ */
+let _updatesTableEnsured = false;
+async function claimUpdate(updateId: number, chatId: string): Promise<boolean> {
+  try {
+    const rows = await sql<{ update_id: string }[]>`
+      insert into telegram_updates (update_id, chat_id)
+      values (${updateId}, ${chatId})
+      on conflict (update_id) do nothing
+      returning update_id`;
+    return rows.length > 0;
+  } catch (e) {
+    // Table missing (42P01) — the deployment is ahead of its migrations. Create
+    // it once and retry, matching how the session columns self-heal.
+    if ((e as { code?: string })?.code === "42P01" && !_updatesTableEnsured) {
+      _updatesTableEnsured = true;
+      await sql`
+        create table if not exists telegram_updates (
+          update_id  bigint primary key,
+          chat_id    text,
+          created_at timestamptz not null default now()
+        )`.catch(() => {});
+      await sql`create index if not exists telegram_updates_created_idx on telegram_updates (created_at)`.catch(
+        () => {}
+      );
+      return claimUpdate(updateId, chatId);
+    }
+    console.error("claimUpdate failed (processing anyway):", e);
+    return true;
+  }
 }
 
 /* ───────────────────────────── Session utilities ─────────────────────────── */
@@ -408,8 +464,21 @@ async function backgroundReceiptCheck(opts: {
   images: string[];
   entered: SalesReceiptDraft;
   guided: boolean;
+  /**
+   * Verdict already obtained while reading the photo (scan mode). Supplying it
+   * skips a second Gemini call: the scan read returns hasStamp and confidence
+   * too, and scan mode has nothing to cross-check — the extracted values ARE
+   * what was entered.
+   */
+  preCheck?: ReceiptCheck | null;
 }): Promise<void> {
   try {
+    if (opts.preCheck) {
+      await saveReceiptCheck(opts.receiptId, opts.preCheck);
+      await notifyReceiptProblems(opts.chatId, opts.preCheck);
+      return;
+    }
+
     const imgs: { base64: string; contentType: string }[] = [];
     for (const id of opts.images.slice(0, 3)) {
       const b = await getFileBytes(id).catch(() => null);
@@ -417,57 +486,112 @@ async function backgroundReceiptCheck(opts: {
     }
     if (imgs.length === 0) return;
 
-    // Gemini reads the receipt (fields + stamp + confidence) in a single call.
-    const g = await extractReceiptGemini(imgs).catch(() => null);
+    // Gemini reads the receipt (fields + stamp + confidence) in a single call,
+    // bounded by RECEIPT_BUDGET_MS so it cannot run the webhook past its limit.
+    const read = await extractReceiptGemini(imgs).catch((e) => ({
+      ok: false as const,
+      error: e instanceof Error ? e.message : String(e),
+    }));
+    const g = read.ok ? read.data : null;
     const extracted = g
-      ? computeReceipt({
-          date: g.date || new Date().toISOString().slice(0, 10),
-          customerName: g.customerName,
-          productTy: g.productTy,
-          qty: g.qty,
-          unitPrice: g.unitPrice,
-          withhold: g.withhold,
-          remark: "",
-        })
+      ? {
+          ...computeReceipt({
+            date: g.date || new Date().toISOString().slice(0, 10),
+            customerName: g.customerName,
+            productTy: g.productTy,
+            qty: g.qty,
+            unitPrice: g.unitPrice,
+            withhold: g.withhold,
+            remark: "",
+          }),
+          printedGrandTotal: g.grandTotal || undefined,
+        }
       : null;
     // Cross-check only makes sense in the guided flow, where the numbers were
     // typed by hand; in scan mode the entered values ARE the extraction.
     const mismatches = opts.guided && extracted ? compareReceipt(opts.entered, extracted) : [];
     const check: ReceiptCheck = {
+      checked: read.ok,
       hasStamp: g ? g.hasStamp : false,
-      score: g ? g.confidence : 50,
-      flags: g ? [] : ["ai_check_failed"],
-      reasoning: g ? g.notes : "Automatic receipt check failed; manual review required.",
+      score: g ? g.confidence : 0,
+      flags: read.ok ? [] : ["ai_check_failed"],
+      reasoning: read.ok ? g!.notes : `Automatic receipt check failed: ${read.error}`,
       extracted: extracted
-        ? { productTy: extracted.productTy, qty: extracted.qty, unitPrice: extracted.unitPrice, grandTotal: extracted.grandTotal }
+        ? {
+            productTy: extracted.productTy,
+            qty: extracted.qty,
+            unitPrice: extracted.unitPrice,
+            // Report what the receipt actually printed, not our recomputation.
+            grandTotal: extracted.printedGrandTotal ?? extracted.grandTotal,
+          }
         : null,
       mismatches,
     };
 
-    try {
-      await sql`update sales_receipts set receipt_check = ${jsonb(check)}, updated_at = now() where id = ${opts.receiptId}`;
-    } catch (e) {
-      if ((e as { code?: string })?.code === "42703") {
-        await ensureSalesReceiptsSchema();
-        await sql`update sales_receipts set receipt_check = ${jsonb(check)} where id = ${opts.receiptId}`.catch(() => {});
-      }
-    }
+    await saveReceiptCheck(opts.receiptId, check);
 
-    // Ping the submitter if the receipt is invalid (no stamp) or its numbers
-    // disagree with what they typed.
-    const problems: string[] = [];
-    if (!check.hasStamp) problems.push("❌ ደረሰኙ ማህተም የለውም — ተቀባይነት የለውም።");
-    if (mismatches.length > 0) {
-      problems.push("⚠️ ያስገቡት መረጃ ከደረሰኙ ጋር አይመሳሰልም፦\n" + mismatches.map((m) => `• ${m}`).join("\n"));
-    }
-    if (problems.length > 0) {
-      await sendMessage(
-        opts.chatId,
-        `🔎 <b>የደረሰኝ ማጣራት ውጤት</b> · Confidence ${check.score}%\n\n${problems.join("\n\n")}\n\nእባክዎ ትክክለኛውን መረጃ አስተካክለው በድጋሚ ያስገቡ።`
-      ).catch(() => {});
-    }
+    // Fs No, Att.No and Deposited Bank can only come off the receipt, so the
+    // guided flow never asks for them — fill them in from what Gemini just read
+    // rather than making the salesperson copy numbers by hand.
+    if (g) await backfillReceiptOnlyColumns(opts.receiptId, g);
+
+    await notifyReceiptProblems(opts.chatId, check);
   } catch (e) {
     console.error("backgroundReceiptCheck failed:", e);
+  }
+}
+
+/**
+ * Write the receipt-only identity columns onto a saved row, without overwriting
+ * anything already there (a scan-mode row, or a value the salesperson edited).
+ */
+async function backfillReceiptOnlyColumns(receiptId: string, g: GeminiReceipt): Promise<void> {
+  if (!g.fsNo && !g.attNo && !g.depositedBank) return;
+  try {
+    await sql`
+      update sales_receipts
+         set fs_no          = coalesce(nullif(fs_no, ''), ${g.fsNo || null}),
+             att_no         = coalesce(nullif(att_no, ''), ${g.attNo || null}),
+             deposited_bank = coalesce(nullif(deposited_bank, ''), ${g.depositedBank || null}),
+             updated_at     = now()
+       where id = ${receiptId}`;
+  } catch (e) {
+    console.error("backfillReceiptOnlyColumns failed:", e);
+  }
+}
+
+/** Persist a verdict onto the row, self-healing the column if the migration lags. */
+async function saveReceiptCheck(receiptId: string, check: ReceiptCheck): Promise<void> {
+  try {
+    await sql`update sales_receipts set receipt_check = ${jsonb(check)}, updated_at = now() where id = ${receiptId}`;
+  } catch (e) {
+    if ((e as { code?: string })?.code === "42703") {
+      await ensureSalesReceiptsSchema();
+      await sql`update sales_receipts set receipt_check = ${jsonb(check)} where id = ${receiptId}`.catch(() => {});
+    }
+  }
+}
+
+/** Tell the submitter only about problems the check actually established. */
+async function notifyReceiptProblems(chatId: string, check: ReceiptCheck): Promise<void> {
+  // A failed check is NOT a failed receipt. Only accuse the submitter of
+  // sending an unstamped receipt when the check actually ran; otherwise say
+  // plainly that verification did not complete and leave it for manual review.
+  if (!check.checked) {
+    await sendMessage(chatId, "⚠️ የደረሰኙ ማጣራት አሁን አልተሳካም። ሪፖርቱ ተቀምጧል፤ ደረሰኙ በእጅ ይጣራል።").catch(() => {});
+    return;
+  }
+
+  const problems: string[] = [];
+  if (!check.hasStamp) problems.push("❌ ደረሰኙ ማህተም የለውም — ተቀባይነት የለውም።");
+  if (check.mismatches.length > 0) {
+    problems.push("⚠️ ያስገቡት መረጃ ከደረሰኙ ጋር አይመሳሰልም፦\n" + check.mismatches.map((m) => `• ${m}`).join("\n"));
+  }
+  if (problems.length > 0) {
+    await sendMessage(
+      chatId,
+      `🔎 <b>የደረሰኝ ማጣራት ውጤት</b> · Confidence ${check.score}%\n\n${problems.join("\n\n")}\n\nእባክዎ ትክክለኛውን መረጃ አስተካክለው በድጋሚ ያስገቡ።`
+    ).catch(() => {});
   }
 }
 
@@ -925,10 +1049,32 @@ const HR_KIND_KEYBOARD = {
 
 /* ───────────────────────── Sales receipt-scan flow ───────────────────────── */
 
+/**
+ * Atomically append one stored-file id to receipt_scan.images and return the
+ * resulting list.
+ *
+ * Doing this in SQL rather than in JS is what makes a media group work: the
+ * photos arrive as concurrent updates, so a read-modify-write of the whole
+ * session object has every instance overwriting the others' additions.
+ */
+async function appendReceiptImage(chatId: string, fileId: string): Promise<string[]> {
+  const rows = await sql<{ images: string[] | null }[]>`
+    update telegram_sessions
+       set receipt_scan = jsonb_set(
+             coalesce(receipt_scan, '{}'::jsonb),
+             '{images}',
+             coalesce(receipt_scan -> 'images', '[]'::jsonb) || ${jsonb([fileId])}
+           )
+     where chat_id = ${chatId}
+   returning receipt_scan -> 'images' as images`;
+  const images = rows[0]?.images;
+  return Array.isArray(images) ? images.map(String) : [fileId];
+}
+
 const RECEIPT_BTN = {
   done: "✅ ጨርሻለሁ",
   approve: "✅ አጽድቅ",
-  edit: "✏️ አስተካክл",
+  edit: "✏️ አስተካክል",
   export: "📊 የዛሬውን Excel",
   submit: "📤 ወደ ዳሽቦርድ አስገባ",
   again: "🧾 አዲስ ደረሰኝ",
@@ -953,12 +1099,10 @@ const receiptActionKeyboard = {
   resize_keyboard: true,
   one_time_keyboard: false,
 };
+// No "submit to dashboard" button: approving a report now publishes it straight
+// to the web app, so a second manual step would only be a way to forget.
 const receiptNextKeyboard = {
-  keyboard: [
-    [{ text: RECEIPT_BTN.export }, { text: RECEIPT_BTN.submit }],
-    [{ text: RECEIPT_BTN.again }],
-    [{ text: NAV_BUTTONS.back }],
-  ],
+  keyboard: [[{ text: RECEIPT_BTN.export }], [{ text: RECEIPT_BTN.again }], [{ text: NAV_BUTTONS.back }]],
   resize_keyboard: true,
   one_time_keyboard: false,
 };
@@ -983,8 +1127,15 @@ const SALES_STEP_PROMPT: Record<SalesStep, string> = {
 const isToday = (t: string) => ["ዛሬ", "today", "-"].includes(t.trim().toLowerCase());
 const PHOTOS_PROMPT = '📷 የደረሰኙን ፎቶ(ዎች) ያያይዙ (እስከ 3) — ለማረጋገጫ። ከጨረሱ "✅ ጨርሻለሁ" ይጫኑ።';
 
+/**
+ * How long the receipt_reading state stays believable. A read is budgeted at
+ * RECEIPT_BUDGET_MS; anything older than this means the invocation that started
+ * it was killed, so the state is stale and the chat must be recovered.
+ */
+const READING_STALE_MS = 90_000;
+
 const isNone = (t: string) => ["የለም", "none", "no", "0", "-"].includes(t.trim().toLowerCase());
-const isSkip = (t: string) => ["ዝለл", "ዝለል", "skip", "-"].includes(t.trim().toLowerCase());
+const isSkip = (t: string) => ["ዝለል", "skip", "-"].includes(t.trim().toLowerCase());
 
 /** Parse "ETL-9 / 120" (or "ETL-9 120") into product + trailing quantity. */
 function parseProductQty(text: string): { product: string; qty: number } {
@@ -998,6 +1149,11 @@ function parseProductQty(text: string): { product: string; qty: number } {
 /** Short receipt-verdict lines for the preview (stamp validity + authenticity). */
 function checkLine(c?: ReceiptCheck | null): string {
   if (!c) return "";
+  // Three outcomes, not two: verified, rejected, and "we could not check".
+  // Collapsing the third into "no stamp" accuses the submitter of something the
+  // AI never actually determined.
+  if (!c.checked) return "⏳ ማጣራት አልተሳካም — በእጅ ይጣራል\n";
+
   let line = c.hasStamp
     ? "🔖 ማህተም ተገኝቷል — ተቀባይነት አለው\n"
     : "❌ ማህተም አልተገኘም — ደረሰኙ ተቀባይነት የለውም\n";
@@ -1008,21 +1164,27 @@ function checkLine(c?: ReceiptCheck | null): string {
   return line;
 }
 
+/** The full report row, in the report's own column order, so what the salesperson
+ *  approves is exactly what lands in the Excel file. */
 function receiptPreview(d: SalesReceiptDraft, check?: ReceiptCheck | null): string {
   return (
     `🧾 <b>የሽያጭ ሪፖርት</b>\n` +
-    `📅 ${d.date}\n` +
-    `👤 ${d.customerName || "—"}\n` +
-    `📦 ${d.productTy || "—"} / ${d.qty || 0}\n` +
-    `💲 Unit ${money(d.unitPrice)}\n` +
-    `🔢 Sub Total ${money(d.subTotal)}\n` +
-    `➕ VAT 15% ${money(d.vat)}\n` +
-    `💰 Grand Total ${money(d.grandTotal)}\n` +
-    `➖ Withholding ${money(d.withhold)}\n` +
-    `✅ Net Payable ${money(d.netPay)}\n` +
-    `📝 ${d.remark || "—"}\n` +
+    `📅 Date: ${d.date}\n` +
+    `👤 Customers Name: ${escapeHtml(d.customerName || "—")}\n` +
+    `🔖 Fs No: ${escapeHtml(d.fsNo || "—")}\n` +
+    `🔖 Att.No: ${escapeHtml(d.attNo || "—")}\n` +
+    `📦 Product Ty: ${escapeHtml(d.productTy || "—")}\n` +
+    `🔢 Qty: ${d.qty || 0}\n` +
+    `💲 Unit Price: ${money(d.unitPrice)}\n` +
+    `➖ Sub Total: ${money(d.subTotal)}\n` +
+    `➕ Vat 15%: ${money(d.vat)}\n` +
+    `💰 Grand Total: ${money(d.grandTotal)}\n` +
+    `📉 Withhold: ${money(d.withhold)}\n` +
+    `✅ Net Pay: ${money(d.netPay)}\n` +
+    `🏦 Deposited Bank: ${escapeHtml(d.depositedBank || "—")}\n` +
+    `📝 Remark: ${escapeHtml(d.remark || "—")}\n` +
     checkLine(check) +
-    `\nትክክл ከሆነ "${RECEIPT_BTN.approve}"፣ ካልሆነ "${RECEIPT_BTN.edit}" ይጫኑ።`
+    `\nትክክል ከሆነ "${RECEIPT_BTN.approve}"፣ ካልሆነ "${RECEIPT_BTN.edit}" ይጫኑ።`
   );
 }
 
@@ -1038,10 +1200,13 @@ function applyReceiptEdits(draft: SalesReceiptDraft, text: string): SalesReceipt
     if (!val) continue;
     if (["date", "ቀን"].includes(key)) next.date = val;
     else if (["customer", "customername", "ደንበኛ"].includes(key)) next.customerName = val;
+    else if (["fsno", "fs", "ፍስ"].includes(key)) next.fsNo = val;
+    else if (["attno", "att", "አትኖ"].includes(key)) next.attNo = val;
     else if (["product", "productty", "ምርት"].includes(key)) next.productTy = val;
     else if (["qty", "quantity", "ብዛት"].includes(key)) next.qty = num(val);
     else if (["unitprice", "price", "ዋጋ"].includes(key)) next.unitPrice = num(val);
     else if (["withhold", "withholding"].includes(key)) next.withhold = num(val);
+    else if (["depositedbank", "bank", "ባንክ"].includes(key)) next.depositedBank = val;
     else if (["remark", "note", "ማስታወሻ"].includes(key)) next.remark = val;
   }
   return computeReceipt(next);
@@ -1054,9 +1219,10 @@ function eatDayStartDate(): Date {
 
 async function todaysSalesReceipts(reportedBy: string): Promise<SalesReceiptRow[]> {
   const rows = await sql`
-    select date, customer_name as "customerName", product_ty as "productTy",
-           qty, unit_price as "unitPrice", sub_total as "subTotal", vat, grand_total as "grandTotal",
-           withhold, net_pay as "netPay", remark
+    select date, customer_name as "customerName", fs_no as "fsNo", att_no as "attNo",
+           product_ty as "productTy", qty, unit_price as "unitPrice", sub_total as "subTotal",
+           vat, grand_total as "grandTotal", withhold, net_pay as "netPay",
+           deposited_bank as "depositedBank", remark
       from sales_receipts
      where reported_by = ${reportedBy} and created_at >= ${eatDayStartDate()}
      order by created_at asc`;
@@ -1077,6 +1243,20 @@ export async function POST(req: NextRequest) {
   }
 
   const update = await req.json().catch(() => null);
+
+  /* ── Idempotency: never run the same update twice ──
+     A redelivery (Telegram retrying after a timeout) is acknowledged and
+     dropped here, before it can re-enter a slow branch and be killed again. */
+  const updateId = Number(update?.update_id);
+  if (Number.isFinite(updateId)) {
+    const dedupeChatId = String(
+      update?.message?.chat?.id || update?.callback_query?.message?.chat?.id || update?.callback_query?.from?.id || ""
+    );
+    if (!(await claimUpdate(updateId, dedupeChatId))) {
+      console.warn(`telegram update ${updateId} already handled — skipping redelivery`);
+      return NextResponse.json({ ok: true, deduped: true });
+    }
+  }
 
   /* ── Inline-button callbacks (purchase decisions, owner only) ── */
   const cb = update?.callback_query;
@@ -1357,7 +1537,7 @@ export async function POST(req: NextRequest) {
       } else if (step === "product_qty") {
         const { product, qty } = parseProductQty(val);
         if (!product || qty <= 0) {
-          await sendMessage(chatId, '⚠️ ምርቱን እና ብዛቱን በትክክл ይፃፉ (ለምሳሌ፦ ETL-9 / 120)።', { reply_markup: salesEntryKeyboard });
+          await sendMessage(chatId, '⚠️ ምርቱን እና ብዛቱን በትክክል ይፃፉ (ለምሳሌ፦ ETL-9 / 120)።', { reply_markup: salesEntryKeyboard });
           return NextResponse.json({ ok: true });
         }
         rs.draft.productTy = product;
@@ -1398,9 +1578,13 @@ export async function POST(req: NextRequest) {
         images: string[];
         draft?: Partial<SalesReceiptDraft>;
         check?: ReceiptCheck | null;
+        readingSince?: number;
       };
       rs.images = rs.images || [];
-      const guided = rs.mode === "guided";
+      // Matches the approve branch's test exactly. These used to disagree
+      // (`=== "guided"` here, `!== "scan"` there), so a session with no mode
+      // counted as scan in one place and guided in the other.
+      const guided = rs.mode !== "scan";
 
       if (hasPhoto(msg)) {
         if (rs.images.length >= 3) {
@@ -1421,14 +1605,18 @@ export async function POST(req: NextRequest) {
         if (!stored) {
           // Telegram-side: getFile/download returned nothing (token, file size, or
           // the message carried no downloadable photo/document).
-          await sendMessage(chatId, "⚠️ ፎቶውን ከቴሌግራም ማውረድ አልተቻለም። እባክዎ ምስሉን እንደ ፎቶ (እንደ ፋይл ሳይሆን) ይላኩ።", {
+          await sendMessage(chatId, "⚠️ ፎቶውን ከቴሌግራም ማውረድ አልተቻለም። እባክዎ ምስሉን እንደ ፎቶ (እንደ ፋይል ሳይሆን) ይላኩ።", {
             reply_markup: receiptCollectKeyboard,
           });
           return NextResponse.json({ ok: true });
         }
-        rs.images = [...rs.images, stored.id];
-        session.receiptScan = rs;
-        await persist(session);
+        // Append in SQL, not by writing the whole session object back. Selecting
+        // several photos at once sends them as separate updates that land on
+        // separate serverless instances; each had loaded the same session and
+        // wrote back an images array of length 1, so all but the last photo were
+        // silently lost and the counter stuck at "1/3".
+        rs.images = await appendReceiptImage(chatId, stored.id);
+        session.receiptScan = { ...rs };
         if (rs.images.length < 3) {
           await sendMessage(chatId, `📷 ${rs.images.length}/3 ተጨምሯል። ተጨማሪ ይላኩ ወይም "${RECEIPT_BTN.done}" ይጫኑ።`, {
             reply_markup: receiptCollectKeyboard,
@@ -1452,6 +1640,10 @@ export async function POST(req: NextRequest) {
       }
 
       let draft: SalesReceiptDraft;
+      // Scan mode gets its verdict free with the extraction — the same Gemini
+      // call returns the stamp and the confidence. Guided mode has nothing read
+      // yet, so its check runs after approval.
+      let scanCheck: ReceiptCheck | null = null;
       if (guided) {
         // Fields already entered — compute the money columns. No AI here: the
         // receipt is verified in the background after approval, so the preview is
@@ -1485,16 +1677,88 @@ export async function POST(req: NextRequest) {
           });
           return NextResponse.json({ ok: true });
         }
+
+        // Leave receipt_collect BEFORE the AI call, not after it. If this
+        // invocation is killed mid-read, Telegram redelivers the update; with
+        // the state still on receipt_collect the redelivery re-entered this
+        // exact branch and started another read — the loop that made the bot
+        // repeat "reading the receipt…" once a minute forever.
+        rs.readingSince = Date.now();
+        session.receiptScan = rs;
+        session.state = "receipt_reading";
+        await persist(session);
+
         await sendMessage(chatId, "⏳ ደረሰኙን በማንበብ ላይ...");
-        draft = await extractSalesReceipt(imgs, text || undefined);
+        const read = await extractSalesReceipt(imgs, text || undefined);
+
+        if (!read.ok) {
+          // Never save an unread receipt as a 0 ETB sale. Hand the session back
+          // to photo collection and say what actually went wrong. The photos are
+          // kept, so a transient failure only costs another tap on "ጨርሻለሁ".
+          rs.readingSince = undefined;
+          session.state = "receipt_collect";
+          session.receiptScan = rs;
+          await persist(session);
+          console.error("extractSalesReceipt failed:", read.error);
+          await sendMessage(
+            chatId,
+            `⚠️ ደረሰኙን ማንበብ አልተቻለም፦ <code>${escapeHtml(read.error.slice(0, 200))}</code>\n\n` +
+              `ድጋሚ ለመሞከር "${RECEIPT_BTN.done}" ይጫኑ፣ ወይም ግልጽ የሆነ ፎቶ ይላኩ።`,
+            { reply_markup: receiptCollectKeyboard }
+          );
+          return NextResponse.json({ ok: true });
+        }
+        draft = read.draft;
+        scanCheck = {
+          checked: true,
+          hasStamp: read.hasStamp,
+          score: read.confidence,
+          flags: [],
+          reasoning: read.notes,
+          extracted: {
+            productTy: draft.productTy,
+            qty: draft.qty,
+            unitPrice: draft.unitPrice,
+            grandTotal: draft.printedGrandTotal ?? draft.grandTotal,
+          },
+          // Nothing to cross-check: in scan mode the extracted values ARE the
+          // entered values.
+          mismatches: [],
+        };
       }
 
+      rs.readingSince = undefined;
       rs.draft = draft;
-      rs.check = null; // authenticity + cross-check run in the background after approval
+      // Guided: verdict comes after approval. Scan: already known, so the
+      // salesperson sees the stamp result on the preview before approving.
+      rs.check = scanCheck;
       session.receiptScan = rs;
       session.state = "receipt_action";
       await persist(session);
-      await sendMessage(chatId, receiptPreview(draft, null), { reply_markup: receiptActionKeyboard });
+      await sendMessage(chatId, receiptPreview(draft, scanCheck), { reply_markup: receiptActionKeyboard });
+      return NextResponse.json({ ok: true });
+    }
+
+    /* ── A read is already in flight for this chat ──
+       Reached when a second message arrives while the AI is still working.
+       Answer and return; never start a second read. */
+    if (session.state === "receipt_reading") {
+      const rs = (session.receiptScan || {}) as { readingSince?: number; images?: string[] };
+      const elapsed = Date.now() - (Number(rs.readingSince) || 0);
+      if (elapsed < READING_STALE_MS) {
+        await sendMessage(chatId, "⏳ ደረሰኙ አሁንም እየተነበበ ነው። እባክዎ ጥቂት ይጠብቁ።");
+        return NextResponse.json({ ok: true });
+      }
+      // Older than any read could legitimately take, so the invocation that
+      // started it died. Recover to photo collection instead of leaving the
+      // salesperson permanently stuck in a state nothing can exit. The already
+      // uploaded photos are kept, so retrying is one tap.
+      session.state = "receipt_collect";
+      session.receiptScan = { ...rs, readingSince: undefined };
+      await persist(session);
+      await sendMessage(chatId, `⚠️ ደረሰኙን ማንበብ አልተጠናቀቀም። ድጋሚ ለመሞከር "${RECEIPT_BTN.done}" ይጫኑ።`, {
+        reply_markup: receiptCollectKeyboard,
+      });
       return NextResponse.json({ ok: true });
     }
 
@@ -1511,7 +1775,11 @@ export async function POST(req: NextRequest) {
         await persist(session);
         await sendMessage(
           chatId,
-          '✏️ የሚስተካከለውን በ"መስክ: እሴት" መልኩ ይላኩ። ምሳሌ፦\ncustomer: Abebe\nproduct: ETL-9\nqty: 120\nunitPrice: 850\nwithholding: 0\nremark: urgent\n(fields: date, customer, product, qty, unitPrice, withholding, remark)',
+          '✏️ የሚስተካከለውን በ"መስክ: እሴት" መልኩ ይላኩ (በአንድ ጊዜ ብዙ መስመር መላክ ይችላሉ)። ምሳሌ፦\n' +
+            "customer: Abebe Trading\nfsNo: 0012345\nattNo: 77\nproduct: ETL-9\nqty: 120\n" +
+            "unitPrice: 850\nwithhold: 0\nbank: CBE\nremark: urgent\n\n" +
+            "(fields: date, customer, fsNo, attNo, product, qty, unitPrice, withhold, bank, remark)\n" +
+            "Sub Total፣ Vat እና Grand Total በራሳቸው ይሰላሉ።",
           { reply_markup: CHANGE_CANCEL_KEYBOARD }
         );
         return NextResponse.json({ ok: true });
@@ -1520,14 +1788,18 @@ export async function POST(req: NextRequest) {
         const d = rs.draft;
         const imagesForCheck = rs.images || [];
         const guided = rs.mode !== "scan";
+        // Saved as 'submitted', not 'processed': approving on the bot IS the act
+        // of filing the report, so the row must show up on the dashboard Sales
+        // tab and in its Excel download straight away.
         const insertReceipt = () => sql<{ id: string }[]>`
-          insert into sales_receipts (date, customer_name, product_ty, qty, unit_price,
-                                      sub_total, vat, grand_total, withhold, net_pay, remark,
+          insert into sales_receipts (date, customer_name, fs_no, att_no, product_ty, qty, unit_price,
+                                      sub_total, vat, grand_total, withhold, net_pay, deposited_bank, remark,
                                       status, reported_by, photo_file_ids)
           values (${parseReportDate(d.date)}, ${d.customerName || null},
+                  ${d.fsNo || null}, ${d.attNo || null},
                   ${d.productTy || null}, ${d.qty}, ${d.unitPrice}, ${d.subTotal}, ${d.vat}, ${d.grandTotal},
-                  ${d.withhold}, ${d.netPay}, ${d.remark || null},
-                  'processed', ${submitterName}, ${imagesForCheck})
+                  ${d.withhold}, ${d.netPay}, ${d.depositedBank || null}, ${d.remark || null},
+                  'submitted', ${submitterName}, ${imagesForCheck})
           returning id
         `;
         let savedId: string | null = null;
@@ -1556,14 +1828,26 @@ export async function POST(req: NextRequest) {
         await persist(session);
         await sendMessage(
           chatId,
-          `✅ ተቀምጧል · Net Payable ${money(d.netPay)} ETB።\n🔎 ደረሰኙ በጀርባ በኩл እየተጣራ ነው — ልዩነት ካለ እናሳውቅዎታለን።\n📊 የዛሬውን ወደ Excel ማውጣት ወይም ወደ ዳሽቦርድ ማስገባት ይችላሉ።`,
+          `✅ ተቀምጧል · Net Pay ${money(d.netPay)} ETB።\n` +
+            `📤 ወደ ዳሽቦርድ ገብቷል — በሽያጭ ሪፖርት ውስጥ ይታያል።\n` +
+            `🔎 ደረሰኙ በጀርባ በኩል እየተጣራ ነው — ልዩነት ካለ እናሳውቅዎታለን።\n` +
+            `📊 የዛሬውን ወደ Excel ማውጣት ይችላሉ።`,
           { reply_markup: receiptNextKeyboard }
         );
         // Background: verify the receipt (stamp + authenticity) and cross-check the
         // entered figures against what the AI reads off the photo. Updates the
         // row's confidence for the dashboard and pings the submitter on a mismatch.
         if (savedId) {
-          await backgroundReceiptCheck({ chatId, receiptId: savedId, images: imagesForCheck, entered: d, guided });
+          await backgroundReceiptCheck({
+            chatId,
+            receiptId: savedId,
+            images: imagesForCheck,
+            entered: d,
+            guided,
+            // Scan mode already has its verdict from the read — reuse it instead
+            // of paying for a second Gemini call on the same photo.
+            preCheck: guided ? null : rs.check ?? null,
+          });
         }
         return NextResponse.json({ ok: true });
       }
@@ -1591,7 +1875,11 @@ export async function POST(req: NextRequest) {
                 productTy: ex.productTy,
                 qty: ex.qty,
                 unitPrice: ex.unitPrice,
+                // compareReceipt reads the PRINTED total, so the stored
+                // extraction has to land there — leaving it on grandTotal alone
+                // made this comparison silently do nothing.
                 grandTotal: ex.grandTotal,
+                printedGrandTotal: ex.grandTotal,
               })
             : [],
         };
@@ -1624,12 +1912,21 @@ export async function POST(req: NextRequest) {
         await sendMessage(chatId, "ተጨማሪ ማድረግ ይችላሉ።", { reply_markup: receiptNextKeyboard });
         return NextResponse.json({ ok: true });
       }
+      // The button is gone from the keyboard (approving publishes directly), but
+      // the handler stays: chats still showing the old keyboard keep working, and
+      // it publishes any row left in 'processed' by the previous two-step flow.
       if (normText === NORM_RECEIPT.submit) {
         const updated = await sql<{ id: string }[]>`
           update sales_receipts set status = 'submitted', updated_at = now()
-           where reported_by = ${submitterName} and status = 'processed' and created_at >= ${eatDayStartDate()}
+           where reported_by = ${submitterName} and status = 'processed'
           returning id`;
-        await sendMessage(chatId, `📤 ${updated.length} ደረሰኝ ወደ ዳሽቦርድ ገብቷል።`, { reply_markup: receiptNextKeyboard });
+        await sendMessage(
+          chatId,
+          updated.length > 0
+            ? `📤 ${updated.length} ደረሰኝ ወደ ዳሽቦርድ ገብቷል።`
+            : "✅ ሁሉም ሪፖርቶች አስቀድመው ወደ ዳሽቦርድ ገብተዋል።",
+          { reply_markup: receiptNextKeyboard }
+        );
         return NextResponse.json({ ok: true });
       }
       if (normText === NORM_RECEIPT.again) {

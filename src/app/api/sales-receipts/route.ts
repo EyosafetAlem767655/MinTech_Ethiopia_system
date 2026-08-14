@@ -11,9 +11,10 @@ export async function GET() {
   let rows: Record<string, unknown>[];
   try {
     rows = await sql<Record<string, unknown>[]>`
-      select id as _id, date, customer_name as "customerName",
+      select id as _id, date, customer_name as "customerName", fs_no as "fsNo", att_no as "attNo",
              product_ty as "productTy", qty, unit_price as "unitPrice", sub_total as "subTotal",
-             vat, grand_total as "grandTotal", withhold, net_pay as "netPay", remark,
+             vat, grand_total as "grandTotal", withhold, net_pay as "netPay",
+             deposited_bank as "depositedBank", remark,
              receipt_check as "receiptCheck", reported_by as "reportedBy", created_at as "createdAt"
         from sales_receipts
        where status = 'submitted'
@@ -27,9 +28,10 @@ export async function GET() {
     if (code !== "42703") throw e;
     // Optional columns not migrated yet → fall back to the core columns.
     rows = await sql<Record<string, unknown>[]>`
-      select id as _id, date, customer_name as "customerName",
+      select id as _id, date, customer_name as "customerName", fs_no as "fsNo", att_no as "attNo",
              product_ty as "productTy", qty, unit_price as "unitPrice", sub_total as "subTotal",
              vat, grand_total as "grandTotal", withhold, net_pay as "netPay",
+             deposited_bank as "depositedBank",
              reported_by as "reportedBy", created_at as "createdAt"
         from sales_receipts
        where status = 'submitted'
