@@ -1,5 +1,5 @@
-import OpenAI from "openai";
-import { textAI, TEXT_MODEL } from "@/lib/llm";
+import type OpenAI from "openai";
+import { geminiGenerate, type GeminiContent } from "@/lib/llm";
 import {
   damageTripwires,
   getDailySeries,
@@ -15,6 +15,11 @@ import { getLotBalances } from "@/lib/metrics";
 /**
  * Company chatbot with full data access via tool-calling. The model decides
  * which queries to run; every figure it reports comes from a tool result.
+ *
+ * Runs on Gemini. The tool catalogue below is still written in OpenAI's
+ * JSON-Schema shape because that is the readable one and several tools are
+ * shared vocabulary with the rest of the codebase — `toGeminiTools` translates
+ * it at the call site.
  */
 
 const tools: OpenAI.Chat.ChatCompletionTool[] = [
@@ -214,13 +219,52 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<unk
   return { error: "unknown tool" };
 }
 
+/* ────────────────────── OpenAI schema → Gemini schema ─────────────────────── */
+
+/**
+ * Gemini's function declarations use a trimmed OpenAPI dialect: types are
+ * UPPERCASE, and it rejects keywords it does not know — `default` among them,
+ * which several tools above use. Translate rather than hand-maintaining a second
+ * copy of the catalogue that would silently drift from `runTool`.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function toGeminiSchema(node: any): any {
+  if (!node || typeof node !== "object") return node;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const out: Record<string, any> = {};
+  for (const [k, v] of Object.entries(node)) {
+    if (k === "default") continue; // not part of Gemini's dialect
+    if (k === "type" && typeof v === "string") out.type = v.toUpperCase();
+    else if (k === "properties" && v && typeof v === "object") {
+      out.properties = Object.fromEntries(Object.entries(v).map(([pk, pv]) => [pk, toGeminiSchema(pv)]));
+    } else if (k === "items") out.items = toGeminiSchema(v);
+    else out[k] = v;
+  }
+  return out;
+}
+
+function geminiTools() {
+  return [
+    {
+      functionDeclarations: tools.map((t) => {
+        // A parameterless tool must omit `parameters` entirely — an empty
+        // properties object is rejected.
+        const params = toGeminiSchema(t.function.parameters);
+        const hasProps = params?.properties && Object.keys(params.properties).length > 0;
+        return {
+          name: t.function.name,
+          description: t.function.description,
+          ...(hasProps ? { parameters: params } : {}),
+        };
+      }),
+    },
+  ];
+}
+
 export async function companyChat(
   messages: { role: "user" | "assistant"; content: string }[]
 ): Promise<string> {
-  const convo: OpenAI.Chat.ChatCompletionMessageParam[] = [
-    {
-      role: "system",
-      content:
+  const systemPrompt =
         "You are the internal assistant of MinTech Ethiopia, a mining company that crushes stone into sacks. " +
         "You can query live company data with the provided tools — production, sales, collections, receivables, " +
         "bag-lot control, damage claims and purchase requests. " +
@@ -231,70 +275,76 @@ export async function companyChat(
         "ALWAYS fetch data with tools before quoting figures; " +
         "never estimate or invent numbers. Currency is ETB. Today is " +
         new Date().toISOString().slice(0, 10) +
-        ". Be concise, direct, and flag anything that looks like a problem.",
-    },
-    ...messages.slice(-12),
-  ];
+        ". Be concise, direct, and flag anything that looks like a problem.";
 
-  // Nemotron is a reasoning model; leaving "thinking" on makes each call slow
-  // enough that a multi-round tool loop blows the function's time budget. Disable
-  // it for these structured calls.
-  const extra = { chat_template_kwargs: { enable_thinking: false } };
+  // Gemini has no system role: the instructions lead the first user turn.
+  const history = messages.slice(-12);
+  const convo: GeminiContent[] = history.map((m, i) => ({
+    role: m.role === "assistant" ? "model" : "user",
+    parts: [{ text: i === 0 ? `${systemPrompt}\n\n---\n\n${m.content}` : m.content }],
+  }));
+  if (convo.length === 0 || convo[0].role !== "user") {
+    convo.unshift({ role: "user", parts: [{ text: systemPrompt }] });
+  }
 
   // Two tool rounds is enough for these queries and keeps us inside maxDuration.
+  // The chat is not inside the Telegram webhook, so it can afford a longer budget
+  // than the receipt reader's.
+  const CHAT_TIMEOUT_MS = 20000;
+
   for (let round = 0; round < 2; round++) {
-    let msg: OpenAI.Chat.ChatCompletionMessage | undefined;
-    try {
-      const res = await textAI().chat.completions.create({
-        model: TEXT_MODEL,
-        messages: convo,
-        tools,
-        max_tokens: 800,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ...(extra as any),
-      });
-      msg = res.choices[0]?.message;
-    } catch (e) {
-      // The endpoint may not support tool-calling, or it timed out. Don't hang or
-      // fail the whole chat — break out and answer without tools below.
-      console.error("chat tool round failed, falling back to plain answer:", e);
+    const res = await geminiGenerate(convo, {
+      tools: geminiTools(),
+      temperature: 0.2,
+      maxOutputTokens: 900,
+      timeoutMs: CHAT_TIMEOUT_MS,
+    });
+
+    // A transport failure must not hang or blank the chat — break out and try a
+    // plain, tool-free answer below with whatever data was already gathered.
+    if (!res.ok) {
+      console.error("chat tool round failed, falling back to plain answer:", res.error);
       break;
     }
-    if (!msg) break;
-    convo.push(msg);
-
-    if (!msg.tool_calls || msg.tool_calls.length === 0) {
-      return msg.content || "I could not produce an answer.";
+    if (res.calls.length === 0) {
+      if (res.text.trim()) return res.text;
+      break;
     }
-    for (const tc of msg.tool_calls) {
+
+    // Echo the calls back as a model turn, then answer each one. Gemini requires
+    // the functionCall turn to be present before its functionResponse.
+    convo.push({
+      role: "model",
+      parts: res.calls.map((c) => ({ functionCall: { name: c.name, args: c.args } })),
+    });
+
+    const responses = [];
+    for (const call of res.calls) {
       let result: unknown;
       try {
-        result = await runTool(tc.function.name, JSON.parse(tc.function.arguments || "{}"));
+        result = await runTool(call.name, call.args);
       } catch (e) {
         result = { error: String(e) };
       }
-      convo.push({
-        role: "tool",
-        tool_call_id: tc.id,
-        content: JSON.stringify(result).slice(0, 24000),
+      responses.push({
+        functionResponse: {
+          name: call.name,
+          // Truncated: a wide table can otherwise crowd out the question itself.
+          response: { result: JSON.stringify(result).slice(0, 24000) },
+        },
       });
     }
+    convo.push({ role: "user", parts: responses });
   }
 
   // Final pass: keep the full conversation (including any tool results already
   // fetched) so the answer is grounded, and nudge the model to reply in prose.
-  // Errors here shouldn't hang the request — surface a clean message instead.
-  try {
-    const final = await textAI().chat.completions.create({
-      model: TEXT_MODEL,
-      messages: [...convo, { role: "user", content: "Answer my question now using the data above. Do not call any more tools." }],
-      max_tokens: 800,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      ...(extra as any),
-    });
-    return final.choices[0]?.message?.content || "I could not produce an answer.";
-  } catch (e) {
-    console.error("chat final pass failed:", e);
-    return "The assistant is taking too long to respond right now. Please try again in a moment.";
-  }
+  const final = await geminiGenerate(
+    [...convo, { role: "user", parts: [{ text: "Answer my question now using the data above. Do not call any more tools." }] }],
+    { temperature: 0.2, maxOutputTokens: 900, timeoutMs: CHAT_TIMEOUT_MS }
+  );
+  if (final.ok && final.text.trim()) return final.text;
+
+  console.error("chat final pass failed:", final.error);
+  return "The assistant is taking too long to respond right now. Please try again in a moment.";
 }

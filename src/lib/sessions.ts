@@ -24,6 +24,8 @@ export interface Session {
   editState?: any;
   /** Sales receipt-scan flow scratch state (collected image ids + working draft). */
   receiptScan?: any;
+  /** Guided asset-report flow scratch state (kind + step + draft columns). */
+  assetFlow?: any;
   history: { role: "user" | "assistant"; content: string }[];
 }
 
@@ -43,6 +45,7 @@ function rowToSession(r: any): Session {
     draft: r.draft ?? undefined,
     editState: r.edit_state ?? undefined,
     receiptScan: r.receipt_scan ?? undefined,
+    assetFlow: r.asset_flow ?? undefined,
     history: r.history ?? [],
   };
 }
@@ -75,6 +78,7 @@ async function writeSession(s: Session): Promise<void> {
       draft              = ${s.draft ? sql.json(s.draft) : null},
       edit_state         = ${s.editState ? sql.json(s.editState) : null},
       receipt_scan       = ${s.receiptScan ? sql.json(s.receiptScan) : null},
+      asset_flow         = ${s.assetFlow ? sql.json(s.assetFlow) : null},
       history            = ${sql.json(s.history ?? [])}
     where chat_id = ${s.chatId}
   `;
@@ -86,17 +90,18 @@ export async function saveSession(s: Session): Promise<void> {
   try {
     await writeSession(s);
   } catch (e) {
-    // The optional jsonb columns arrive in later migrations — edit_state (0005)
-    // and receipt_scan (0008). If a deployment is running ahead of its migrations,
-    // Postgres raises undefined_column (42703). We MUST NOT silently drop them:
-    // receipt_scan holds the multi-step scratch state for the guided sales flow
-    // and the receipt scanner, so dropping it makes those flows reset to the menu
+    // The optional jsonb columns arrive in later migrations — edit_state (0005),
+    // receipt_scan (0008) and asset_flow (0013). If a deployment is running ahead
+    // of its migrations, Postgres raises undefined_column (42703). We MUST NOT
+    // silently drop them: these hold the multi-step scratch state for the guided
+    // sales and asset flows, so dropping one makes that flow reset to the menu
     // between messages. Instead self-heal — add the columns, then persist — so the
     // features work even when the migration hasn't been applied by hand.
     if ((e as { code?: string })?.code !== "42703") throw e;
     if (!_healedSessionCols) {
       await sql`alter table telegram_sessions add column if not exists edit_state jsonb`.catch(() => {});
       await sql`alter table telegram_sessions add column if not exists receipt_scan jsonb`.catch(() => {});
+      await sql`alter table telegram_sessions add column if not exists asset_flow jsonb`.catch(() => {});
       _healedSessionCols = true;
     }
     await writeSession(s);

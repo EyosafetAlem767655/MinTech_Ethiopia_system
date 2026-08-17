@@ -35,6 +35,12 @@ export interface DayNumbers {
   salesReportedEtb: number;
   salesReportedNetEtb: number;
   salesReportsCount: number;
+  /** Asset management: raw material in, finished goods out, open tool requests. */
+  rawMaterialTons: number;
+  rawMaterialLoads: number;
+  deliveredTons: number;
+  deliveryCount: number;
+  openToolRequests: number;
 }
 
 export async function getDayNumbers(start: Date, end: Date): Promise<DayNumbers> {
@@ -100,6 +106,31 @@ export async function getDayNumbers(start: Date, end: Date): Promise<DayNumbers>
     return [{ grand: "0", net: "0", n: "0" }];
   });
 
+  // Asset management, guarded the same way and for the same reason: these three
+  // tables must never be able to take the dashboard and the cron brief down
+  // together. Raw material tonnage sums the jsonb material map.
+  const [a] = await sql<
+    { raw_tons: string; raw_loads: string; delivered: string; deliveries: string; tools: string }[]
+  >`
+    select
+      (select coalesce(sum((e.value)::numeric), 0)
+         from raw_material_receipts r
+         cross join lateral jsonb_each_text(r.materials) as e(key, value)
+        where r.date >= ${start} and r.date < ${end})                          as raw_tons,
+      (select count(*) from raw_material_receipts
+        where date >= ${start} and date < ${end})                              as raw_loads,
+      (select coalesce(sum(qty), 0) from delivery_reports
+        where date >= ${start} and date < ${end})                              as delivered,
+      (select count(*) from delivery_reports
+        where date >= ${start} and date < ${end})                              as deliveries,
+      -- Open requests are a running backlog, not a same-day figure, so this one
+      -- is deliberately not windowed.
+      (select count(*) from purchase_requests where status = 'pending')        as tools
+  `.catch((e) => {
+    if ((e as { code?: string })?.code !== "42P01") console.error("getDayNumbers asset tables failed:", e);
+    return [{ raw_tons: "0", raw_loads: "0", delivered: "0", deliveries: "0", tools: "0" }];
+  });
+
   return {
     date: eatDateLabel(start),
     truckloads: Number(r.truckloads) || 0,
@@ -112,6 +143,11 @@ export async function getDayNumbers(start: Date, end: Date): Promise<DayNumbers>
     salesReportedEtb: Number(s?.grand) || 0,
     salesReportedNetEtb: Number(s?.net) || 0,
     salesReportsCount: Number(s?.n) || 0,
+    rawMaterialTons: Math.round((Number(a?.raw_tons) || 0) * 1000) / 1000,
+    rawMaterialLoads: Number(a?.raw_loads) || 0,
+    deliveredTons: Math.round((Number(a?.delivered) || 0) * 1000) / 1000,
+    deliveryCount: Number(a?.deliveries) || 0,
+    openToolRequests: Number(a?.tools) || 0,
   };
 }
 

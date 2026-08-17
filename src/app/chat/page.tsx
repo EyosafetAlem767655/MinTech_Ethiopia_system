@@ -14,18 +14,37 @@ const SUGGESTIONS = [
   "Compare this month's production to last month",
 ];
 
+interface Quota {
+  limit: number;
+  used: number;
+  remaining: number;
+  resetsAt: string;
+}
+
 export default function ChatPage() {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  const [quota, setQuota] = useState<Quota | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, busy]);
 
+  // Show the allowance up front. Being told "0 left" only after typing out a
+  // question is a worse experience than seeing the budget the whole time.
+  useEffect(() => {
+    fetch("/api/chat")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((q) => q && setQuota(q))
+      .catch(() => {});
+  }, []);
+
+  const exhausted = quota != null && quota.remaining <= 0;
+
   const send = async (text: string) => {
-    if (!text.trim() || busy) return;
+    if (!text.trim() || busy || exhausted) return;
     const next: Msg[] = [...messages, { role: "user", content: text.trim() }];
     setMessages(next);
     setInput("");
@@ -42,6 +61,7 @@ export default function ChatPage() {
         signal: ctrl.signal,
       });
       const json = await res.json();
+      if (json.quota) setQuota(json.quota);
       setMessages([...next, { role: "assistant", content: json.reply || json.error || "No reply." }]);
     } catch (e) {
       const msg =
@@ -62,6 +82,13 @@ export default function ChatPage() {
         <p className="text-clay-100/80 text-xs mt-1">
           Ask anything — it queries live production, sales, money and bag-control data.
         </p>
+        {quota && (
+          <p className="mt-2 text-[11px] font-bold text-clay-100/70">
+            {exhausted
+              ? "No questions left today — resets at midnight (EAT)."
+              : `${quota.remaining} of ${quota.limit} questions left today`}
+          </p>
+        )}
       </header>
 
       <div className="flex-1 px-4 py-4 space-y-3">
@@ -117,11 +144,12 @@ export default function ChatPage() {
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Ask about the company…"
-            className="flex-1 bg-transparent text-sm focus:outline-none"
+            disabled={exhausted}
+            placeholder={exhausted ? "Daily limit reached" : "Ask about the company…"}
+            className="flex-1 bg-transparent text-sm focus:outline-none disabled:opacity-60"
           />
           <button
-            disabled={busy || !input.trim()}
+            disabled={busy || exhausted || !input.trim()}
             className="bg-clay-700 text-white rounded-full w-9 h-9 grid place-items-center text-sm font-bold disabled:opacity-40 transition active:scale-90"
           >
             ↑

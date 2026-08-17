@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { productLabel, orderProducts } from "@/lib/products";
+import { productLabel, orderProducts, DELIVERY_PRODUCTS } from "@/lib/products";
 
-/** Image 4 — finished-goods delivery: Date · Customer · Invoice(cash/credit/qty) · Delivery# · per-product qty. */
+/** Delivery report: Date · Deliver to · Invoice cash/credit · Total qty · Deli · per-product tonnage. */
 
 interface Row {
   _id: string;
@@ -11,6 +11,8 @@ interface Row {
   customer: string;
   invoiceNo: string | null;
   paymentType: "cash" | "credit" | null;
+  invoiceCash: number | null;
+  invoiceCredit: number | null;
   qty: number | null;
   deliveryNo: string | null;
   reportedBy: string;
@@ -32,24 +34,28 @@ export default function DeliveryReportPanel() {
 
   if (!rows) return <div className="card h-40 animate-pulse bg-clay-50" />;
 
-  const cols = orderProducts(Array.from(new Set(rows.flatMap((r) => Object.keys(r.products || {})))));
+  // Every sheet column always shows, plus any legacy code an older row carries.
+  const cols = orderProducts(
+    Array.from(new Set([...DELIVERY_PRODUCTS, ...rows.flatMap((r) => Object.keys(r.products || {}))]))
+  );
+  const sum = (pick: (r: Row) => number) => rows.reduce((a, r) => a + (pick(r) || 0), 0);
 
   return (
     <section className="space-y-3">
-      <h2 className="font-display text-lg font-bold px-1">🚛 Finished-goods delivery</h2>
+      <h2 className="font-display text-lg font-bold px-1">🚛 Delivery report</h2>
       {rows.length === 0 ? (
         <p className="card p-4 text-sm text-stone-400">No delivery reports yet.</p>
       ) : (
         <div className="card overflow-x-auto p-0">
-          <table className="w-full min-w-[640px] text-right text-xs">
+          <table className="w-full min-w-[1100px] text-right text-xs">
             <thead className="bg-clay-50/70 text-[10px] uppercase tracking-wide text-stone-500">
               <tr>
                 <th className="p-2 text-left font-bold">Date</th>
                 <th className="p-2 text-left font-bold">Deliver to</th>
-                <th className="p-2 text-left font-bold">Invoice</th>
-                <th className="p-2 font-bold">Pay</th>
-                <th className="p-2 font-bold">Qty</th>
-                <th className="p-2 text-left font-bold">Deli #</th>
+                <th className="p-2 font-bold">Invoice in cash</th>
+                <th className="p-2 font-bold">Invoice in credit</th>
+                <th className="p-2 font-bold">Total quantity</th>
+                <th className="p-2 text-left font-bold">Deli</th>
                 {cols.map((c) => (
                   <th key={c} className="p-2 font-bold">{productLabel(c)}</th>
                 ))}
@@ -60,28 +66,32 @@ export default function DeliveryReportPanel() {
                 <tr key={r._id} className="border-t border-clay-50">
                   <td className="p-2 text-left font-semibold text-stone-800">{fmtDate(r.date)}</td>
                   <td className="p-2 text-left text-stone-700">{r.customer}</td>
-                  <td className="p-2 text-left text-stone-500">{r.invoiceNo || ""}</td>
-                  <td className="p-2">
-                    {r.paymentType ? (
-                      <span
-                        className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
-                          r.paymentType === "cash" ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-800"
-                        }`}
-                      >
-                        {r.paymentType}
-                      </span>
-                    ) : (
-                      ""
-                    )}
-                  </td>
-                  <td className="p-2 tabular-nums text-stone-700">{num(r.qty)}</td>
-                  <td className="p-2 text-left text-stone-500">{r.deliveryNo || ""}</td>
+                  <td className="p-2 tabular-nums text-stone-700">{num(r.invoiceCash)}</td>
+                  <td className="p-2 tabular-nums text-stone-700">{num(r.invoiceCredit)}</td>
+                  <td className="p-2 tabular-nums font-semibold text-stone-800">{num(r.qty)}</td>
+                  <td className="p-2 text-left text-stone-500">{r.deliveryNo || r.invoiceNo || ""}</td>
                   {cols.map((c) => (
                     <td key={c} className="p-2 tabular-nums text-stone-700">{num(r.products?.[c])}</td>
                   ))}
                 </tr>
               ))}
             </tbody>
+            <tfoot>
+              <tr className="border-t-2 border-clay-200 bg-clay-50/40 font-bold">
+                <td className="p-2 text-left" colSpan={2}>
+                  Total · {rows.length}
+                </td>
+                <td className="p-2 tabular-nums">{num(sum((r) => Number(r.invoiceCash)))}</td>
+                <td className="p-2 tabular-nums">{num(sum((r) => Number(r.invoiceCredit)))}</td>
+                <td className="p-2 tabular-nums text-clay-900">{num(sum((r) => Number(r.qty)))}</td>
+                <td className="p-2" />
+                {cols.map((c) => (
+                  <td key={c} className="p-2 tabular-nums text-clay-900">
+                    {num(sum((r) => Number(r.products?.[c])))}
+                  </td>
+                ))}
+              </tr>
+            </tfoot>
           </table>
         </div>
       )}

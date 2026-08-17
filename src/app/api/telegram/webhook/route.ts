@@ -4,6 +4,7 @@ import { getFileBytes, putFile } from "@/lib/storage";
 import { loadSession, saveSession } from "@/lib/sessions";
 import { latestBrief } from "@/lib/brief";
 import {
+  analyseToolPhoto,
   checkReceiptQRCode,
   classifyIngestion,
   extractReceiptGemini,
@@ -12,6 +13,19 @@ import {
   type GeminiReceipt,
   type IngestionExtraction,
 } from "@/lib/llm";
+import { buildCalendar, parseCalendarCallback, type CalendarSelection } from "@/lib/calendar";
+import {
+  assetPreview,
+  findStep,
+  firstStep,
+  FLOW_TITLE,
+  isSkip as isAssetSkip,
+  nextStep,
+  parseQty,
+  saveAssetReport,
+  type AssetFlowKind,
+  type AssetFlowState,
+} from "@/lib/asset-flows";
 import {
   answerCallbackQuery,
   CHANGE_CANCEL_KEYBOARD,
@@ -1144,6 +1158,97 @@ function parseProductQty(text: string): { product: string; qty: number } {
   return { product, qty };
 }
 
+/* ────────────────────── Guided asset-report flows ──────────────────────────
+ * Raw material intake, finished-goods delivery and tool purchase requests. The
+ * step tables live in src/lib/asset-flows.ts; only the dispatch is here.
+ */
+
+const ASSET_FLOW_BY_CAP: Record<string, AssetFlowKind | undefined> = {
+  raw_material_received: "raw_material",
+  finished_goods_delivery: "delivery",
+  tool_request: "tool_request",
+};
+
+const assetReviewKeyboard = {
+  keyboard: [[{ text: RECEIPT_BTN.approve }], [{ text: NAV_BUTTONS.changeReport }, { text: NAV_BUTTONS.cancel }]],
+  resize_keyboard: true,
+  one_time_keyboard: false,
+};
+
+/**
+ * A tap on the inline calendar. Paging re-renders the grid; picking a day writes
+ * the date and advances the flow.
+ */
+async function handleCalendarCallback(
+  cal: CalendarSelection,
+  callbackId: string,
+  chatId: string,
+  userName: string
+): Promise<void> {
+  if (cal.ignore) {
+    await answerCallbackQuery(callbackId, "");
+    return;
+  }
+
+  const session = await loadSession(chatId, userName);
+  const state = session.assetFlow as AssetFlowState | undefined;
+  if (!state || session.state !== "asset_entry") {
+    await answerCallbackQuery(callbackId, "⌛ ይህ ቀን መቁጠሪያ ጊዜው አልፎበታል።");
+    return;
+  }
+
+  if (cal.month) {
+    await answerCallbackQuery(callbackId, "");
+    await sendMessage(chatId, "📅 ቀኑን ይምረጡ።", {
+      reply_markup: buildCalendar(state.kind, cal.month, String(state.draft.date || "")),
+    });
+    return;
+  }
+
+  state.draft.date = cal.date!;
+  await answerCallbackQuery(callbackId, `📅 ${cal.date}`);
+  await advanceAsset(session, chatId, state);
+}
+
+/** Ask the current step, or show the review card when the flow is finished. */
+async function askAssetStep(chatId: string, state: AssetFlowState): Promise<void> {
+  if (state.step === "review") {
+    await sendMessage(chatId, `${assetPreview(state)}\n✅ ትክክል ከሆነ "${RECEIPT_BTN.approve}" ይጫኑ።`, {
+      reply_markup: assetReviewKeyboard,
+    });
+    return;
+  }
+  const step = findStep(state.kind, state.step);
+  if (!step) return;
+
+  if (step.type === "date") {
+    await sendMessage(chatId, step.prompt, {
+      reply_markup: buildCalendar(state.kind, undefined, String(state.draft.date || "")),
+    });
+    return;
+  }
+  if (step.type === "choice") {
+    await sendMessage(chatId, step.prompt, {
+      reply_markup: {
+        keyboard: [(step.choices || []).map((c) => ({ text: c.label })), [{ text: NAV_BUTTONS.cancel }]],
+        resize_keyboard: true,
+        one_time_keyboard: false,
+      },
+    });
+    return;
+  }
+  const hint = step.skippable ? '\n<i>ከሌለ "-" ይላኩ።</i>' : "";
+  await sendMessage(chatId, step.prompt + hint, { reply_markup: CHANGE_CANCEL_KEYBOARD });
+}
+
+/** Advance past the step just answered and ask the next one. */
+async function advanceAsset(session: any, chatId: string, state: AssetFlowState): Promise<void> {
+  state.step = nextStep(state.kind, state.step, state.draft);
+  session.assetFlow = { ...state };
+  await persist(session);
+  await askAssetStep(chatId, state);
+}
+
 /** Short receipt-verdict line for the preview: legibility score + cross-check. */
 function checkLine(c?: ReceiptCheck | null): string {
   if (!c) return "";
@@ -1266,6 +1371,20 @@ export async function POST(req: NextRequest) {
         await handleEditCallback(data, String(cb.id), chatId, userName);
       } catch (e) {
         console.error("telegram edit callback error:", e);
+        await answerCallbackQuery(String(cb.id), MSG.genericError);
+      }
+      return NextResponse.json({ ok: true });
+    }
+
+    /* Date picker — MUST stay above the owner-only gate below. The asset
+       managers filing these reports are not the CEO, so gating `cal:` would
+       answer every date tap with "no permission". */
+    const cal = parseCalendarCallback(data);
+    if (cal) {
+      try {
+        await handleCalendarCallback(cal, String(cb.id), chatId, userName);
+      } catch (e) {
+        console.error("telegram calendar callback error:", e);
         await answerCallbackQuery(String(cb.id), MSG.genericError);
       }
       return NextResponse.json({ ok: true });
@@ -1408,6 +1527,7 @@ export async function POST(req: NextRequest) {
         session.draft = undefined;
         session.capture = undefined;
         session.receiptScan = undefined;
+        session.assetFlow = undefined;
         session.history = [];
         await persist(session);
         await sendMessage(chatId, `🔐 <b>ለውስጥ ሰራተኛ ብቻ</b>\n\n${MSG.askLoginName}`, { reply_markup: BACK_KEYBOARD });
@@ -1454,6 +1574,7 @@ export async function POST(req: NextRequest) {
       session.draft = undefined;
       session.capture = undefined;
       session.receiptScan = undefined;
+      session.assetFlow = undefined;
       session.history = [];
       // Abandoning a correction must not delete the original submission.
       if (session.editState?.pending) session.editState = { ...session.editState, pending: undefined };
@@ -1510,6 +1631,120 @@ export async function POST(req: NextRequest) {
     }
 
     const submitterName = user.fullName;
+
+    /* ── Guided asset reports: raw material · delivery · tool request ── */
+    if (session.state === "asset_entry" && session.assetFlow) {
+      const state = session.assetFlow as AssetFlowState;
+      state.draft = state.draft || {};
+
+      if (state.step === "review") {
+        if (normText === NORM_RECEIPT.approve) {
+          let saved;
+          try {
+            saved = await saveAssetReport(state, submitterName);
+          } catch (e) {
+            console.error("saveAssetReport failed:", e);
+            await sendMessage(chatId, MSG.genericError, { reply_markup: CHANGE_CANCEL_KEYBOARD });
+            return NextResponse.json({ ok: true });
+          }
+          const title = FLOW_TITLE[state.kind];
+          session.state = "idle";
+          session.assetFlow = undefined;
+          await persist(session);
+          await logActivity({
+            chatId,
+            actor: submitterName,
+            action: "submission",
+            detail: `${state.kind} ${saved.id}`,
+            ok: true,
+          }).catch(() => {});
+          await sendMessage(chatId, `✅ ${title} ተመዝግቧል።\n📤 በዳሽቦርዱ ላይ ይታያል።`);
+          await sendReportMenu(chatId, capabilitiesFor(user.positions).map((c) => c.button));
+          return NextResponse.json({ ok: true });
+        }
+        await askAssetStep(chatId, state);
+        return NextResponse.json({ ok: true });
+      }
+
+      const step = findStep(state.kind, state.step);
+      if (!step) {
+        // Scratch state referencing a step that no longer exists (a deploy landed
+        // mid-flow). Restart rather than trapping the user in a dead state.
+        session.state = "idle";
+        session.assetFlow = undefined;
+        await persist(session);
+        await sendMessage(chatId, "⚠️ ሪፖርቱ ተቋርጧል። እባክዎ ድጋሚ ይጀምሩ።");
+        await sendReportMenu(chatId, capabilitiesFor(user.positions).map((c) => c.button));
+        return NextResponse.json({ ok: true });
+      }
+
+      if (step.type === "photo") {
+        if (!hasPhoto(msg)) {
+          await sendMessage(chatId, "📷 እባክዎ የዕቃውን ፎቶ ይላኩ።", { reply_markup: CHANGE_CANCEL_KEYBOARD });
+          return NextResponse.json({ ok: true });
+        }
+        const stored = await storeIncomingPhoto(msg);
+        if (!stored) {
+          await sendMessage(chatId, "⚠️ ፎቶውን ማውረድ አልተቻለም። እባክዎ ድጋሚ ይሞክሩ።", { reply_markup: CHANGE_CANCEL_KEYBOARD });
+          return NextResponse.json({ ok: true });
+        }
+        state.photoFileId = stored.id;
+
+        // Bounded by RECEIPT_BUDGET_MS inside analyseToolPhoto, so it cannot run
+        // past the function limit and leave the update unacknowledged.
+        const bytes = await getPhotoBase64(stored.id).catch(() => null);
+        state.check = bytes
+          ? await analyseToolPhoto(bytes, String(state.draft.title || ""), Number(state.draft.quantity) || undefined)
+          : { checked: false, plausible: false, confidence: 0, observations: "photo could not be read back" };
+
+        await advanceAsset(session, chatId, state);
+        return NextResponse.json({ ok: true });
+      }
+
+      const val = text.trim();
+      if (!val) {
+        await askAssetStep(chatId, state);
+        return NextResponse.json({ ok: true });
+      }
+
+      if (step.type === "date") {
+        // The calendar answers via callback_query; typing a date is the fallback.
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(val)) {
+          await sendMessage(chatId, "📅 እባክዎ ከቀን መቁጠሪያው ይምረጡ ወይም እንደ 2026-08-17 ይፃፉ።", {
+            reply_markup: buildCalendar(state.kind),
+          });
+          return NextResponse.json({ ok: true });
+        }
+        state.draft.date = val;
+      } else if (step.type === "choice") {
+        const match = step.choices?.find((c) => normaliseChoice(c.label) === normText);
+        if (!match) {
+          await sendMessage(chatId, step.prompt, {
+            reply_markup: {
+              keyboard: [(step.choices || []).map((c) => ({ text: c.label })), [{ text: NAV_BUTTONS.cancel }]],
+              resize_keyboard: true,
+              one_time_keyboard: false,
+            },
+          });
+          return NextResponse.json({ ok: true });
+        }
+        state.draft[step.id] = match.value;
+      } else if (step.type === "number") {
+        const n = parseQty(val);
+        // Re-ask rather than defaulting to 0: a silent zero where 40 tonnes
+        // belonged is a far worse outcome than one extra question.
+        if (n === null) {
+          await sendMessage(chatId, "⚠️ ቁጥር ብቻ ይፃፉ (ለምሳሌ፦ 12.5)። ከሌለ 0 ይፃፉ።", { reply_markup: CHANGE_CANCEL_KEYBOARD });
+          return NextResponse.json({ ok: true });
+        }
+        state.draft[step.id] = n;
+      } else {
+        state.draft[step.id] = isAssetSkip(val) ? "" : val;
+      }
+
+      await advanceAsset(session, chatId, state);
+      return NextResponse.json({ ok: true });
+    }
 
     /* ── Guided sales report: one field at a time, then attach receipts ── */
     if (session.state === "sales_entry" && session.receiptScan?.mode === "guided") {
@@ -2040,6 +2275,24 @@ export async function POST(req: NextRequest) {
         await persist(session);
         await sendMessage(chatId, `<b>${cap.button}</b>\n\n${cap.question}`, { reply_markup: receiptCollectKeyboard });
         return NextResponse.json({ ok: true });
+      }
+
+      if (cap.captureMode === "asset_entry") {
+        const kind = ASSET_FLOW_BY_CAP[cap.key];
+        if (kind) {
+          const state: AssetFlowState = { kind, step: firstStep(kind), draft: {} };
+          session.state = "asset_entry";
+          session.draft = undefined;
+          session.capture = undefined;
+          session.history = [];
+          session.assetFlow = state;
+          await persist(session);
+          await sendMessage(chatId, `<b>${cap.button}</b>\n\n${cap.question}`, {
+            reply_markup: CHANGE_CANCEL_KEYBOARD,
+          });
+          await askAssetStep(chatId, state);
+          return NextResponse.json({ ok: true });
+        }
       }
 
       await startLlmReport(session, chatId, cap);

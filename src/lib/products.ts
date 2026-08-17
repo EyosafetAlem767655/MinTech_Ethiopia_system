@@ -12,6 +12,7 @@ export const PRODUCT_LABEL: Record<string, string> = {
   ETL6: "ETL-6",
   "5EL": "5-EL",
   "3EL": "3-EL",
+  W2EL: "W2-EL",
   "2EL": "2-EL",
   "1EL": "1-EL",
   EC15: "EC-15",
@@ -19,8 +20,26 @@ export const PRODUCT_LABEL: Record<string, string> = {
   Talk: "Talc",
 };
 
-/** Preferred column order for grids/tables (matches the company report layout). */
-export const PRODUCT_ORDER = ["ETL15", "ETL9", "ETL6", "5EL", "3EL", "1EL", "2EL", "Talk", "EC15", "EC90"];
+/**
+ * Preferred column order for grids/tables (matches the company report layout).
+ *
+ * 1EL keeps its label above but is deliberately absent here: it is not on the
+ * current delivery sheet, so it sorts after the canonical columns via
+ * orderProducts' alphabetical tail rather than holding a slot the company no
+ * longer uses. Historic rows carrying it still render.
+ */
+export const PRODUCT_ORDER = ["ETL15", "ETL9", "ETL6", "5EL", "3EL", "W2EL", "2EL", "Talk", "EC15", "EC90"];
+
+/** The delivery report's product columns, in sheet order. */
+export const DELIVERY_PRODUCTS = PRODUCT_ORDER;
+
+/**
+ * The raw-material intake columns, in sheet order.
+ *
+ * Lives here rather than in asset-flows.ts so the dashboard panels can import it
+ * without dragging the Postgres client into the browser bundle.
+ */
+export const RAW_MATERIALS = ["Talc", "Kuni", "Chips", "Guji", "Lime Stone"] as const;
 
 /**
  * Product colours — a palette validated as a set (lightness band, chroma floor,
@@ -38,6 +57,7 @@ export const PRODUCT_COLOR: Record<string, string> = {
   ETL15: "#eb6834", // orange
   ETL6: "#4a3aa7", // violet
   ETL9: "#e34948", // red
+  W2EL: "#00868b", // teal — sits between the blue (2EL) and aqua (EC90) bands
   Talk: "#6b6a66", // neutral — stock-only, always directly labelled
 };
 

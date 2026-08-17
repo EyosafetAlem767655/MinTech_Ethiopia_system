@@ -27,7 +27,8 @@ export type CapabilityKey =
   | "finished_goods_delivery"
   | "purchase_items"
   | "sales_receipt_scan"
-  | "sales_report_entry";
+  | "sales_report_entry"
+  | "tool_request";
 
 /** How the bot collects a capability's payload. */
 export type CaptureMode =
@@ -40,7 +41,9 @@ export type CaptureMode =
   /** Scan receipt photo(s) → OCR + Qwen → preview/edit → Excel (sales). */
   | "receipt_scan"
   /** Guided field-by-field sales report entry (+ attached receipts) → Excel. */
-  | "sales_entry";
+  | "sales_entry"
+  /** Guided column-by-column asset report (raw material / delivery / tool request). */
+  | "asset_entry";
 
 export interface Capability {
   key: CapabilityKey;
@@ -154,20 +157,23 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
   raw_material_received: {
     key: "raw_material_received",
     button: "🚚 የጥሬ ዕቃ ገቢ ሪፖርት",
-    captureMode: "llm",
-    docType: "raw_material_received",
+    captureMode: "asset_entry",
     input: "any",
-    question:
-      "🚚 የገባውን ጥሬ ዕቃ ይላኩ — ጽሑፍ፣ ፎቶ ወይም Excel። አቅራቢ፣ የመላኪያ ደረሰኝ (DN) ቁጥር፣ የመኪና ሰሌዳ፣ MRV ቁጥር እና የዕቃ ዓይነትና ብዛት ያካትቱ።",
+    question: "🚚 የጥሬ ዕቃ ገቢ ሪፖርት በደረጃ እናስገባለን።",
   },
   finished_goods_delivery: {
     key: "finished_goods_delivery",
-    button: "🚛 የሽያጭ ማድረሻ ሪፖርት",
-    captureMode: "llm",
-    docType: "finished_goods_delivery",
+    button: "🚛 የማድረሻ ሪፖርት",
+    captureMode: "asset_entry",
     input: "any",
-    question:
-      "🚛 የተላከውን/የተሸጠውን ምርት ይላኩ — ጽሑፍ፣ ፎቶ ወይም Excel። ደንበኛ፣ የደረሰኝ ቁጥር፣ ጥሬ ገንዘብ ወይም ብድር፣ የማድረሻ ቁጥር እና የእያንዳንዱን ምርት ብዛት ያካትቱ።",
+    question: "🚛 የማድረሻ ሪፖርት በደረጃ እናስገባለን።",
+  },
+  tool_request: {
+    key: "tool_request",
+    button: "🔧 የመሣሪያ ግዢ ጥያቄ",
+    captureMode: "asset_entry",
+    input: "any",
+    question: "🔧 የመሣሪያ ግዢ ጥያቄ በደረጃ እናስገባለን።",
   },
   purchase_items: {
     key: "purchase_items",
@@ -297,8 +303,14 @@ export const POSITIONS: Record<PositionKey, Position> = {
     department: "asset_management",
     en: "Raw materials weight report",
     am: "የጥሬ ዕቃ ክብደት ሪፖርት",
-    description: "Reports the weight of imported raw materials every day.",
-    capabilities: ["daily_report", "materials", "raw_material_received", "stock_status"],
+    description: "Reports raw materials received and finished goods delivered, every day.",
+    capabilities: [
+      "daily_report",
+      "materials",
+      "raw_material_received",
+      "finished_goods_delivery",
+      "stock_status",
+    ],
     dailyRequired: true,
   },
   asset_purchase: {
@@ -307,7 +319,7 @@ export const POSITIONS: Record<PositionKey, Position> = {
     en: "Tool purchase request",
     am: "የመሣሪያ ግዢ ጥያቄ",
     description: "Raises tool and equipment purchase requests when needed (not daily).",
-    capabilities: ["purchase", "purchase_items"],
+    capabilities: ["tool_request", "purchase_items"],
     dailyRequired: false,
   },
   sales_daily: {

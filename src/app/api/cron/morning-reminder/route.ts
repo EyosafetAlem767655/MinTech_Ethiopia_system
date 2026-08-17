@@ -87,11 +87,46 @@ export async function GET(req: NextRequest) {
   `;
   const pendingPurchases = Number(prCount) || 0;
 
+  // The open tool requests themselves, not just a count: HR and Admin are the
+  // people who act on them, and a bare number tells them nothing about what is
+  // being asked for or whether the AI found the damage photo convincing.
+  const openTools = await sql<
+    { title: string; quantity: string | null; kind: string | null; legitimacy: Record<string, unknown> | null }[]
+  >`
+    select title, quantity, kind, legitimacy
+      from purchase_requests
+     where status = 'pending'
+     order by created_at desc
+     limit 10
+  `.catch(() => []);
+
+  const toolLines = openTools
+    .map((t) => {
+      const qty = t.quantity ? ` ×${Number(t.quantity)}` : "";
+      const kind = t.kind === "maintenance" ? "🛠" : t.kind === "new_item" ? "🆕" : "•";
+      const c = t.legitimacy as { checked?: boolean; plausible?: boolean; confidence?: number } | null;
+      // Only maintenance requests carry a photo verdict, and an unrun check is
+      // reported as such rather than as a low score.
+      const ai =
+        t.kind === "maintenance" && c
+          ? c.checked
+            ? ` · AI ${c.plausible ? "✅" : "⚠️"} ${c.confidence ?? 0}%`
+            : " · AI ⏳"
+          : "";
+      return `  ${kind} ${t.title}${qty}${ai}`;
+    })
+    .join("\n");
+
+  const toolBlock = toolLines
+    ? `\n\n🔧 <b>የመሣሪያ ጥያቄዎች</b>\n${toolLines}`
+    : "";
+
   const hrText =
     `👥 <b>የቀኑ የሪፖርት ማጠቃለያ</b> · ${today}\n\n` +
     `✅ ያስገቡ (${submitted.length}/${dailyEmployees.length}):\n${nameList(submitted)}\n\n` +
     `❌ ያላስገቡ (${missing.length}):\n${nameList(missing)}\n\n` +
-    `🛒 በመጠባበቅ ላይ ያሉ የግዢ ጥያቄዎች: <b>${pendingPurchases}</b>`;
+    `🛒 በመጠባበቅ ላይ ያሉ የግዢ ጥያቄዎች: <b>${pendingPurchases}</b>` +
+    toolBlock;
 
   const hrUsers = employees.filter((u) => hasPosition(u.positions, "hr"));
   await Promise.all(hrUsers.map((u) => sendMessage(String(u.chat_id), hrText).catch(() => {})));
@@ -107,7 +142,8 @@ export async function GET(req: NextRequest) {
     `${deptLines}\n\n` +
     `✅ ሪፖርት ያስገቡ: <b>${submitted.length}/${dailyEmployees.length}</b>\n` +
     (missing.length ? `❌ ያላስገቡ:\n${nameList(missing)}` : `🎉 ሁሉም ሪፖርት አስገብተዋል!`) +
-    `\n🛒 የግዢ ጥያቄዎች: <b>${pendingPurchases}</b>`;
+    `\n🛒 የግዢ ጥያቄዎች: <b>${pendingPurchases}</b>` +
+    toolBlock;
 
   const adminUsers = employees.filter((u) => hasPosition(u.positions, "admin"));
   await Promise.all(adminUsers.map((u) => sendMessage(String(u.chat_id), adminText).catch(() => {})));

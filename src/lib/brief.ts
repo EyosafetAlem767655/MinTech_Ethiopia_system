@@ -40,14 +40,25 @@ export async function assembleAndSendBrief(now = new Date()) {
     `🛡 ${numbers.damagedClaimed} ከረጢቶች ጉዳት ተጠይቋል · ${numbers.damagedVerified} ተረጋግጧል`,
   ];
 
-  // The sales team's own reports. Only shown when there are any, so the brief
-  // doesn't carry a permanent "0 reports" line on days sales doesn't file.
+  // Department lines are appended only when there is something to say, so the
+  // brief never carries permanent "0" lines on days a team doesn't file.
   if (numbers.salesReportsCount > 0) {
     fiveLines.push(
       `🧾 ${numbers.salesReportsCount} የሽያጭ ሪፖርት · ${etb(numbers.salesReportedEtb)} ብር ጠቅላላ · ${etb(
         numbers.salesReportedNetEtb
       )} ብር ተጣራ`
     );
+  }
+  if (numbers.rawMaterialLoads > 0) {
+    fiveLines.push(
+      `🚚 ${numbers.rawMaterialTons.toFixed(2)} ቶን ጥሬ ዕቃ ገብቷል · ${numbers.rawMaterialLoads} ጭነት`
+    );
+  }
+  if (numbers.deliveryCount > 0) {
+    fiveLines.push(`🚛 ${numbers.deliveredTons.toFixed(2)} ቶን ተላልፏል · ${numbers.deliveryCount} ማድረሻ`);
+  }
+  if (numbers.openToolRequests > 0) {
+    fiveLines.push(`🔧 ${numbers.openToolRequests} የመሣሪያ ግዢ ጥያቄ ውሳኔ ይጠብቃል`);
   }
 
   const totalOverdue = aging.overdueClients.reduce((a, c) => a + c.outstanding, 0);
@@ -62,6 +73,13 @@ export async function assembleAndSendBrief(now = new Date()) {
       count: numbers.salesReportsCount,
       grand_total_etb: Math.round(numbers.salesReportedEtb),
       net_payable_etb: Math.round(numbers.salesReportedNetEtb),
+    },
+    asset_management: {
+      raw_material_tons: numbers.rawMaterialTons,
+      raw_material_loads: numbers.rawMaterialLoads,
+      delivered_tons: numbers.deliveredTons,
+      deliveries: numbers.deliveryCount,
+      open_tool_requests: numbers.openToolRequests,
     },
   });
 

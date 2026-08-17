@@ -143,6 +143,11 @@ export function clearAuth(session: any) {
   session.state = "idle";
   session.draft = undefined;
   session.capture = undefined;
+  // Multi-step scratch state must go too. Resetting `state` alone already stops
+  // a flow resuming, but leaving these behind strands the previous user's
+  // half-typed report in the session row of a shared phone.
+  session.receiptScan = undefined;
+  session.assetFlow = undefined;
   session.loginName = undefined;
   session.history = [];
 }

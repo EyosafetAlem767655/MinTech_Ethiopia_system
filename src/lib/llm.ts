@@ -279,22 +279,53 @@ export type ReceiptReadResult =
  *
  * Bounded by RECEIPT_BUDGET_MS because it runs inside the Telegram webhook.
  */
-export async function extractReceiptGemini(
-  images: { base64: string; contentType: string }[],
-  caption?: string
-): Promise<ReceiptReadResult> {
-  const key = envValue("GEMINI_API_KEY");
-  if (!key) return { ok: false, error: "GEMINI_API_KEY is not set" };
-  if (images.length === 0) return { ok: false, error: "no images to read" };
+/* ─────────────────────── Shared Gemini REST transport ──────────────────────── */
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type GeminiPart = Record<string, any>;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type GeminiContent = { role: "user" | "model"; parts: GeminiPart[] };
+
+export interface GeminiCallResult {
+  ok: boolean;
+  /** Concatenated text parts of the first candidate. */
+  text: string;
+  /** Function calls the model asked for, when tools were supplied. */
+  calls: { name: string; args: Record<string, unknown> }[];
+  error?: string;
+}
+
+/**
+ * One place that knows how to talk to Gemini's native generateContent API.
+ *
+ * Everything Gemini-backed goes through here — receipt reading, the damaged-tool
+ * check and the dashboard chat — so the auth header, the timeout discipline and
+ * the "404 means wrong model for this key" diagnosis exist exactly once.
+ */
+export async function geminiGenerate(
+  contents: GeminiContent[],
+  opts: {
+    json?: boolean;
+    temperature?: number;
+    timeoutMs?: number;
+    maxOutputTokens?: number;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tools?: any[];
+  } = {}
+): Promise<GeminiCallResult> {
+  const key = envValue("GEMINI_API_KEY");
+  if (!key) return { ok: false, text: "", calls: [], error: "GEMINI_API_KEY is not set" };
+
+  const budget = opts.timeoutMs ?? RECEIPT_BUDGET_MS;
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), RECEIPT_BUDGET_MS);
+  const timer = setTimeout(() => ctrl.abort(), budget);
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const parts: any[] = images.slice(0, 3).map((img) => ({
-      inline_data: { mime_type: img.contentType || "image/jpeg", data: img.base64 },
-    }));
-    parts.push({ text: GEMINI_RECEIPT_SYSTEM + (caption ? `\nNote: ${caption}` : "") });
+    const generationConfig: Record<string, any> = { temperature: opts.temperature ?? 0 };
+    // responseMimeType and tools are mutually exclusive in the API: asking for
+    // forced JSON disables function calling entirely.
+    if (opts.json && !opts.tools) generationConfig.responseMimeType = "application/json";
+    if (opts.maxOutputTokens) generationConfig.maxOutputTokens = opts.maxOutputTokens;
 
     const res = await fetch(`${GEMINI_BASE}/models/${GEMINI_MODEL}:generateContent`, {
       method: "POST",
@@ -302,8 +333,9 @@ export async function extractReceiptGemini(
       // every proxy and access log between here and Google.
       headers: { "Content-Type": "application/json", "x-goog-api-key": key },
       body: JSON.stringify({
-        contents: [{ role: "user", parts }],
-        generationConfig: { responseMimeType: "application/json", temperature: 0 },
+        contents,
+        generationConfig,
+        ...(opts.tools ? { tools: opts.tools } : {}),
       }),
       signal: ctrl.signal,
     });
@@ -313,15 +345,55 @@ export async function extractReceiptGemini(
       // 404 here almost always means GEMINI_MODEL is wrong for this key, which
       // is worth saying out loud rather than leaving as a bare status code.
       const hint = res.status === 404 ? ` (model "${GEMINI_MODEL}" not available for this key)` : "";
-      return { ok: false, error: `Gemini HTTP ${res.status}${hint}` };
+      return { ok: false, text: "", calls: [], error: `Gemini HTTP ${res.status}${hint}` };
     }
     const data = (await res.json()) as {
-      candidates?: { content?: { parts?: { text?: string }[] } }[];
+      candidates?: {
+        content?: { parts?: { text?: string; functionCall?: { name?: string; args?: unknown } }[] };
+      }[];
     };
-    const text = (data.candidates?.[0]?.content?.parts || []).map((pt) => pt.text || "").join("");
-    if (!text.trim()) return { ok: false, error: "Gemini returned an empty response" };
+    const parts = data.candidates?.[0]?.content?.parts || [];
+    return {
+      ok: true,
+      text: parts.map((pt) => pt.text || "").join(""),
+      calls: parts
+        .filter((pt) => pt.functionCall?.name)
+        .map((pt) => ({
+          name: String(pt.functionCall!.name),
+          args: (pt.functionCall!.args as Record<string, unknown>) || {},
+        })),
+    };
+  } catch (e) {
+    const aborted = e instanceof Error && e.name === "AbortError";
+    console.error("geminiGenerate failed:", e);
+    return {
+      ok: false,
+      text: "",
+      calls: [],
+      error: aborted ? `Gemini timed out after ${budget}ms` : e instanceof Error ? e.message : String(e),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
-    const p = extractJson(text);
+export async function extractReceiptGemini(
+  images: { base64: string; contentType: string }[],
+  caption?: string
+): Promise<ReceiptReadResult> {
+  if (images.length === 0) return { ok: false, error: "no images to read" };
+
+  const parts: GeminiPart[] = images.slice(0, 3).map((img) => ({
+    inline_data: { mime_type: img.contentType || "image/jpeg", data: img.base64 },
+  }));
+  parts.push({ text: GEMINI_RECEIPT_SYSTEM + (caption ? `\nNote: ${caption}` : "") });
+
+  const res = await geminiGenerate([{ role: "user", parts }], { json: true });
+  if (!res.ok) return { ok: false, error: res.error || "Gemini call failed" };
+  if (!res.text.trim()) return { ok: false, error: "Gemini returned an empty response" };
+
+  try {
+    const p = extractJson(res.text);
     return {
       ok: true,
       data: {
@@ -343,14 +415,76 @@ export async function extractReceiptGemini(
       },
     };
   } catch (e) {
-    const aborted = e instanceof Error && e.name === "AbortError";
-    console.error("extractReceiptGemini failed:", e);
+    // Transport failures are already handled above; reaching here means the
+    // model returned something that is not the JSON we asked for.
+    console.error("extractReceiptGemini could not parse the response:", e);
+    return { ok: false, error: "Gemini returned an unreadable response" };
+  }
+}
+
+/* ──────────────────── Damaged-tool photo check (Gemini) ─────────────────────
+ * Backs the maintenance branch of a tool purchase request: does the photo
+ * actually show the damage being claimed?
+ */
+
+export interface ToolPhotoCheck {
+  /** False means the check did not run — NOT that the photo is suspect. */
+  checked: boolean;
+  plausible: boolean;
+  confidence: number; // 0-100
+  observations: string;
+}
+
+export async function analyseToolPhoto(
+  image: { base64: string; contentType: string },
+  toolName: string,
+  quantity?: number
+): Promise<ToolPhotoCheck> {
+  const prompt =
+    "You are checking a maintenance request at an Ethiopian stone-crushing plant. " +
+    `The employee says this photo shows a damaged/worn item: "${toolName}"` +
+    (quantity ? ` (quantity ${quantity})` : "") +
+    ".\nReturn STRICT JSON only: " +
+    '{ "plausible": boolean (does the photo genuinely show the stated item, and does it show real ' +
+    'damage or wear?), "confidence": number (0-100, how sure you are), ' +
+    '"observations": string (one or two short sentences describing what you actually see — the visible ' +
+    "damage, or why the photo does not support the claim) }.\n" +
+    "Judge only what is visible. A clear photo of an undamaged item is plausible:false. A photo too " +
+    "blurred or dark to tell should get a LOW confidence rather than a false accusation.";
+
+  const res = await geminiGenerate(
+    [
+      {
+        role: "user",
+        parts: [
+          { inline_data: { mime_type: image.contentType || "image/jpeg", data: image.base64 } },
+          { text: prompt },
+        ],
+      },
+    ],
+    { json: true }
+  );
+
+  // A failed call must never read as "the photo is fake". Same distinction the
+  // receipt check makes: not-checked is its own outcome.
+  if (!res.ok || !res.text.trim()) {
     return {
-      ok: false,
-      error: aborted ? `Gemini timed out after ${RECEIPT_BUDGET_MS}ms` : e instanceof Error ? e.message : String(e),
+      checked: false,
+      plausible: false,
+      confidence: 0,
+      observations: res.error || "the photo check did not run",
     };
-  } finally {
-    clearTimeout(timer);
+  }
+  try {
+    const p = extractJson(res.text);
+    return {
+      checked: true,
+      plausible: !!p.plausible,
+      confidence: Math.max(0, Math.min(100, Math.round(Number(p.confidence) || 0))),
+      observations: String(p.observations || ""),
+    };
+  } catch {
+    return { checked: false, plausible: false, confidence: 0, observations: "unreadable AI response" };
   }
 }
 

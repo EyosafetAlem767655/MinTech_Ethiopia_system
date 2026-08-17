@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { RAW_MATERIALS } from "@/lib/products";
 
-/** Image 3 — raw material received: Date · Supplier · DN · Truck · MRV · material qty columns. */
+/** Raw material received: Date · Supplier · Sup.Dn.No. · Truck · M.R.V · material tonnages. */
 
 interface Row {
   _id: string;
@@ -30,7 +31,15 @@ export default function RawMaterialReceivedPanel() {
 
   if (!rows) return <div className="card h-40 animate-pulse bg-clay-50" />;
 
-  const cols = Array.from(new Set(rows.flatMap((r) => Object.keys(r.materials || {})))).sort();
+  // Fixed columns from the company's sheet, not whatever keys happen to be in
+  // the data: a material nobody reported today must still hold its column, or
+  // the table silently changes shape from one day to the next. Any unexpected
+  // key from an older row is appended so nothing is hidden.
+  const extra = Array.from(new Set(rows.flatMap((r) => Object.keys(r.materials || {}))))
+    .filter((k) => !RAW_MATERIALS.includes(k as (typeof RAW_MATERIALS)[number]))
+    .sort();
+  const cols = [...RAW_MATERIALS, ...extra];
+  const total = (c: string) => rows.reduce((a, r) => a + (Number(r.materials?.[c]) || 0), 0);
 
   return (
     <section className="space-y-3">
@@ -39,14 +48,14 @@ export default function RawMaterialReceivedPanel() {
         <p className="card p-4 text-sm text-stone-400">No raw-material receipts yet.</p>
       ) : (
         <div className="card overflow-x-auto p-0">
-          <table className="w-full min-w-[640px] text-right text-xs">
+          <table className="w-full min-w-[760px] text-right text-xs">
             <thead className="bg-clay-50/70 text-[10px] uppercase tracking-wide text-stone-500">
               <tr>
                 <th className="p-2 text-left font-bold">Date</th>
                 <th className="p-2 text-left font-bold">Supplier</th>
-                <th className="p-2 text-left font-bold">DN No</th>
-                <th className="p-2 text-left font-bold">Truck</th>
-                <th className="p-2 text-left font-bold">MRV</th>
+                <th className="p-2 text-left font-bold">Sup.Dn.No.</th>
+                <th className="p-2 text-left font-bold">Truck Plate No.</th>
+                <th className="p-2 text-left font-bold">M.R.V</th>
                 {cols.map((c) => (
                   <th key={c} className="p-2 font-bold">{c}</th>
                 ))}
@@ -66,6 +75,16 @@ export default function RawMaterialReceivedPanel() {
                 </tr>
               ))}
             </tbody>
+            <tfoot>
+              <tr className="border-t-2 border-clay-200 bg-clay-50/40 font-bold">
+                <td className="p-2 text-left" colSpan={5}>
+                  Total · {rows.length}
+                </td>
+                {cols.map((c) => (
+                  <td key={c} className="p-2 tabular-nums text-clay-900">{num(total(c))}</td>
+                ))}
+              </tr>
+            </tfoot>
           </table>
         </div>
       )}
