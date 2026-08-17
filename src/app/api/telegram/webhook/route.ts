@@ -455,8 +455,8 @@ async function ensureSalesReceiptsSchema(): Promise<void> {
  * Background receipt verification (runs after the report is already saved, so the
  * submitter isn't blocked). Reads the receipt photo with the AI, cross-checks the
  * extracted numbers against the figures the salesperson typed, stores a confidence
- * verdict on the row for the dashboard, and — if the receipt has no stamp or the
- * numbers disagree — messages the submitter to correct the data.
+ * verdict on the row for the dashboard, and — if the numbers disagree —
+ * messages the submitter to correct the data.
  */
 async function backgroundReceiptCheck(opts: {
   chatId: string;
@@ -466,9 +466,9 @@ async function backgroundReceiptCheck(opts: {
   guided: boolean;
   /**
    * Verdict already obtained while reading the photo (scan mode). Supplying it
-   * skips a second Gemini call: the scan read returns hasStamp and confidence
-   * too, and scan mode has nothing to cross-check — the extracted values ARE
-   * what was entered.
+   * skips a second Gemini call: the scan read returns the confidence too, and
+   * scan mode has nothing to cross-check — the extracted values ARE what was
+   * entered.
    */
   preCheck?: ReceiptCheck | null;
 }): Promise<void> {
@@ -512,7 +512,6 @@ async function backgroundReceiptCheck(opts: {
     const mismatches = opts.guided && extracted ? compareReceipt(opts.entered, extracted) : [];
     const check: ReceiptCheck = {
       checked: read.ok,
-      hasStamp: g ? g.hasStamp : false,
       score: g ? g.confidence : 0,
       flags: read.ok ? [] : ["ai_check_failed"],
       reasoning: read.ok ? g!.notes : `Automatic receipt check failed: ${read.error}`,
@@ -583,7 +582,6 @@ async function notifyReceiptProblems(chatId: string, check: ReceiptCheck): Promi
   }
 
   const problems: string[] = [];
-  if (!check.hasStamp) problems.push("❌ ደረሰኙ ማህተም የለውም — ተቀባይነት የለውም።");
   if (check.mismatches.length > 0) {
     problems.push("⚠️ ያስገቡት መረጃ ከደረሰኙ ጋር አይመሳሰልም፦\n" + check.mismatches.map((m) => `• ${m}`).join("\n"));
   }
@@ -1146,20 +1144,16 @@ function parseProductQty(text: string): { product: string; qty: number } {
   return { product, qty };
 }
 
-/** Short receipt-verdict lines for the preview (stamp validity + authenticity). */
+/** Short receipt-verdict line for the preview: legibility score + cross-check. */
 function checkLine(c?: ReceiptCheck | null): string {
   if (!c) return "";
-  // Three outcomes, not two: verified, rejected, and "we could not check".
-  // Collapsing the third into "no stamp" accuses the submitter of something the
-  // AI never actually determined.
+  // "Could not check" is its own outcome — never presented as a problem with
+  // the receipt, only as a check that did not run.
   if (!c.checked) return "⏳ ማጣራት አልተሳካም — በእጅ ይጣራል\n";
 
-  let line = c.hasStamp
-    ? "🔖 ማህተም ተገኝቷል — ተቀባይነት አለው\n"
-    : "❌ ማህተም አልተገኘም — ደረሰኙ ተቀባይነት የለውም\n";
-  const label = c.score >= 75 ? "የተረጋገጠ" : c.score >= 50 ? "ማጣራት ይፈልጋል" : "አጠራጣሪ";
+  const label = c.score >= 75 ? "ግልጽ" : c.score >= 50 ? "ማጣራት ይፈልጋል" : "አጠራጣሪ";
   const icon = c.score >= 75 ? "🔒" : c.score >= 50 ? "🔎" : "⚠️";
-  line += `${icon} ማረጋገጫ ${c.score}% · ${label}\n`;
+  let line = `${icon} ንባብ ${c.score}% · ${label}\n`;
   if (c.mismatches.length > 0) line += `⚠️ ልዩነት: ${c.mismatches.join("; ")}\n`;
   return line;
 }
@@ -1641,8 +1635,8 @@ export async function POST(req: NextRequest) {
 
       let draft: SalesReceiptDraft;
       // Scan mode gets its verdict free with the extraction — the same Gemini
-      // call returns the stamp and the confidence. Guided mode has nothing read
-      // yet, so its check runs after approval.
+      // call returns the confidence. Guided mode has nothing read yet, so its
+      // check runs after approval.
       let scanCheck: ReceiptCheck | null = null;
       if (guided) {
         // Fields already entered — compute the money columns. No AI here: the
@@ -1711,7 +1705,6 @@ export async function POST(req: NextRequest) {
         draft = read.draft;
         scanCheck = {
           checked: true,
-          hasStamp: read.hasStamp,
           score: read.confidence,
           flags: [],
           reasoning: read.notes,
@@ -1730,7 +1723,7 @@ export async function POST(req: NextRequest) {
       rs.readingSince = undefined;
       rs.draft = draft;
       // Guided: verdict comes after approval. Scan: already known, so the
-      // salesperson sees the stamp result on the preview before approving.
+      // salesperson sees the read quality on the preview before approving.
       rs.check = scanCheck;
       session.receiptScan = rs;
       session.state = "receipt_action";
@@ -1834,7 +1827,7 @@ export async function POST(req: NextRequest) {
             `📊 የዛሬውን ወደ Excel ማውጣት ይችላሉ።`,
           { reply_markup: receiptNextKeyboard }
         );
-        // Background: verify the receipt (stamp + authenticity) and cross-check the
+        // Background: read the receipt and cross-check the
         // entered figures against what the AI reads off the photo. Updates the
         // row's confidence for the dashboard and pings the submitter on a mismatch.
         if (savedId) {

@@ -10,16 +10,14 @@ import { extractReceiptGemini } from "@/lib/llm";
  * VAT 15% · Grand Total · Withholding · Net Payable · Remark.
  */
 
-/** AI verdict on an attached receipt photo: stamp validity + authenticity + cross-check. */
+/** AI verdict on an attached receipt photo: read quality + figure cross-check. */
 export interface ReceiptCheck {
   /**
    * Whether the check actually ran. False means the AI call failed — NOT that
-   * anything is wrong with the receipt. Keeping these apart matters: treating a
-   * failed call as `hasStamp: false` told every salesperson their valid receipt
-   * had been rejected whenever Gemini hiccuped.
+   * anything is wrong with the receipt. Keeping these apart matters: a failed
+   * call must never be reported to the salesperson as a rejected receipt.
    */
   checked: boolean;
-  hasStamp: boolean; // an unstamped receipt is not valid
   score: number; // 0-100 authenticity/legitimacy
   flags: string[];
   reasoning: string;
@@ -57,7 +55,7 @@ function toNum(v: unknown): number {
 }
 
 export type SalesReceiptReadResult =
-  | { ok: true; draft: SalesReceiptDraft; hasStamp: boolean; confidence: number; notes: string }
+  | { ok: true; draft: SalesReceiptDraft; confidence: number; notes: string }
   | { ok: false; error: string };
 
 /**
@@ -101,7 +99,6 @@ export async function extractSalesReceipt(
   return {
     ok: true,
     draft: { ...draft, printedGrandTotal: toNum(g.grandTotal) || undefined },
-    hasStamp: g.hasStamp,
     confidence: g.confidence,
     notes: g.notes,
   };

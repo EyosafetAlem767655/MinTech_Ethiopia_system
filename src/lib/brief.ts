@@ -40,6 +40,16 @@ export async function assembleAndSendBrief(now = new Date()) {
     `🛡 ${numbers.damagedClaimed} ከረጢቶች ጉዳት ተጠይቋል · ${numbers.damagedVerified} ተረጋግጧል`,
   ];
 
+  // The sales team's own reports. Only shown when there are any, so the brief
+  // doesn't carry a permanent "0 reports" line on days sales doesn't file.
+  if (numbers.salesReportsCount > 0) {
+    fiveLines.push(
+      `🧾 ${numbers.salesReportsCount} የሽያጭ ሪፖርት · ${etb(numbers.salesReportedEtb)} ብር ጠቅላላ · ${etb(
+        numbers.salesReportedNetEtb
+      )} ብር ተጣራ`
+    );
+  }
+
   const totalOverdue = aging.overdueClients.reduce((a, c) => a + c.outstanding, 0);
   const narrative = await writeBriefNarrative({
     date: dateLabel,
@@ -48,6 +58,11 @@ export async function assembleAndSendBrief(now = new Date()) {
     month_on_month_change_pct: mom.changePct,
     receivables: { total_overdue_etb: Math.round(totalOverdue), overdue_invoices: aging.overdueClients.length },
     purchase_requests_pending: prs.length,
+    sales_team_reports: {
+      count: numbers.salesReportsCount,
+      grand_total_etb: Math.round(numbers.salesReportedEtb),
+      net_payable_etb: Math.round(numbers.salesReportedNetEtb),
+    },
   });
 
   const appUrl = process.env.APP_URL || "";

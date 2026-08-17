@@ -8,7 +8,6 @@ interface ReceiptCheck {
   /** False when the AI call failed — says nothing about the receipt itself.
    *  Rows written before this field existed have it undefined; those did run. */
   checked?: boolean;
-  hasStamp: boolean;
   score: number;
   flags: string[];
   reasoning: string;
@@ -37,14 +36,12 @@ interface Row {
 
 const fmtDate = (d: string) => new Date(d).toLocaleDateString("en-GB");
 const num = (n?: number | null) => (n ? Math.round(n).toLocaleString() : "");
-/** Compact receipt validity badge: stamp (validity) first, then authenticity score. */
+/** Compact badge: how clearly the receipt read, and whether its figures agree. */
 function CheckBadge({ check }: { check: ReceiptCheck | null }) {
   if (!check) return <span className="text-stone-300">—</span>;
-  const { hasStamp, score, mismatches, flags, reasoning } = check;
+  const { score, mismatches, flags, reasoning } = check;
 
-  // A check that never ran is not a failed receipt. Show it as unverified in
-  // neutral grey — flagging it red accused the salesperson of submitting an
-  // unstamped receipt every time the AI call happened to fail.
+  // A check that never ran is not a failed receipt — neutral grey, never red.
   if (check.checked === false) {
     return (
       <span
@@ -56,8 +53,9 @@ function CheckBadge({ check }: { check: ReceiptCheck | null }) {
     );
   }
 
-  // No stamp ⇒ the receipt is not valid, regardless of the authenticity score.
-  const tone = !hasStamp
+  // A figure that disagrees with the receipt outranks a clean read: the numbers
+  // being wrong matters more than the photo being sharp.
+  const tone = mismatches.length
     ? "bg-red-100 text-red-800"
     : score >= 75
     ? "bg-green-100 text-green-800"
@@ -65,11 +63,10 @@ function CheckBadge({ check }: { check: ReceiptCheck | null }) {
     ? "bg-amber-100 text-amber-800"
     : "bg-red-100 text-red-800";
   const title = [
-    `confidence: ${score}%`,
-    hasStamp ? "stamp: present" : "NO STAMP — not valid",
+    `read quality: ${score}%`,
     reasoning,
     flags.length ? `flags: ${flags.join(", ")}` : "",
-    mismatches.length ? `mismatch: ${mismatches.join("; ")}` : "",
+    mismatches.length ? `mismatch: ${mismatches.join("; ")}` : "figures agree with the receipt",
   ]
     .filter(Boolean)
     .join(" · ");
@@ -78,8 +75,7 @@ function CheckBadge({ check }: { check: ReceiptCheck | null }) {
       title={title}
       className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold ${tone}`}
     >
-      {hasStamp ? `🔖 ${score}%` : "❌ No stamp"}
-      {hasStamp && mismatches.length > 0 && <span>⚠️</span>}
+      {mismatches.length ? `⚠️ ${mismatches.length} mismatch` : `🔎 ${score}%`}
     </span>
   );
 }

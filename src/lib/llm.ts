@@ -225,7 +225,6 @@ export interface GeminiReceipt {
   withhold: number;
   netPay: number;
   depositedBank: string;
-  hasStamp: boolean;
   confidence: number; // 0-100, how legible / genuine the receipt looks
   notes: string;
 }
@@ -251,8 +250,6 @@ const GEMINI_RECEIPT_SYSTEM =
   '"withhold": number (ETB withholding if shown, else 0), ' +
   '"netPay": number (ETB payable after withholding; 0 if not printed), ' +
   '"depositedBank": string (bank the money was deposited to, if the receipt shows one, else ""), ' +
-  '"hasStamp": boolean (true ONLY if an official ink stamp/seal is clearly visible — ignore printed ' +
-  'logos, signatures, barcodes and QR codes), ' +
   '"confidence": number (0-100 — how clearly legible and genuine the receipt looks), ' +
   '"notes": string (one short sentence) }.\n' +
   "Read every number exactly as printed — do NOT calculate or correct them. A printed total that " +
@@ -341,7 +338,6 @@ export async function extractReceiptGemini(
         withhold: receiptNum(p.withhold),
         netPay: receiptNum(p.netPay),
         depositedBank: String(p.depositedBank || "").trim(),
-        hasStamp: !!p.hasStamp,
         confidence: Math.max(0, Math.min(100, Math.round(Number(p.confidence) || 50))),
         notes: String(p.notes || ""),
       },

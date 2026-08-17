@@ -56,6 +56,27 @@ const tools: OpenAI.Chat.ChatCompletionTool[] = [
   {
     type: "function",
     function: {
+      name: "get_sales_reports",
+      description:
+        "Sales reports filed by the sales team on the Telegram bot, with every reported column " +
+        "(date, customer, FS No, Att.No, product, qty, unit price, sub total, VAT, grand total, " +
+        "withholding, net pay, deposited bank) plus each row's AI cross-check verdict. This is the " +
+        "'Sales report' the sales department files daily — it is SEPARATE from the invoices table. " +
+        "Use this for any question about sales reports, receipts scanned by the sales team, cash " +
+        "sales, FS numbers, or which customer bought what.",
+      parameters: {
+        type: "object",
+        properties: {
+          days: { type: "number", description: "How many days back to include. Default 30.", default: 30 },
+          customer: { type: "string", description: "Filter by customer name (partial match, optional)" },
+          limit: { type: "number", default: 50 },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "search_records",
       description: "Search recent raw records by collection.",
       parameters: {
@@ -65,6 +86,7 @@ const tools: OpenAI.Chat.ChatCompletionTool[] = [
             type: "string",
             enum: [
               "invoices",
+              "sales_receipts",
               "stone_deliveries",
               "shift_reports",
               "receipts",
@@ -111,9 +133,61 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<unk
       ]);
       return { lots, recentClaims: claims, tripwires };
     }
+    case "get_sales_reports": {
+      const days = Math.min(Number(args.days) || 30, 365);
+      const limit = Math.min(Number(args.limit) || 50, 200);
+      const since = new Date(Date.now() - days * 86400_000);
+      const customer = args.customer ? String(args.customer) : "";
+      const rows = customer
+        ? await sql`
+            select date, customer_name as "customerName", fs_no as "fsNo", att_no as "attNo",
+                   product_ty as "productTy", qty, unit_price as "unitPrice", sub_total as "subTotal",
+                   vat, grand_total as "grandTotal", withhold, net_pay as "netPay",
+                   deposited_bank as "depositedBank", remark, status, reported_by as "reportedBy",
+                   receipt_check as "receiptCheck"
+              from sales_receipts
+             where date >= ${since} and customer_name ilike '%' || ${customer} || '%'
+             order by date desc limit ${limit}`
+        : await sql`
+            select date, customer_name as "customerName", fs_no as "fsNo", att_no as "attNo",
+                   product_ty as "productTy", qty, unit_price as "unitPrice", sub_total as "subTotal",
+                   vat, grand_total as "grandTotal", withhold, net_pay as "netPay",
+                   deposited_bank as "depositedBank", remark, status, reported_by as "reportedBy",
+                   receipt_check as "receiptCheck"
+              from sales_receipts
+             where date >= ${since}
+             order by date desc limit ${limit}`;
+
+      // Totals alongside the rows: the row list is capped by `limit`, so a model
+      // adding up only what it can see would under-report on a busy month.
+      const [totals] = customer
+        ? await sql<{ n: string; grand: string; net: string; wht: string }[]>`
+            select count(*) as n, coalesce(sum(grand_total),0) as grand,
+                   coalesce(sum(net_pay),0) as net, coalesce(sum(withhold),0) as wht
+              from sales_receipts
+             where date >= ${since} and customer_name ilike '%' || ${customer} || '%'`
+        : await sql<{ n: string; grand: string; net: string; wht: string }[]>`
+            select count(*) as n, coalesce(sum(grand_total),0) as grand,
+                   coalesce(sum(net_pay),0) as net, coalesce(sum(withhold),0) as wht
+              from sales_receipts
+             where date >= ${since}`;
+
+      return {
+        days,
+        totals: {
+          reports: Number(totals?.n) || 0,
+          grandTotalEtb: Number(totals?.grand) || 0,
+          netPayableEtb: Number(totals?.net) || 0,
+          withholdingEtb: Number(totals?.wht) || 0,
+        },
+        rows,
+      };
+    }
     case "search_records": {
       const limit = Math.min(Number(args.limit) || 20, 50);
       switch (args.collection) {
+        case "sales_receipts":
+          return sql`select * from sales_receipts order by date desc limit ${limit}`;
         case "invoices":
           // Parameterised ILIKE — no unescaped input into a regex.
           return args.client
@@ -149,7 +223,12 @@ export async function companyChat(
       content:
         "You are the internal assistant of MinTech Ethiopia, a mining company that crushes stone into sacks. " +
         "You can query live company data with the provided tools — production, sales, collections, receivables, " +
-        "bag-lot control, damage claims and purchase requests. ALWAYS fetch data with tools before quoting figures; " +
+        "bag-lot control, damage claims and purchase requests. " +
+        "There are TWO distinct sales channels and you must not confuse them: `invoices` (credit sales, billed to " +
+        "a client) and the sales team's daily Sales report (`sales_receipts`, filed on the Telegram bot from " +
+        "scanned receipts) — use get_sales_reports for the latter. If a question just says 'sales', check both " +
+        "and say which channel each figure came from. " +
+        "ALWAYS fetch data with tools before quoting figures; " +
         "never estimate or invent numbers. Currency is ETB. Today is " +
         new Date().toISOString().slice(0, 10) +
         ". Be concise, direct, and flag anything that looks like a problem.",

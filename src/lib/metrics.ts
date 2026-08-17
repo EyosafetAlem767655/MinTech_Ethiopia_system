@@ -26,6 +26,15 @@ export interface DayNumbers {
   cashCollected: number;
   damagedClaimed: number;
   damagedVerified: number;
+  /**
+   * Cash sales filed by the sales team through the bot (`sales_receipts`).
+   * Tracked separately from `revenueInvoiced`, which counts `invoices` only —
+   * these are two different flows and adding them together would double-count
+   * nothing but would also hide which channel a figure came from.
+   */
+  salesReportedEtb: number;
+  salesReportedNetEtb: number;
+  salesReportsCount: number;
 }
 
 export async function getDayNumbers(start: Date, end: Date): Promise<DayNumbers> {
@@ -73,6 +82,24 @@ export async function getDayNumbers(start: Date, end: Date): Promise<DayNumbers>
           and status = 'verified')                                                  as damaged_verified
   `;
 
+  // Kept as its own guarded round trip rather than three more subqueries above:
+  // sales_receipts arrives in a later migration, and a missing table would fail
+  // the whole statement — taking the entire dashboard and the morning brief with
+  // it, not just the sales line.
+  //
+  // Bucketed by the receipt's own sale date, not created_at, so a receipt keyed
+  // in the next morning still counts against the day it was actually sold.
+  const [s] = await sql<{ grand: string; net: string; n: string }[]>`
+    select coalesce(sum(grand_total), 0) as grand,
+           coalesce(sum(net_pay), 0)     as net,
+           count(*)                      as n
+      from sales_receipts
+     where date >= ${start} and date < ${end}
+  `.catch((e) => {
+    if ((e as { code?: string })?.code !== "42P01") console.error("getDayNumbers sales_receipts failed:", e);
+    return [{ grand: "0", net: "0", n: "0" }];
+  });
+
   return {
     date: eatDateLabel(start),
     truckloads: Number(r.truckloads) || 0,
@@ -82,6 +109,9 @@ export async function getDayNumbers(start: Date, end: Date): Promise<DayNumbers>
     cashCollected: Number(r.cash_collected) || 0,
     damagedClaimed: Number(r.damaged_claimed) || 0,
     damagedVerified: Number(r.damaged_verified) || 0,
+    salesReportedEtb: Number(s?.grand) || 0,
+    salesReportedNetEtb: Number(s?.net) || 0,
+    salesReportsCount: Number(s?.n) || 0,
   };
 }
 
