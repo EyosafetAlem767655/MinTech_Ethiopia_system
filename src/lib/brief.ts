@@ -20,15 +20,23 @@ import { broadcastPush } from "@/lib/push";
  * the v_lot_balances view, so there is nothing to recompute.
  */
 export async function assembleAndSendBrief(now = new Date()) {
-  const { start } = yesterdayRange(now);
+  const { start, end } = yesterdayRange(now);
   const dateLabel = eatDateLabel(start);
 
-  const [numbers, exceptions, mom, aging, prs] = await Promise.all([
+  const [numbers, exceptions, mom, aging, prs, submissions] = await Promise.all([
     getYesterdayNumbers(now),
     detectExceptions(now),
     monthOnMonth(now),
     receivablesAging(now),
     pendingPurchaseRequests(),
+    // What staff actually filed yesterday. Guarded so a missing table can never
+    // take the whole brief down with it.
+    sql<{ daily: string; hr: string; materials: string }[]>`
+      select
+        (select count(*) from daily_reports   where created_at >= ${start} and created_at < ${end}) as daily,
+        (select count(*) from hr_reports      where created_at >= ${start} and created_at < ${end}) as hr,
+        (select count(*) from material_counts where created_at >= ${start} and created_at < ${end}) as materials
+    `.catch(() => [{ daily: "0", hr: "0", materials: "0" }]),
   ]);
 
   // "Yesterday in five lines" — figures rendered from queries, never the LLM.
@@ -80,6 +88,11 @@ export async function assembleAndSendBrief(now = new Date()) {
       delivered_tons: numbers.deliveredTons,
       deliveries: numbers.deliveryCount,
       open_tool_requests: numbers.openToolRequests,
+    },
+    staff_submissions: {
+      daily_reports: Number(submissions[0]?.daily) || 0,
+      hr_reports: Number(submissions[0]?.hr) || 0,
+      material_counts: Number(submissions[0]?.materials) || 0,
     },
   });
 

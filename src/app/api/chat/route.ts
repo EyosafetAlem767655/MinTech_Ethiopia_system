@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { companyChat } from "@/lib/chat";
 import { AUTH_COOKIE, verifySession } from "@/lib/auth";
-import { claimChatRequest, peekChatQuota, CHAT_DAILY_LIMIT } from "@/lib/chat-quota";
+import { claimChatRequest, peekChatQuota, releaseChatRequest, CHAT_DAILY_LIMIT } from "@/lib/chat-quota";
 import { envValue } from "@/lib/env";
 
 export const dynamic = "force-dynamic";
@@ -44,7 +44,8 @@ export async function POST(req: NextRequest) {
   // Claimed before the model call: a crash mid-answer must not hand back a free
   // retry, which would make the ceiling unenforceable exactly when something is
   // going wrong repeatedly.
-  const quota = await claimChatRequest(await actorFor(req));
+  const actor = await actorFor(req);
+  const quota = await claimChatRequest(actor);
   if (!quota.allowed) {
     return NextResponse.json(
       {
@@ -63,7 +64,11 @@ export async function POST(req: NextRequest) {
     );
     return NextResponse.json({ reply, quota });
   } catch (e) {
+    // The answer never arrived, so hand the slot back — being charged one of ten
+    // daily questions for our own outage is the wrong way round.
     console.error("chat route failed:", e);
-    return NextResponse.json({ error: chatErrorMessage(e), quota }, { status: 503 });
+    await releaseChatRequest(actor);
+    const refunded = await peekChatQuota(actor);
+    return NextResponse.json({ error: chatErrorMessage(e), quota: refunded }, { status: 503 });
   }
 }

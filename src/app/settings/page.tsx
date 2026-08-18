@@ -3,6 +3,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { POSITIONS, POSITION_GROUPS, capabilitiesFor, type PositionKey } from "@/lib/positions";
+import {
+  SUBMISSIONS,
+  SUBMISSION_COLLECTIONS,
+  type SubmissionCollection,
+} from "@/lib/submissions";
 import { InstallButton } from "@/components/InstallPrompt";
 
 interface BotUser {
@@ -53,7 +58,7 @@ const ACTION_STYLES: Record<string, string> = {
   error: "bg-red-200 text-red-900",
 };
 
-type Tab = "users" | "activity" | "devices";
+type Tab = "users" | "submissions" | "activity" | "devices";
 
 export default function SettingsPage() {
   const [tab, setTab] = useState<Tab>("users");
@@ -94,7 +99,7 @@ export default function SettingsPage() {
       </div>
 
       <div className="flex gap-1.5 py-5">
-        {(["users", "activity", "devices"] as const).map((t) => (
+        {(["users", "submissions", "activity", "devices"] as const).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -102,15 +107,277 @@ export default function SettingsPage() {
               tab === t ? "bg-clay-700 text-white" : "bg-stone-100 text-stone-600"
             }`}
           >
-            {t === "users" ? "Employees" : t === "activity" ? "Bot activity" : "Devices"}
+            {t === "users"
+              ? "Employees"
+              : t === "submissions"
+              ? "Submissions"
+              : t === "activity"
+              ? "Bot activity"
+              : "Devices"}
           </button>
         ))}
       </div>
 
       {tab === "users" && <UsersTab />}
+      {tab === "submissions" && <SubmissionsTab />}
       {tab === "activity" && <ActivityTab />}
       {tab === "devices" && <DevicesTab />}
     </main>
+  );
+}
+
+/* ──────────────────────────────── Submissions ─────────────────────────────── */
+
+/**
+ * View, correct and remove anything filed through the Telegram bot.
+ *
+ * Columns are driven entirely by the registry in lib/submissions.ts, so a new
+ * report type appears here without touching this component.
+ */
+function SubmissionsTab() {
+  const [collection, setCollection] = useState<SubmissionCollection>("daily");
+  const [rows, setRows] = useState<Record<string, unknown>[] | null>(null);
+  const [unavailable, setUnavailable] = useState(false);
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [q, setQ] = useState("");
+  const [editing, setEditing] = useState<string | null>(null);
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const spec = SUBMISSIONS[collection];
+
+  const load = useCallback(async () => {
+    setRows(null);
+    setError("");
+    const p = new URLSearchParams({ collection });
+    if (from) p.set("from", from);
+    if (to) p.set("to", to);
+    if (q.trim()) p.set("q", q.trim());
+    const res = await fetch(`/api/submissions?${p}`);
+    if (!res.ok) {
+      setError((await res.json().catch(() => ({}))).error || "Could not load submissions.");
+      setRows([]);
+      return;
+    }
+    const json = await res.json();
+    setUnavailable(Boolean(json.unavailable));
+    setRows(Array.isArray(json.rows) ? json.rows : []);
+  }, [collection, from, to, q]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const startEdit = (row: Record<string, unknown>) => {
+    const d: Record<string, string> = {};
+    for (const key of spec.editableKeys) d[key] = row[key] == null ? "" : String(row[key]);
+    setDraft(d);
+    setEditing(String(row.id));
+  };
+
+  const save = async (id: string) => {
+    setBusy(true);
+    setError("");
+    const res = await fetch(`/api/submissions/${collection}/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(draft),
+    });
+    setBusy(false);
+    if (!res.ok) {
+      setError((await res.json().catch(() => ({}))).error || "Update failed.");
+      return;
+    }
+    setEditing(null);
+    await load();
+  };
+
+  const remove = async (row: Record<string, unknown>) => {
+    const who = String(row[spec.authorColumn] ?? "unknown");
+    // A typed confirmation, not a plain OK: this is an unrecoverable delete of
+    // someone's filed report, and the row is gone from the reports and the
+    // totals along with it.
+    const answer = prompt(
+      `Permanently DELETE this ${spec.label.toLowerCase()} filed by ${who}?\n\n` +
+        `This cannot be undone, and any attached photos are removed too.\n\n` +
+        `Type DELETE to confirm.`
+    );
+    if (answer !== "DELETE") return;
+
+    setBusy(true);
+    setError("");
+    const res = await fetch(`/api/submissions/${collection}/${row.id}`, { method: "DELETE" });
+    setBusy(false);
+    if (!res.ok) {
+      setError((await res.json().catch(() => ({}))).error || "Delete failed.");
+      return;
+    }
+    await load();
+  };
+
+  const photoIds = (row: Record<string, unknown>): string[] => {
+    const out: string[] = [];
+    if (spec.photosColumn && Array.isArray(row[spec.photosColumn])) {
+      out.push(...(row[spec.photosColumn] as unknown[]).map(String));
+    }
+    if (spec.photoColumn && row[spec.photoColumn]) out.push(String(row[spec.photoColumn]));
+    return out;
+  };
+
+  return (
+    <div className="space-y-4 pb-10">
+      <div className="card space-y-3 p-4">
+        <select
+          value={collection}
+          onChange={(e) => {
+            setEditing(null);
+            setCollection(e.target.value as SubmissionCollection);
+          }}
+          className="w-full rounded-lg border border-clay-100 bg-white px-3 py-2 text-sm font-bold"
+        >
+          {SUBMISSION_COLLECTIONS.map((c) => (
+            <option key={c} value={c}>
+              {SUBMISSIONS[c].icon} {SUBMISSIONS[c].label}
+            </option>
+          ))}
+        </select>
+
+        <div className="flex flex-wrap gap-2">
+          <label className="flex-1 text-[11px] font-bold text-stone-500">
+            From
+            <input
+              type="date"
+              value={from}
+              onChange={(e) => setFrom(e.target.value)}
+              className="mt-1 w-full rounded-lg border border-clay-100 px-2 py-1.5 text-xs font-normal"
+            />
+          </label>
+          <label className="flex-1 text-[11px] font-bold text-stone-500">
+            To
+            <input
+              type="date"
+              value={to}
+              onChange={(e) => setTo(e.target.value)}
+              className="mt-1 w-full rounded-lg border border-clay-100 px-2 py-1.5 text-xs font-normal"
+            />
+          </label>
+        </div>
+
+        <input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Search name, supplier, text…"
+          className="w-full rounded-lg border border-clay-100 px-3 py-2 text-sm"
+        />
+
+        {(from || to || q) && (
+          <SmallBtn
+            label="Clear filters"
+            onClick={() => {
+              setFrom("");
+              setTo("");
+              setQ("");
+            }}
+          />
+        )}
+      </div>
+
+      {error && <p className="card border-l-4 border-l-red-500 p-3 text-xs font-bold text-red-700">{error}</p>}
+
+      {unavailable && (
+        <p className="card p-3 text-xs text-amber-700">
+          This table isn&apos;t in the database yet — apply the outstanding migrations.
+        </p>
+      )}
+
+      {rows === null ? (
+        <div className="card h-32 animate-pulse bg-clay-50" />
+      ) : rows.length === 0 ? (
+        <p className="card p-4 text-sm text-stone-400">No {spec.label.toLowerCase()} submissions found.</p>
+      ) : (
+        <div className="space-y-2">
+          <p className="px-1 text-[11px] font-bold text-stone-400">{rows.length} submission(s)</p>
+          {rows.map((row) => {
+            const id = String(row.id);
+            const isEditing = editing === id;
+            return (
+              <div key={id} className="card space-y-2 p-3">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0 flex-1 space-y-1">
+                    {spec.displayFields.map((f) => {
+                      const value = row[f.column];
+                      if (value == null || value === "") return null;
+                      return (
+                        <p key={f.key} className="text-xs">
+                          <span className="font-bold text-stone-500">{f.label}: </span>
+                          <span className={f.type === "longtext" ? "whitespace-pre-wrap text-stone-700" : "text-stone-700"}>
+                            {String(value)}
+                          </span>
+                        </p>
+                      );
+                    })}
+                    <p className="text-[10px] text-stone-400">{fmtTime(String(row.created_at))}</p>
+                  </div>
+                </div>
+
+                {photoIds(row).length > 0 && (
+                  <div className="flex flex-wrap gap-1.5">
+                    {photoIds(row).map((pid) => (
+                      <a key={pid} href={`/api/files/${pid}`} target="_blank" rel="noreferrer">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img src={`/api/files/${pid}`} alt="" className="h-16 w-16 rounded-lg object-cover" />
+                      </a>
+                    ))}
+                  </div>
+                )}
+
+                {isEditing ? (
+                  <div className="space-y-2 border-t border-clay-50 pt-2">
+                    {spec.editableKeys.map((key) => {
+                      const f = spec.displayFields.find((x) => x.key === key);
+                      if (!f) return null;
+                      return (
+                        <label key={key} className="block text-[11px] font-bold text-stone-500">
+                          {f.label}
+                          {f.type === "longtext" ? (
+                            <textarea
+                              value={draft[key] ?? ""}
+                              onChange={(e) => setDraft({ ...draft, [key]: e.target.value })}
+                              rows={4}
+                              className="mt-1 w-full rounded-lg border border-clay-100 p-2 text-sm font-normal"
+                            />
+                          ) : (
+                            <input
+                              type={f.type === "number" ? "number" : "text"}
+                              value={draft[key] ?? ""}
+                              onChange={(e) => setDraft({ ...draft, [key]: e.target.value })}
+                              className="mt-1 w-full rounded-lg border border-clay-100 px-2 py-1.5 text-sm font-normal"
+                            />
+                          )}
+                        </label>
+                      );
+                    })}
+                    <div className="flex gap-1.5">
+                      <SmallBtn label={busy ? "Saving…" : "Save"} tone="green" disabled={busy} onClick={() => save(id)} />
+                      <SmallBtn label="Cancel" onClick={() => setEditing(null)} />
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex gap-1.5 border-t border-clay-50 pt-2">
+                    {spec.editableKeys.length > 0 && (
+                      <SmallBtn label="✏️ Edit" disabled={busy} onClick={() => startEdit(row)} />
+                    )}
+                    <SmallBtn label="🗑 Delete" tone="red" disabled={busy} onClick={() => remove(row)} />
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
   );
 }
 

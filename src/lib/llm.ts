@@ -114,25 +114,6 @@ function extractJson(raw?: string | null): any {
   }
 }
 
-/** Nemotron text completion with thinking disabled (structured/JSON friendly). */
-async function nemotronComplete(
-  messages: OpenAI.Chat.ChatCompletionMessageParam[],
-  opts: { maxTokens?: number; temperature?: number } = {}
-): Promise<string> {
-  const params: Record<string, unknown> = {
-    model: TEXT_MODEL,
-    messages,
-    max_tokens: opts.maxTokens ?? 600,
-    temperature: opts.temperature ?? 0.2,
-    top_p: 0.95,
-    // NVIDIA/Nemotron extras — harmless if ignored by another provider.
-    chat_template_kwargs: { enable_thinking: false },
-  };
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const res = (await textAI().chat.completions.create(params as any)) as any;
-  return res.choices[0]?.message?.content?.trim() || "";
-}
-
 /* ───────────────────── Claim photo fraud / validity check ─────────────────── */
 
 export interface PhotoVerdict {
@@ -309,8 +290,13 @@ export async function geminiGenerate(
     temperature?: number;
     timeoutMs?: number;
     maxOutputTokens?: number;
+    /** Real system prompt. Gemini has no system role — this is its own field. */
+    systemInstruction?: string;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     tools?: any[];
+    /** e.g. { functionCallingConfig: { mode: "ANY" } } to require a tool call. */
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    toolConfig?: any;
   } = {}
 ): Promise<GeminiCallResult> {
   const key = envValue("GEMINI_API_KEY");
@@ -335,7 +321,9 @@ export async function geminiGenerate(
       body: JSON.stringify({
         contents,
         generationConfig,
+        ...(opts.systemInstruction ? { system_instruction: { parts: [{ text: opts.systemInstruction }] } } : {}),
         ...(opts.tools ? { tools: opts.tools } : {}),
+        ...(opts.toolConfig ? { toolConfig: opts.toolConfig } : {}),
       }),
       signal: ctrl.signal,
     });
@@ -592,28 +580,40 @@ export async function scoreStonePhoto(imageBase64: string, contentType: string):
 
 /* ─────────────────────── Morning brief narrative writer ───────────────────── */
 
+/**
+ * The dashboard's ✦ AI morning brief card.
+ *
+ * On Gemini, not Nemotron. This is the only AI element on the dashboard home,
+ * and it renders solely from `briefs.narrative` — so when the Nemotron key was
+ * absent the catch below returned "" and the card silently vanished, which reads
+ * as the dashboard AI being dead. Keeping it on the same key as everything else
+ * removes that failure mode.
+ */
 export async function writeBriefNarrative(structured: Record<string, unknown>): Promise<string> {
-  try {
-    return await nemotronComplete(
-      [
-        {
-          role: "system",
-          content:
-            "You write the CEO morning brief for MinTech Ethiopia, a mining company. " +
-            "You are given structured data computed directly from the database. " +
-            "RULES: Never invent, round differently, or extrapolate any number — quote figures exactly as given. " +
-            "Lead with exceptions (most urgent first), then a crisp narrative of yesterday. " +
-            "Plain text only, no markdown headers. 4–7 short sentences. Confident, factual tone. " +
-            "Currency is ETB. Address it to Mr. Anteneh implicitly (no greeting needed).",
-        },
-        { role: "user", content: JSON.stringify(structured) },
-      ],
-      { maxTokens: 500, temperature: 0.4 }
-    );
-  } catch (e) {
-    console.error("writeBriefNarrative failed:", e);
+  const system =
+    "You write the CEO morning brief for MinTech Ethiopia, a mining company. " +
+    "You are given structured data computed directly from the database. " +
+    "RULES: Never invent, round differently, or extrapolate any number — quote figures exactly as given. " +
+    "Lead with exceptions (most urgent first), then a crisp narrative of yesterday. " +
+    "Plain text only, no markdown headers. 4–7 short sentences. Confident, factual tone. " +
+    "Currency is ETB. Address it to Mr. Anteneh implicitly (no greeting needed).";
+
+  const res = await geminiGenerate([{ role: "user", parts: [{ text: JSON.stringify(structured) }] }], {
+    systemInstruction: system,
+    temperature: 0.4,
+    maxOutputTokens: 500,
+    // The brief runs from a cron, not a webhook, so it can afford longer than
+    // the receipt reader's budget.
+    timeoutMs: 20000,
+  });
+
+  if (!res.ok) {
+    // An empty narrative hides the card rather than breaking the brief — the
+    // five lines beside it are rendered from queries and stand on their own.
+    console.error("writeBriefNarrative failed:", res.error);
     return "";
   }
+  return res.text.trim();
 }
 
 /* ─────────────────── General request legitimacy scoring ───────────────────── */

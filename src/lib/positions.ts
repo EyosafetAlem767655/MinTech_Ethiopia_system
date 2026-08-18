@@ -304,13 +304,10 @@ export const POSITIONS: Record<PositionKey, Position> = {
     en: "Raw materials weight report",
     am: "የጥሬ ዕቃ ክብደት ሪፖርት",
     description: "Reports raw materials received and finished goods delivered, every day.",
-    capabilities: [
-      "daily_report",
-      "materials",
-      "raw_material_received",
-      "finished_goods_delivery",
-      "stock_status",
-    ],
+    // Deliberately just the two guided flows. The free-text daily report, stock
+    // status and material count were left over from before those flows existed
+    // and only duplicated, less reliably, what the guided steps now capture.
+    capabilities: ["raw_material_received", "finished_goods_delivery"],
     dailyRequired: true,
   },
   asset_purchase: {
@@ -319,7 +316,7 @@ export const POSITIONS: Record<PositionKey, Position> = {
     en: "Tool purchase request",
     am: "የመሣሪያ ግዢ ጥያቄ",
     description: "Raises tool and equipment purchase requests when needed (not daily).",
-    capabilities: ["tool_request", "purchase_items"],
+    capabilities: ["tool_request"],
     dailyRequired: false,
   },
   sales_daily: {

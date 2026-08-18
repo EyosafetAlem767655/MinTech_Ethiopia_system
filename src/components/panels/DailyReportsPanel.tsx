@@ -75,19 +75,24 @@ export default function DailyReportsPanel() {
     load();
   }, []);
 
-  // Edit / delete a submission, then refresh the feed.
+  // Edit / delete a submission, then refresh the feed. Shares the /api/submissions
+  // endpoint with the Settings tab, so both go through the same validation, audit
+  // log and photo cleanup — the column each collection stores its text in comes
+  // from the registry in lib/submissions.ts.
   const saveEdit = async (collection: Collection, id: string, text: string) => {
-    const res = await fetch(`/api/daily-reports/${collection}/${id}`, {
+    const key = collection === "materials" ? "raw_text" : "text";
+    const res = await fetch(`/api/submissions/${collection}/${id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ [key]: text }),
     });
     if (res.ok) await load();
     return res.ok;
   };
   const deleteRow = async (collection: Collection, id: string) => {
-    if (!confirm("Delete this submission? This cannot be undone.")) return;
-    await fetch(`/api/daily-reports/${collection}/${id}`, { method: "DELETE" }).catch(() => {});
+    if (!confirm("Delete this submission? This cannot be undone, and its photos are removed too.")) return;
+    const res = await fetch(`/api/submissions/${collection}/${id}`, { method: "DELETE" });
+    if (!res.ok) alert("Could not delete this submission. Please try again.");
     await load();
   };
 

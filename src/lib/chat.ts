@@ -11,6 +11,8 @@ import {
 } from "@/lib/metrics";
 import sql from "@/lib/sql";
 import { getLotBalances } from "@/lib/metrics";
+import { eatDateLabel } from "@/lib/dates";
+import { requiresDailyReport } from "@/lib/positions";
 
 /**
  * Company chatbot with full data access via tool-calling. The model decides
@@ -82,6 +84,83 @@ const tools: OpenAI.Chat.ChatCompletionTool[] = [
   {
     type: "function",
     function: {
+      name: "get_daily_submissions",
+      description:
+        "The reports employees file on the Telegram bot each day: the free-text daily report " +
+        "(daily_reports), HR/customer reports (hr_reports) and material counts (material_counts). " +
+        "Returns the actual text of each submission with who wrote it and when. Use this for any " +
+        "question about what staff reported, said, or flagged — including 'what was submitted today'.",
+      parameters: {
+        type: "object",
+        properties: {
+          days: { type: "number", description: "How many days back. Default 3." },
+          person: { type: "string", description: "Filter by employee name (partial match, optional)" },
+          limit: { type: "number", description: "Max rows per collection. Default 25." },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_asset_reports",
+      description:
+        "Asset-management reports, ROW BY ROW: raw material received (supplier, delivery-note no, " +
+        "truck plate, MRV, tonnage per material), finished-goods deliveries (customer, invoice in " +
+        "cash/credit, delivery note, tonnage per product) and purchased items. Use this for any " +
+        "question naming a supplier, a truck, a customer delivery, or a specific material/product " +
+        "tonnage over a period.",
+      parameters: {
+        type: "object",
+        properties: {
+          kind: {
+            type: "string",
+            enum: ["raw_material", "delivery", "purchase_items", "all"],
+            description: "Which report to read. Default 'all'.",
+          },
+          days: { type: "number", description: "How many days back. Default 30." },
+          limit: { type: "number", description: "Max rows. Default 50." },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_production_reports",
+      description:
+        "Production-side reports ROW BY ROW: the daily production grid (production_reports: FGR no " +
+        "and tons per product), the monthly stock status (stock_status_reports) and the daily " +
+        "operations report (daily_ops_reports: delivered, received, closing stock and bag counts). " +
+        "Use this for questions about output, stock on hand, or bag usage.",
+      parameters: {
+        type: "object",
+        properties: {
+          days: { type: "number", description: "How many days back. Default 30." },
+          limit: { type: "number", description: "Max rows per report type. Default 25." },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_submission_compliance",
+      description:
+        "Who filed their daily report and who did not, for a given day. Cross-references the " +
+        "employee roster (telegram_users, and which roles are obliged to report daily) against the " +
+        "bot activity log. Use this for 'who has not submitted', 'who is behind', 'did X report today'.",
+      parameters: {
+        type: "object",
+        properties: {
+          date: { type: "string", description: "EAT day as YYYY-MM-DD. Defaults to today." },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "search_records",
       description: "Search recent raw records by collection.",
       parameters: {
@@ -99,6 +178,16 @@ const tools: OpenAI.Chat.ChatCompletionTool[] = [
               "bag_lots",
               "purchase_requests",
               "briefs",
+              "daily_reports",
+              "hr_reports",
+              "material_counts",
+              "daily_ops_reports",
+              "production_reports",
+              "stock_status_reports",
+              "raw_material_receipts",
+              "delivery_reports",
+              "purchase_item_reports",
+              "bot_activity",
             ],
           },
           client: { type: "string", description: "Filter invoices by client name (regex, optional)" },
@@ -188,11 +277,136 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<unk
         rows,
       };
     }
+    case "get_daily_submissions": {
+      const days = Math.min(Number(args.days) || 3, 120);
+      const limit = Math.min(Number(args.limit) || 25, 100);
+      const since = new Date(Date.now() - days * 86400_000);
+      const who = args.person ? `%${String(args.person)}%` : "%";
+      const [daily, hr, materials] = await Promise.all([
+        sql`select full_name as "fullName", positions, date_key as "dateKey", text,
+                   array_length(photo_file_ids, 1) as photos, created_at as "createdAt"
+              from daily_reports
+             where created_at >= ${since} and full_name ilike ${who}
+             order by created_at desc limit ${limit}`,
+        sql`select full_name as "fullName", kind, text, created_at as "createdAt"
+              from hr_reports
+             where created_at >= ${since} and full_name ilike ${who}
+             order by created_at desc limit ${limit}`,
+        sql`select counted_by as "countedBy", date_key as "dateKey", raw_text as "text",
+                   created_at as "createdAt"
+              from material_counts
+             where created_at >= ${since} and counted_by ilike ${who}
+             order by created_at desc limit ${limit}`,
+      ]);
+      return { days, dailyReports: daily, hrReports: hr, materialCounts: materials };
+    }
+
+    case "get_asset_reports": {
+      const kind = String(args.kind || "all");
+      const days = Math.min(Number(args.days) || 30, 365);
+      const limit = Math.min(Number(args.limit) || 50, 200);
+      const since = new Date(Date.now() - days * 86400_000);
+      const out: Record<string, unknown> = { days };
+
+      if (kind === "raw_material" || kind === "all") {
+        out.rawMaterialReceived = await sql`
+          select date, supplier, dn_no as "dnNo", truck_plate as "truckPlate", mrv_no as "mrvNo",
+                 materials, reported_by as "reportedBy"
+            from raw_material_receipts
+           where date >= ${since} order by date desc limit ${limit}`;
+      }
+      if (kind === "delivery" || kind === "all") {
+        out.deliveries = await sql`
+          select date, customer, invoice_cash as "invoiceCash", invoice_credit as "invoiceCredit",
+                 qty as "totalQty", delivery_no as "deliveryNo", products, reported_by as "reportedBy"
+            from delivery_reports
+           where date >= ${since} order by date desc limit ${limit}`;
+      }
+      if (kind === "purchase_items" || kind === "all") {
+        out.purchasedItems = await sql`
+          select date, description, uom, qty, supplier, amount, cost_center as "costCenter",
+                 purchaser, reported_by as "reportedBy"
+            from purchase_item_reports
+           where date >= ${since} order by date desc limit ${limit}`;
+      }
+      return out;
+    }
+
+    case "get_production_reports": {
+      const days = Math.min(Number(args.days) || 30, 365);
+      const limit = Math.min(Number(args.limit) || 25, 100);
+      const since = new Date(Date.now() - days * 86400_000);
+      const [production, stock, ops] = await Promise.all([
+        sql`select date, fgr_no as "fgrNo", products, reported_by as "reportedBy"
+              from production_reports where date >= ${since}
+             order by date desc limit ${limit}`,
+        sql`select month, items, reported_by as "reportedBy", created_at as "createdAt"
+              from stock_status_reports order by created_at desc limit ${limit}`,
+        sql`select date_label as "dateLabel", date, delivered, received, stock, bags,
+                   reported_by as "reportedBy"
+              from daily_ops_reports where date >= ${since}
+             order by date desc limit ${limit}`,
+      ]);
+      return { days, productionReports: production, stockStatus: stock, dailyOpsReports: ops };
+    }
+
+    case "get_submission_compliance": {
+      const day = typeof args.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(args.date)
+        ? args.date
+        : eatDateLabel(new Date());
+      const dayStart = new Date(`${day}T00:00:00+03:00`);
+      const dayEnd = new Date(dayStart.getTime() + 86_400_000);
+
+      const roster = await sql<{ full_name: string; positions: string[]; active: boolean }[]>`
+        select full_name, positions, active from telegram_users where active = true
+      `;
+      // Only roles that actually owe a daily report count as "missing" — holding
+      // a receiver-only role (HR, admin) is not a failure to submit.
+      const obliged = roster.filter((u) => requiresDailyReport(u.positions));
+
+      const filed = await sql<{ actor: string }[]>`
+        select distinct actor from bot_activity
+         where action = 'submission' and ok = true
+           and created_at >= ${dayStart} and created_at < ${dayEnd}
+      `;
+      const filedSet = new Set(filed.map((f) => f.actor));
+
+      return {
+        date: day,
+        obligedCount: obliged.length,
+        submitted: obliged.filter((u) => filedSet.has(u.full_name)).map((u) => u.full_name),
+        missing: obliged.filter((u) => !filedSet.has(u.full_name)).map((u) => u.full_name),
+        // Submissions from people with no daily obligation still show up here.
+        allActorsToday: [...filedSet],
+      };
+    }
+
     case "search_records": {
       const limit = Math.min(Number(args.limit) || 20, 50);
       switch (args.collection) {
         case "sales_receipts":
           return sql`select * from sales_receipts order by date desc limit ${limit}`;
+        case "daily_reports":
+          return sql`select * from daily_reports order by created_at desc limit ${limit}`;
+        case "hr_reports":
+          return sql`select * from hr_reports order by created_at desc limit ${limit}`;
+        case "material_counts":
+          return sql`select * from material_counts order by created_at desc limit ${limit}`;
+        case "daily_ops_reports":
+          return sql`select * from daily_ops_reports order by date desc limit ${limit}`;
+        case "production_reports":
+          return sql`select * from production_reports order by date desc limit ${limit}`;
+        case "stock_status_reports":
+          return sql`select * from stock_status_reports order by created_at desc limit ${limit}`;
+        case "raw_material_receipts":
+          return sql`select * from raw_material_receipts order by date desc limit ${limit}`;
+        case "delivery_reports":
+          return sql`select * from delivery_reports order by date desc limit ${limit}`;
+        case "purchase_item_reports":
+          return sql`select * from purchase_item_reports order by date desc limit ${limit}`;
+        case "bot_activity":
+          return sql`select created_at, actor, action, detail, ok from bot_activity
+                      order by created_at desc limit ${limit}`;
         case "invoices":
           // Parameterised ILIKE — no unescaped input into a regex.
           return args.client
@@ -272,38 +486,55 @@ export async function companyChat(
         "a client) and the sales team's daily Sales report (`sales_receipts`, filed on the Telegram bot from " +
         "scanned receipts) — use get_sales_reports for the latter. If a question just says 'sales', check both " +
         "and say which channel each figure came from. " +
+        "Staff file structured reports on the Telegram bot every day and you CAN read all of them: " +
+        "use get_daily_submissions for the free-text daily/HR/material-count reports, get_asset_reports " +
+        "for raw material received, deliveries and purchased items, get_production_reports for the " +
+        "production grid, stock status and daily operations report, and get_submission_compliance for " +
+        "who has or has not filed. If a question is about what someone reported, reach for those first. " +
         "ALWAYS fetch data with tools before quoting figures; " +
-        "never estimate or invent numbers. Currency is ETB. Today is " +
-        new Date().toISOString().slice(0, 10) +
-        ". Be concise, direct, and flag anything that looks like a problem.";
+        "never estimate or invent numbers. If a tool result says it was TRUNCATED, say the answer is " +
+        "partial and narrow the query rather than totalling what you can see. If the data genuinely " +
+        "does not contain the answer, say so plainly instead of guessing. Currency is ETB. Today is " +
+        eatDateLabel(new Date()) +
+        " (East Africa Time). Be concise, direct, and flag anything that looks like a problem.";
 
-  // Gemini has no system role: the instructions lead the first user turn.
-  const history = messages.slice(-12);
-  const convo: GeminiContent[] = history.map((m, i) => ({
+  // The prompt goes in Gemini's own system_instruction field. It used to be
+  // prepended to the first message of the window, which broke once the history
+  // grew: slice(-12) can land on an ASSISTANT message, so the instructions ended
+  // up attributed to the model and then unshifted a second time as a user turn.
+  const convo: GeminiContent[] = messages.slice(-12).map((m) => ({
     role: m.role === "assistant" ? "model" : "user",
-    parts: [{ text: i === 0 ? `${systemPrompt}\n\n---\n\n${m.content}` : m.content }],
+    parts: [{ text: m.content }],
   }));
-  if (convo.length === 0 || convo[0].role !== "user") {
-    convo.unshift({ role: "user", parts: [{ text: systemPrompt }] });
-  }
+  // Gemini requires the conversation to open on a user turn.
+  while (convo.length > 0 && convo[0].role !== "user") convo.shift();
+  if (convo.length === 0) return "I could not produce an answer.";
 
-  // Two tool rounds is enough for these queries and keeps us inside maxDuration.
-  // The chat is not inside the Telegram webhook, so it can afford a longer budget
-  // than the receipt reader's.
-  const CHAT_TIMEOUT_MS = 20000;
+  // Three model passes have to fit inside the route's maxDuration of 60s, with
+  // room for the DB queries between them — hence 12s each, not 20.
+  const CHAT_TIMEOUT_MS = 12000;
+  const tools = geminiTools();
+  let lastError = "";
+  let toolsRan = false;
 
   for (let round = 0; round < 2; round++) {
     const res = await geminiGenerate(convo, {
-      tools: geminiTools(),
+      systemInstruction: systemPrompt,
+      tools,
+      // Round one MUST query something. Left on AUTO, a small model happily
+      // answers from thin air — which is exactly the "the AI can't see the
+      // database" complaint, and flatly against this prompt's own rules.
+      toolConfig: round === 0 ? { functionCallingConfig: { mode: "ANY" } } : undefined,
       temperature: 0.2,
       maxOutputTokens: 900,
       timeoutMs: CHAT_TIMEOUT_MS,
     });
 
-    // A transport failure must not hang or blank the chat — break out and try a
-    // plain, tool-free answer below with whatever data was already gathered.
+    // A transport failure must not hang or blank the chat — break out and try to
+    // answer below with whatever data was already gathered.
     if (!res.ok) {
-      console.error("chat tool round failed, falling back to plain answer:", res.error);
+      lastError = res.error || "unknown error";
+      console.error("chat tool round failed:", lastError);
       break;
     }
     if (res.calls.length === 0) {
@@ -311,27 +542,25 @@ export async function companyChat(
       break;
     }
 
-    // Echo the calls back as a model turn, then answer each one. Gemini requires
-    // the functionCall turn to be present before its functionResponse.
-    convo.push({
-      role: "model",
-      parts: res.calls.map((c) => ({ functionCall: { name: c.name, args: c.args } })),
-    });
+    // Echo back the model's own turn — including any text it emitted alongside
+    // the calls, or the reconstructed history stops matching what it produced.
+    const modelParts: Record<string, unknown>[] = [];
+    if (res.text.trim()) modelParts.push({ text: res.text });
+    for (const c of res.calls) modelParts.push({ functionCall: { name: c.name, args: c.args } });
+    convo.push({ role: "model", parts: modelParts });
 
     const responses = [];
     for (const call of res.calls) {
       let result: unknown;
       try {
         result = await runTool(call.name, call.args);
+        toolsRan = true;
       } catch (e) {
+        console.error(`chat tool ${call.name} failed:`, e);
         result = { error: String(e) };
       }
       responses.push({
-        functionResponse: {
-          name: call.name,
-          // Truncated: a wide table can otherwise crowd out the question itself.
-          response: { result: JSON.stringify(result).slice(0, 24000) },
-        },
+        functionResponse: { name: call.name, response: { result: clampResult(result) } },
       });
     }
     convo.push({ role: "user", parts: responses });
@@ -339,12 +568,46 @@ export async function companyChat(
 
   // Final pass: keep the full conversation (including any tool results already
   // fetched) so the answer is grounded, and nudge the model to reply in prose.
+  //
+  // `tools` MUST be passed even though we want no more calls. By now `convo`
+  // holds functionCall/functionResponse parts, and Gemini rejects those outright
+  // when no functionDeclarations accompany them — a 400 that fired on precisely
+  // the requests where data HAD been fetched, making the assistant look blind to
+  // the database. NONE forbids further calls without removing the declarations.
   const final = await geminiGenerate(
-    [...convo, { role: "user", parts: [{ text: "Answer my question now using the data above. Do not call any more tools." }] }],
-    { temperature: 0.2, maxOutputTokens: 900, timeoutMs: CHAT_TIMEOUT_MS }
+    [
+      ...convo,
+      { role: "user", parts: [{ text: "Answer my question now using the data above. Do not call any more tools." }] },
+    ],
+    {
+      systemInstruction: systemPrompt,
+      tools,
+      toolConfig: { functionCallingConfig: { mode: "NONE" } },
+      temperature: 0.2,
+      maxOutputTokens: 900,
+      timeoutMs: CHAT_TIMEOUT_MS,
+    }
   );
   if (final.ok && final.text.trim()) return final.text;
 
-  console.error("chat final pass failed:", final.error);
-  return "The assistant is taking too long to respond right now. Please try again in a moment.";
+  // Throw rather than returning prose: the route must be able to tell a failure
+  // from an answer, so it does not spend one of the day's ten questions on it.
+  const why = final.error || lastError || "empty response";
+  console.error("chat final pass failed:", why, toolsRan ? "(tools had run)" : "(no tools ran)");
+  throw new Error(`The assistant could not complete the answer: ${why}`);
+}
+
+/**
+ * Serialise a tool result for the model, with an explicit marker when it is cut.
+ * A bare slice() ends mid-object and the model cannot tell clipped data from
+ * complete data — it then reports a partial total as if it were the whole.
+ */
+function clampResult(result: unknown, limit = 24000): string {
+  const json = JSON.stringify(result) ?? "null";
+  if (json.length <= limit) return json;
+  return (
+    json.slice(0, limit) +
+    `\n\n[TRUNCATED after ${limit} characters — this result is INCOMPLETE. ` +
+    `Say so, and narrow the query (fewer days, or a filter) rather than totalling what you can see.]`
+  );
 }

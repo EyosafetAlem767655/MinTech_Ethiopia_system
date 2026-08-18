@@ -71,6 +71,25 @@ export async function claimChatRequest(actor: string): Promise<QuotaVerdict> {
   }
 }
 
+/**
+ * Give a claimed slot back after an infrastructure failure (Gemini rejected the
+ * request, the transport died) so the user is not charged for an answer they
+ * never received. Deliberately NOT called for an answer the user merely disliked
+ * — only for the paths where `companyChat` throws.
+ */
+export async function releaseChatRequest(actor: string): Promise<void> {
+  const day = eatDateLabel(new Date());
+  try {
+    await sql`
+      update ai_chat_usage set used = greatest(0, used - 1), updated_at = now()
+       where actor = ${actor} and day = ${day}
+    `;
+  } catch (e) {
+    // Never let a refund failure mask the original error the caller is handling.
+    console.error("releaseChatRequest failed:", e);
+  }
+}
+
 /** Read today's usage without consuming a slot (for showing "N left"). */
 export async function peekChatQuota(actor: string): Promise<QuotaVerdict> {
   const day = eatDateLabel(new Date());

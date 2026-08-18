@@ -16,7 +16,6 @@ import StockStatusPanel from "@/components/panels/StockStatusPanel";
 import RawMaterialReceivedPanel from "@/components/panels/RawMaterialReceivedPanel";
 import DeliveryReportPanel from "@/components/panels/DeliveryReportPanel";
 import ToolRequestsPanel from "@/components/panels/ToolRequestsPanel";
-import PurchaseItemsPanel from "@/components/panels/PurchaseItemsPanel";
 import SalesReceiptsPanel from "@/components/panels/SalesReceiptsPanel";
 
 /**
@@ -26,15 +25,13 @@ import SalesReceiptsPanel from "@/components/panels/SalesReceiptsPanel";
  */
 const PANELS: Record<DepartmentKey, ComponentType[]> = {
   production: [ProductionGridPanel, StockStatusPanel, ProductionOpsPanel, ShiftPanel, GatePanel],
-  // The three reports the asset manager files daily come first, then the wider
-  // stock/bag context. DeliveryReportPanel was previously mounted nowhere, which
-  // is why delivery data looked missing however much of it was filed.
+  // The three reports the asset manager files come first, then the wider bag /
+  // purchase context. Stock status and purchased items are gone: the asset role
+  // no longer files either, so a panel for them would only ever show stale rows.
   asset_management: [
     RawMaterialReceivedPanel,
     DeliveryReportPanel,
     ToolRequestsPanel,
-    PurchaseItemsPanel,
-    StockStatusPanel,
     BagControlPanel,
     PurchasesPanel,
   ],
