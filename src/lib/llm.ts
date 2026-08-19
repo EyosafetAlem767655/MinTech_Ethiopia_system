@@ -476,6 +476,164 @@ export async function analyseToolPhoto(
   }
 }
 
+/* ──────────────────── PP bag damage photo check (3 tiers) ───────────────────
+ * Gemini → Qwen-VL → Nemotron.
+ *
+ * Nemotron is text-only, so at that last tier the photo is NOT looked at: it can
+ * only weigh whether the stated reason and quantity are coherent. That is
+ * reported honestly via `photoAnalysed: false` rather than dressed up as a photo
+ * verdict — a judgement nobody made must never be presented as one.
+ *
+ * MUST NOT run inline in the Telegram webhook. A provider chain is exactly what
+ * once ran past the function limit and left updates unacknowledged, so Telegram
+ * redelivered them forever (see src/lib/receipt-scan.ts). Call it after the
+ * report is saved and the user has been answered.
+ */
+
+export interface DamagePhotoCheck {
+  /** False means no tier answered — NOT that the photo is suspect. */
+  checked: boolean;
+  /** False when the verdict was reached without actually looking at the image. */
+  photoAnalysed: boolean;
+  provider: "gemini" | "qwen" | "nemotron" | "none";
+  plausible: boolean;
+  confidence: number; // 0-100
+  observations: string;
+}
+
+const DAMAGE_PROMPT =
+  "You are inspecting a damage report for PP (polypropylene) bags at an Ethiopian " +
+  "stone-crushing plant. PP bags are the woven plastic sacks the crushed stone is packed in.\n" +
+  "Return STRICT JSON only: { \"plausible\": boolean (does the photo genuinely show PP bags, " +
+  "and damage consistent with the stated reason and quantity?), \"confidence\": number (0-100), " +
+  '"observations": string (one or two short sentences describing what you actually see) }.\n' +
+  "Judge only what is visible. A photo that is a screenshot, a picture of another screen, or " +
+  "too blurred to assess should get LOW confidence rather than a false accusation.";
+
+function damageContext(reason: string, quantity: number): string {
+  return `Stated reason: "${reason}". Stated quantity: ${quantity} bags.`;
+}
+
+function parseDamageVerdict(
+  raw: string,
+  provider: DamagePhotoCheck["provider"],
+  photoAnalysed: boolean
+): DamagePhotoCheck | null {
+  try {
+    const p = extractJson(raw);
+    if (p == null || typeof p !== "object") return null;
+    return {
+      checked: true,
+      photoAnalysed,
+      provider,
+      plausible: !!p.plausible,
+      confidence: Math.max(0, Math.min(100, Math.round(Number(p.confidence) || 0))),
+      observations: String(p.observations || ""),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function analyseDamagePhoto(
+  image: { base64: string; contentType: string },
+  reason: string,
+  quantity: number
+): Promise<DamagePhotoCheck> {
+  const context = damageContext(reason, quantity);
+
+  // Tier 1 — Gemini.
+  try {
+    const res = await geminiGenerate(
+      [
+        {
+          role: "user",
+          parts: [
+            { inline_data: { mime_type: image.contentType || "image/jpeg", data: image.base64 } },
+            { text: `${DAMAGE_PROMPT}\n${context}` },
+          ],
+        },
+      ],
+      { json: true, timeoutMs: 15000 }
+    );
+    if (res.ok && res.text.trim()) {
+      const verdict = parseDamageVerdict(res.text, "gemini", true);
+      if (verdict) return verdict;
+    }
+    console.warn("analyseDamagePhoto: Gemini tier unusable —", res.error || "unparseable");
+  } catch (e) {
+    console.warn("analyseDamagePhoto: Gemini tier threw —", e);
+  }
+
+  // Tier 2 — Qwen-VL. Still a real look at the image.
+  try {
+    const res = await visionAI().chat.completions.create({
+      model: VISION_MODEL,
+      max_tokens: 400,
+      messages: [
+        { role: "system", content: DAMAGE_PROMPT },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: context },
+            {
+              type: "image_url",
+              image_url: { url: `data:${image.contentType};base64,${image.base64}`, detail: "high" },
+            },
+          ],
+        },
+      ],
+    });
+    const verdict = parseDamageVerdict(res.choices[0]?.message?.content || "", "qwen", true);
+    if (verdict) return verdict;
+    console.warn("analyseDamagePhoto: Qwen tier returned an unparseable verdict");
+  } catch (e) {
+    console.warn("analyseDamagePhoto: Qwen tier threw —", e);
+  }
+
+  // Tier 3 — Nemotron, text only. It cannot see the photo, so it judges only
+  // whether the written reason and the quantity hang together.
+  try {
+    const res = await textAI().chat.completions.create({
+      model: TEXT_MODEL,
+      max_tokens: 300,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ...({ chat_template_kwargs: { enable_thinking: false } } as any),
+      messages: [
+        {
+          role: "system",
+          content:
+            "You assess a PP bag damage report at an Ethiopian stone-crushing plant. " +
+            "You CANNOT see the photo — judge only whether the written reason is a coherent " +
+            "explanation for the stated quantity of damaged bags.\n" +
+            'Return STRICT JSON only: { "plausible": boolean, "confidence": number (0-100), ' +
+            '"observations": string }. Say explicitly that the photo was not examined.',
+        },
+        { role: "user", content: context },
+      ],
+    });
+    const verdict = parseDamageVerdict(res.choices[0]?.message?.content || "", "nemotron", false);
+    if (verdict) {
+      return {
+        ...verdict,
+        observations:
+          `[Photo not analysed — image models unavailable] ${verdict.observations}`.trim(),
+      };
+    }
+  } catch (e) {
+    console.warn("analyseDamagePhoto: Nemotron tier threw —", e);
+  }
+
+  return {
+    checked: false,
+    photoAnalysed: false,
+    provider: "none",
+    plausible: false,
+    confidence: 0,
+    observations: "No AI provider was available to check this photo.",
+  };
+}
+
 /* ───────────────────────── Receipt QR-code check ───────────────────────────── */
 
 export interface QRCheckResult {

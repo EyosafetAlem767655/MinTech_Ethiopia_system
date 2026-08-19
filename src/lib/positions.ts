@@ -28,7 +28,8 @@ export type CapabilityKey =
   | "purchase_items"
   | "sales_receipt_scan"
   | "sales_report_entry"
-  | "tool_request";
+  | "tool_request"
+  | "pp_bag_damage";
 
 /** How the bot collects a capability's payload. */
 export type CaptureMode =
@@ -175,6 +176,13 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
     input: "any",
     question: "🔧 የመሣሪያ ግዢ ጥያቄ በደረጃ እናስገባለን።",
   },
+  pp_bag_damage: {
+    key: "pp_bag_damage",
+    button: "💔 የPP ከረጢት ብልሽት ሪፖርት",
+    captureMode: "asset_entry",
+    input: "photo",
+    question: "💔 የPP ከረጢት ብልሽት ሪፖርት በደረጃ እናስገባለን።",
+  },
   purchase_items: {
     key: "purchase_items",
     button: "🧾 የግዢ ዕቃዎች ሪፖርት",
@@ -283,6 +291,16 @@ export interface Position {
    * HR and Admin are recipients, also false.
    */
   dailyRequired: boolean;
+  /**
+   * Tables that count as "this person reported today".
+   *
+   * Without this, compliance was measured solely by a `daily_reports` row — which
+   * only the `daily_report` capability can create. Roles that report through the
+   * guided flows instead could therefore never mark themselves as done: they were
+   * re-reminded every morning after filing and sat permanently in the "missing"
+   * list. Each role now declares what its own submission looks like.
+   */
+  submissionTables: string[];
 }
 
 /** Capability keys in declaration order — used to grant the admin everything. */
@@ -297,6 +315,7 @@ export const POSITIONS: Record<PositionKey, Position> = {
     description: "Reports production output every day (shift and daily operations).",
     capabilities: ["daily_report", "shift", "ops", "production_report", "stock_status"],
     dailyRequired: true,
+    submissionTables: ["daily_reports", "shift_reports", "daily_ops_reports", "production_reports", "stock_status_reports"],
   },
   asset_materials: {
     key: "asset_materials",
@@ -307,8 +326,9 @@ export const POSITIONS: Record<PositionKey, Position> = {
     // Deliberately just the two guided flows. The free-text daily report, stock
     // status and material count were left over from before those flows existed
     // and only duplicated, less reliably, what the guided steps now capture.
-    capabilities: ["raw_material_received", "finished_goods_delivery"],
+    capabilities: ["raw_material_received", "finished_goods_delivery", "pp_bag_damage"],
     dailyRequired: true,
+    submissionTables: ["raw_material_receipts", "delivery_reports", "pp_bag_damage_reports"],
   },
   asset_purchase: {
     key: "asset_purchase",
@@ -318,6 +338,7 @@ export const POSITIONS: Record<PositionKey, Position> = {
     description: "Raises tool and equipment purchase requests when needed (not daily).",
     capabilities: ["tool_request"],
     dailyRequired: false,
+    submissionTables: ["purchase_requests"],
   },
   sales_daily: {
     key: "sales_daily",
@@ -327,6 +348,7 @@ export const POSITIONS: Record<PositionKey, Position> = {
     description: "Files the daily sales report together with receipts.",
     capabilities: ["sales_report_entry", "sales_receipt_scan"],
     dailyRequired: true,
+    submissionTables: ["sales_receipts"],
   },
   finance_daily: {
     key: "finance_daily",
@@ -336,6 +358,8 @@ export const POSITIONS: Record<PositionKey, Position> = {
     description: "Files the daily financial report and 3% withholding (WHT) receipts.",
     capabilities: ["daily_report", "sales", "wht"],
     dailyRequired: true,
+    // payments has no author column, so it can never be attributed to a person.
+    submissionTables: ["daily_reports", "receipts"],
   },
   finance_monthly: {
     key: "finance_monthly",
@@ -345,6 +369,7 @@ export const POSITIONS: Record<PositionKey, Position> = {
     description: "Files the monthly financial summary (monthly, not daily).",
     capabilities: ["sales"],
     dailyRequired: false,
+    submissionTables: [],
   },
   hr: {
     key: "hr",
@@ -355,6 +380,7 @@ export const POSITIONS: Record<PositionKey, Position> = {
       "Receives the morning report of who did and didn't submit, plus tool purchase requests. Can also file HR/customer reports.",
     capabilities: ["hr", "purchase"],
     dailyRequired: false,
+    submissionTables: ["hr_reports"],
   },
   admin: {
     key: "admin",
@@ -365,6 +391,7 @@ export const POSITIONS: Record<PositionKey, Position> = {
       "Receives a concise daily Telegram digest across Production, Sales, Finance and Asset, plus who missed the daily report. Full access to every report.",
     capabilities: ALL_CAPABILITIES,
     dailyRequired: false,
+    submissionTables: [],
   },
 };
 
@@ -427,6 +454,25 @@ export function capabilitiesFor(positions: string[]): Capability[] {
     .map((k) => CAPABILITIES[k]);
 }
 
+export function isCapabilityKey(value: unknown): value is CapabilityKey {
+  return typeof value === "string" && value in CAPABILITIES;
+}
+
+/**
+ * The functionalities an employee actually gets.
+ *
+ * `override` is the per-employee list chosen in the dashboard. Null or empty
+ * means "whatever the positions grant", which is how every user behaved before
+ * overrides existed — so an untouched employee is unaffected.
+ */
+export function resolveCapabilities(positions: string[], override?: string[] | null): Capability[] {
+  const keys = (override || []).filter(isCapabilityKey);
+  if (keys.length === 0) return capabilitiesFor(positions);
+  const set = new Set<CapabilityKey>(keys);
+  // Declaration order, so the bot menu stays stable however the list was saved.
+  return (Object.keys(CAPABILITIES) as CapabilityKey[]).filter((k) => set.has(k)).map((k) => CAPABILITIES[k]);
+}
+
 export function hasCapability(positions: string[], key: CapabilityKey): boolean {
   return capabilitiesFor(positions).some((c) => c.key === key);
 }
@@ -434,6 +480,24 @@ export function hasCapability(positions: string[], key: CapabilityKey): boolean 
 /** True when any held role obliges a daily report — drives reminders/compliance. */
 export function requiresDailyReport(positions: string[]): boolean {
   return positions.some((p) => isPositionKey(p) && POSITIONS[p].dailyRequired);
+}
+
+/** Every table that counts as "reported" for the roles this person holds. */
+export function submissionTablesFor(positions: string[]): string[] {
+  const out = new Set<string>();
+  for (const p of positions) {
+    if (isPositionKey(p)) POSITIONS[p].submissionTables.forEach((t) => out.add(t));
+  }
+  return [...out];
+}
+
+/**
+ * True when the person files through the free-text daily report rather than a
+ * guided flow. Drives the reminder wording: telling someone to press
+ * "📝 የቀኑ ሪፖርት" when they have no such button is worse than saying nothing.
+ */
+export function filesFreeTextDailyReport(positions: string[], override?: string[] | null): boolean {
+  return resolveCapabilities(positions, override).some((c) => c.key === "daily_report");
 }
 
 /** True when the user holds a specific role (e.g. hr, admin). */

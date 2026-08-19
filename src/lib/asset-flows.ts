@@ -15,7 +15,7 @@ import type { ToolPhotoCheck } from "@/lib/llm";
  * from growing three more state machines.
  */
 
-export type AssetFlowKind = "raw_material" | "delivery" | "tool_request";
+export type AssetFlowKind = "raw_material" | "delivery" | "tool_request" | "pp_bag_damage";
 
 export interface AssetFlowState {
   kind: AssetFlowKind;
@@ -24,15 +24,21 @@ export interface AssetFlowState {
   draft: Record<string, string | number>;
   /** stored_files id of the damaged-item photo (tool_request/maintenance). */
   photoFileId?: string;
+  /** stored_files ids for flows that collect several photos (pp_bag_damage). */
+  photoFileIds?: string[];
   /** Gemini's verdict on that photo. */
   check?: ToolPhotoCheck;
 }
+
+/** Max photos a multi-photo step will accept. */
+export const MAX_FLOW_PHOTOS = 3;
 
 export interface AssetStep {
   id: string;
   /** Amharic question shown to the user. */
   prompt: string;
-  type: "date" | "text" | "number" | "choice" | "photo";
+  /** "photos" collects several and waits for a done button; "photo" takes one. */
+  type: "date" | "text" | "number" | "choice" | "photo" | "photos";
   choices?: { label: string; value: string }[];
   /** Skip the step unless this holds — used for the maintenance/new-item branch. */
   when?: (draft: Record<string, string | number>) => boolean;
@@ -94,16 +100,29 @@ const TOOL_REQUEST_STEPS: AssetStep[] = [
   },
 ];
 
+const PP_BAG_DAMAGE_STEPS: AssetStep[] = [
+  { id: "date", prompt: "📅 ብልሽቱ የተከሰተበትን ቀን ይምረጡ።", type: "date" },
+  { id: "reason", prompt: "❓ ከረጢቶቹ ለምን እንደተበላሹ ይግለጹ።", type: "text" },
+  { id: "quantity", prompt: "🔢 የተበላሹትን ከረጢቶች ብዛት ይፃፉ።", type: "number" },
+  {
+    id: "photos",
+    prompt: `📷 የተበላሹትን ከረጢቶች ፎቶ ይላኩ — እስከ ${MAX_FLOW_PHOTOS} ፎቶ። ከጨረሱ በኋላ "✅ ጨርሻለሁ" ይጫኑ።`,
+    type: "photos",
+  },
+];
+
 const STEPS: Record<AssetFlowKind, AssetStep[]> = {
   raw_material: RAW_MATERIAL_STEPS,
   delivery: DELIVERY_STEPS,
   tool_request: TOOL_REQUEST_STEPS,
+  pp_bag_damage: PP_BAG_DAMAGE_STEPS,
 };
 
 export const FLOW_TITLE: Record<AssetFlowKind, string> = {
   raw_material: "🚚 የጥሬ ዕቃ ገቢ ሪፖርት",
   delivery: "🚛 የማድረሻ ሪፖርት",
   tool_request: "🔧 የመሣሪያ ግዢ ጥያቄ",
+  pp_bag_damage: "💔 የPP ከረጢት ብልሽት ሪፖርት",
 };
 
 export function stepsFor(kind: AssetFlowKind, draft: Record<string, string | number>): AssetStep[] {
@@ -211,6 +230,18 @@ export function assetPreview(state: AssetFlowState): string {
     );
   }
 
+  if (state.kind === "pp_bag_damage") {
+    const n = state.photoFileIds?.length || 0;
+    return (
+      head +
+      `📅 Date: ${esc(d.date)}\n` +
+      `❓ ምክንያት: ${esc(d.reason)}\n` +
+      `🔢 ብዛት: ${qty(Number(d.quantity) || 0)} ከረጢት\n` +
+      `📷 ፎቶ: ${n}\n\n` +
+      `<i>ፎቶዎቹ ከተቀመጠ በኋላ በAI ይጣራሉ — ውጤቱን እንልክልዎታለን።</i>\n`
+    );
+  }
+
   const kindLabel = d.kind === "maintenance" ? "🛠 ጥገና" : "🆕 አዲስ ዕቃ";
   let out =
     head +
@@ -271,6 +302,17 @@ export async function saveAssetReport(
               ${sql.json(jsonMap(d, "prod:", DELIVERY_PRODUCTS))}, 'telegram')
       returning id`;
     return { id: row.id, table: "delivery_reports" };
+  }
+
+  if (state.kind === "pp_bag_damage") {
+    // Saved without a verdict: the AI chain runs after this returns, so the user
+    // is never left waiting on three providers inside the webhook.
+    const [row] = await sql<{ id: string }[]>`
+      insert into pp_bag_damage_reports (date, reason, quantity, reported_by, source)
+      values (${reportDate(d.date)}, ${String(d.reason || "")}, ${Math.round(Number(d.quantity) || 0)},
+              ${reportedBy}, 'telegram')
+      returning id`;
+    return { id: row.id, table: "pp_bag_damage_reports" };
   }
 
   const [row] = await sql<{ id: string }[]>`

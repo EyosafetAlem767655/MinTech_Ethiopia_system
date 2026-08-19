@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import sql from "@/lib/sql";
-import { purgeOldPhotos } from "@/lib/storage";
+import { purgeOldPhotos, purgePpBagPhotos } from "@/lib/storage";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -18,6 +18,8 @@ export async function GET(req: NextRequest) {
   }
 
   const hours = Math.max(1, Number(req.nextUrl.searchParams.get("hours")) || 72);
+  const ppDaysRaw = req.nextUrl.searchParams.get("ppDays");
+  const ppDays = ppDaysRaw === null ? 365 : Math.max(0, Number(ppDaysRaw) || 0);
 
   // Drain in batches so a large backlog can't blow the function time budget;
   // whatever isn't cleared this run is picked up on the next schedule.
@@ -25,6 +27,15 @@ export async function GET(req: NextRequest) {
   for (let i = 0; i < 20; i++) {
     const res = await purgeOldPhotos(hours);
     deleted += res.deleted;
+    if (res.deleted === 0) break;
+  }
+
+  // PP bag damage evidence is kept far longer — it backs the duplicate check —
+  // so it has its own sweep and is excluded from the one above.
+  let ppDeleted = 0;
+  for (let i = 0; i < 10; i++) {
+    const res = await purgePpBagPhotos(ppDays);
+    ppDeleted += res.deleted;
     if (res.deleted === 0) break;
   }
 
@@ -43,6 +54,8 @@ export async function GET(req: NextRequest) {
     ok: true,
     deleted,
     olderThanHours: hours,
+    ppBagDeleted: ppDeleted,
+    ppBagOlderThanDays: ppDays,
     dedupeRowsDeleted: Number(dedupe[0]?.count || 0),
   });
 }

@@ -23,6 +23,7 @@ export const SUBMISSION_COLLECTIONS = [
   "delivery",
   "purchase_items",
   "tool_request",
+  "pp_bag_damage",
   "sales_receipt",
 ] as const;
 
@@ -211,6 +212,22 @@ export const SUBMISSIONS: Record<SubmissionCollection, SubmissionSpec> = {
     ],
     editableKeys: ["title", "quantity", "justification"],
     photoColumn: "photo_file_id",
+  },
+  pp_bag_damage: {
+    table: "pp_bag_damage_reports",
+    label: "PP bag damage",
+    icon: "💔",
+    dateColumn: "date",
+    authorColumn: "reported_by",
+    searchColumns: ["reason", "reported_by"],
+    displayFields: [
+      LONG("reason", "Reason"),
+      NUM("quantity", "Quantity"),
+      NUM("trust_score", "Trust score"),
+      TEXT("reported_by", "By"),
+    ],
+    // trust_score is the AI's own output, not something to hand-edit.
+    editableKeys: ["reason", "quantity"],
   },
   sales_receipt: {
     table: "sales_receipts",

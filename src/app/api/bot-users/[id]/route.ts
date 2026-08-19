@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import sql, { first, isUuid } from "@/lib/sql";
 import { hashPassword, normalizeFullName, passwordProblem } from "@/lib/password";
-import { isPositionKey } from "@/lib/positions";
+import { isCapabilityKey, isPositionKey } from "@/lib/positions";
 import { revokeUserSessions } from "@/lib/bot-auth";
 
 export const dynamic = "force-dynamic";
@@ -40,6 +40,21 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
       !before ||
       before.positions.length !== positions.length ||
       [...positions].sort().join("|") !== [...before.positions].sort().join("|");
+    if (changed) await revokeUserSessions(user.id);
+  }
+
+  if (Array.isArray(body.capabilities)) {
+    const caps = body.capabilities.filter(isCapabilityKey);
+    // An empty array is meaningful: it clears the override and returns the
+    // employee to their positions' defaults. It must never mean "no buttons",
+    // which would leave them with an empty menu and no way to report.
+    const before = first(await sql<{ capabilities: string[] | null }[]>`
+      select capabilities from telegram_users where id = ${user.id}
+    `);
+    await sql`update telegram_users set capabilities = ${caps.length > 0 ? caps : null} where id = ${user.id}`;
+    const prev = before?.capabilities || [];
+    const changed = prev.length !== caps.length || [...caps].sort().join("|") !== [...prev].sort().join("|");
+    // Same reason as positions: a live session caches the keyboard.
     if (changed) await revokeUserSessions(user.id);
   }
 

@@ -16,6 +16,7 @@ import StockStatusPanel from "@/components/panels/StockStatusPanel";
 import RawMaterialReceivedPanel from "@/components/panels/RawMaterialReceivedPanel";
 import DeliveryReportPanel from "@/components/panels/DeliveryReportPanel";
 import ToolRequestsPanel from "@/components/panels/ToolRequestsPanel";
+import PpBagDamagePanel from "@/components/panels/PpBagDamagePanel";
 import SalesReceiptsPanel from "@/components/panels/SalesReceiptsPanel";
 
 /**
@@ -31,6 +32,7 @@ const PANELS: Record<DepartmentKey, ComponentType[]> = {
   asset_management: [
     RawMaterialReceivedPanel,
     DeliveryReportPanel,
+    PpBagDamagePanel,
     ToolRequestsPanel,
     BagControlPanel,
     PurchasesPanel,

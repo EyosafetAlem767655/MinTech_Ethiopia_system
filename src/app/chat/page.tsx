@@ -14,6 +14,77 @@ const SUGGESTIONS = [
   "Compare this month's production to last month",
 ];
 
+/**
+ * Minimal markdown renderer for assistant replies.
+ *
+ * The model writes markdown whatever the prompt says, and rendering it as plain
+ * text left literal `**` all over the answers. This builds React nodes rather
+ * than HTML — model output is untrusted text and must never reach
+ * dangerouslySetInnerHTML.
+ */
+function renderInline(text: string, keyPrefix: string): React.ReactNode[] {
+  const out: React.ReactNode[] = [];
+  // Bold before italic, so `**x**` is not eaten by the single-asterisk rule.
+  const re = /(\*\*|__)(.+?)\1|(\*|_)(?!\s)(.+?)(?<!\s)\3|`([^`]+)`/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  let i = 0;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    const key = `${keyPrefix}-${i++}`;
+    if (m[2] !== undefined) out.push(<strong key={key}>{m[2]}</strong>);
+    else if (m[4] !== undefined) out.push(<em key={key}>{m[4]}</em>);
+    else if (m[5] !== undefined)
+      out.push(
+        <code key={key} className="rounded bg-stone-100 px-1 py-0.5 font-mono text-[0.9em]">
+          {m[5]}
+        </code>
+      );
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
+function RichText({ text }: { text: string }) {
+  const lines = text.split("\n");
+  return (
+    <>
+      {lines.map((line, i) => {
+        const heading = /^(#{1,6})\s+(.*)$/.exec(line);
+        if (heading) {
+          return (
+            <p key={i} className="mt-2 font-bold first:mt-0">
+              {renderInline(heading[2], `h${i}`)}
+            </p>
+          );
+        }
+        const bullet = /^\s*[-*•]\s+(.*)$/.exec(line);
+        if (bullet) {
+          return (
+            <span key={i} className="flex gap-1.5">
+              <span className="select-none text-stone-400">•</span>
+              <span>{renderInline(bullet[1], `b${i}`)}</span>
+            </span>
+          );
+        }
+        const numbered = /^\s*(\d+)[.)]\s+(.*)$/.exec(line);
+        if (numbered) {
+          return (
+            <span key={i} className="flex gap-1.5">
+              <span className="select-none text-stone-400">{numbered[1]}.</span>
+              <span>{renderInline(numbered[2], `n${i}`)}</span>
+            </span>
+          );
+        }
+        // A blank line is a paragraph break, not a stray empty row.
+        if (!line.trim()) return <span key={i} className="block h-2" />;
+        return <span key={i} className="block">{renderInline(line, `l${i}`)}</span>;
+      })}
+    </>
+  );
+}
+
 interface Quota {
   limit: number;
   used: number;
@@ -109,13 +180,15 @@ export default function ChatPage() {
         {messages.map((m, i) => (
           <div key={i} className={`flex animate-fade-up ${m.role === "user" ? "justify-end" : "justify-start"}`}>
             <div
-              className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm whitespace-pre-wrap leading-relaxed ${
+              className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
                 m.role === "user"
-                  ? "bg-clay-700 text-white rounded-br-md"
+                  ? "whitespace-pre-wrap bg-clay-700 text-white rounded-br-md"
                   : "card text-stone-700 rounded-bl-md"
               }`}
             >
-              {m.content}
+              {/* Only the assistant writes markdown; a user's message is shown
+                  exactly as typed. */}
+              {m.role === "assistant" ? <RichText text={m.content} /> : m.content}
             </div>
           </div>
         ))}

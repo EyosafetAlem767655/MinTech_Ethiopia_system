@@ -1,7 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import sql from "@/lib/sql";
 import { eatDateKey, logActivity } from "@/lib/bot-auth";
-import { capabilitiesFor, hasPosition, positionLabelsAm, requiresDailyReport } from "@/lib/positions";
+import {
+  filesFreeTextDailyReport,
+  hasPosition,
+  positionLabelsAm,
+  requiresDailyReport,
+  resolveCapabilities,
+} from "@/lib/positions";
+import { splitByCompliance } from "@/lib/compliance";
 import { getAllDepartmentSummaries } from "@/lib/department-metrics";
 import { DEPARTMENTS } from "@/lib/departments";
 import { reportKeyboardFor, sendMessage } from "@/lib/telegram";
@@ -10,11 +17,14 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 const REMINDER_TEXT = "እባኮትን የቀኑን ሪፖርት ያስገቡ!";
+/** For roles that report through the guided flows rather than a daily write-up. */
+const REMINDER_TEXT_ANY = "እባኮትን የዛሬውን ሥራ ያስመዝግቡ!";
 
 interface Emp {
   id: string;
   full_name: string;
   positions: string[];
+  capabilities: string[] | null;
   chat_id: string;
   logged_in: boolean;
 }
@@ -31,35 +41,43 @@ export async function GET(req: NextRequest) {
 
   // Everyone with a known chat — reminders go to daily reporters, digests to HR/Admin.
   const employees = await sql<Emp[]>`
-    select id, full_name, positions, chat_id, logged_in
+    select id, full_name, positions, capabilities, chat_id, logged_in
       from telegram_users
      where active = true and chat_id is not null
   `;
 
-  // Who filed a daily report today.
-  const submittedRows = await sql<{ user_id: string }[]>`
-    select distinct user_id from daily_reports where date_key = ${today} and user_id is not null
-  `;
-  const submittedSet = new Set(submittedRows.map((r) => r.user_id));
-
+  // Who reported today — measured against each role's OWN tables, not just
+  // `daily_reports`. Only the free-text `daily_report` capability writes that
+  // table, so roles that file through the guided flows could never be counted
+  // as done and were re-reminded every morning after submitting.
   const dailyEmployees = employees.filter((u) => requiresDailyReport(u.positions));
-  const submitted = dailyEmployees.filter((u) => submittedSet.has(u.id));
-  const missing = dailyEmployees.filter((u) => !submittedSet.has(u.id));
+  const { submitted, missing } = await splitByCompliance(today, dailyEmployees);
+  const missingIds = new Set(missing.map((u) => u.id));
 
   /* ─────────── 1. Reminders → daily reporters not yet in, who are signed in ─────────── */
-  const toRemind = dailyEmployees.filter((u) => u.logged_in && !submittedSet.has(u.id));
+  const toRemind = dailyEmployees.filter((u) => u.logged_in && missingIds.has(u.id));
   let sent = 0;
   const failed: { fullName: string; error: string }[] = [];
 
   await Promise.all(
     toRemind.map(async (user) => {
       const chatId = String(user.chat_id);
-      const buttons = capabilitiesFor(user.positions).map((c) => c.button);
+      const caps = resolveCapabilities(user.positions, user.capabilities);
+      const buttons = caps.map((c) => c.button);
+
+      // Someone without the free-text daily report has no "የቀኑ ሪፖርት" button, so
+      // naming it just tells them to press something that isn't there. List
+      // their own buttons instead.
+      const writesDailyReport = filesFreeTextDailyReport(user.positions, user.capabilities);
+      const instruction = writesDailyReport
+        ? `📝 "የቀኑ ሪፖርት" የሚለውን ይጫኑ፤ ጽሑፍና ፎቶ አብረው ይላኩ።`
+        : `📝 እባኮትን ከሚከተሉት አንዱን ይጠቀሙ፦\n${buttons.map((b) => `• ${b}`).join("\n")}`;
+
       const text =
-        `⏰ <b>${REMINDER_TEXT}</b>\n\n` +
+        `⏰ <b>${writesDailyReport ? REMINDER_TEXT : REMINDER_TEXT_ANY}</b>\n\n` +
         `👤 ${user.full_name}\n` +
         `🏷️ ${positionLabelsAm(user.positions) || "—"}\n\n` +
-        `📝 "የቀኑ ሪፖርት" የሚለውን ይጫኑ፤ ጽሑፍና ፎቶ አብረው ይላኩ።`;
+        instruction;
       try {
         const res = await sendMessage(chatId, text, { reply_markup: reportKeyboardFor(buttons) });
         if (res?.ok) {

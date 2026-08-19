@@ -2,7 +2,15 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { POSITIONS, POSITION_GROUPS, capabilitiesFor, type PositionKey } from "@/lib/positions";
+import {
+  CAPABILITIES,
+  POSITIONS,
+  POSITION_GROUPS,
+  capabilitiesFor,
+  resolveCapabilities,
+  type CapabilityKey,
+  type PositionKey,
+} from "@/lib/positions";
 import {
   SUBMISSIONS,
   SUBMISSION_COLLECTIONS,
@@ -14,6 +22,8 @@ interface BotUser {
   _id: string;
   fullName: string;
   positions: PositionKey[];
+  /** Per-employee override; null/absent means the positions' defaults. */
+  capabilities?: CapabilityKey[] | null;
   active: boolean;
   loggedIn: boolean;
   chatId?: string;
@@ -457,6 +467,7 @@ function UsersTab() {
   const [fullName, setFullName] = useState("");
   const [password, setPassword] = useState("");
   const [positions, setPositions] = useState<PositionKey[]>([]);
+  const [caps, setCaps] = useState<CapabilityKey[] | null>(null);
 
   const load = useCallback(async () => {
     const res = await fetch("/api/bot-users");
@@ -477,7 +488,7 @@ function UsersTab() {
     const res = await fetch("/api/bot-users", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fullName, password, positions }),
+      body: JSON.stringify({ fullName, password, positions, capabilities: caps ?? [] }),
     });
     setBusy(false);
     if (!res.ok) {
@@ -487,6 +498,7 @@ function UsersTab() {
     setFullName("");
     setPassword("");
     setPositions([]);
+    setCaps(null);
     await load();
   };
 
@@ -565,14 +577,14 @@ function UsersTab() {
           Tick any reports across departments this employee should handle.
         </p>
         <div className="mt-2">
-          <PositionPicker selected={positions} onToggle={togglePosition} />
+          <PositionPicker selected={positions} onToggle={togglePosition} caps={caps} onCapsChange={setCaps} />
         </div>
 
         {positions.length > 0 && (
           <p className="mt-2 text-[11px] text-stone-500">
             Bot menu:{" "}
             <span className="font-medium text-stone-700">
-              {capabilitiesFor(positions)
+              {resolveCapabilities(positions, caps)
                 .map((c) => c.button)
                 .join("  ·  ")}
             </span>
@@ -645,9 +657,12 @@ function UsersTab() {
               {editing === u._id && (
                 <PositionEditor
                   initial={u.positions}
+                  initialCaps={u.capabilities?.length ? u.capabilities : null}
                   onCancel={() => setEditing(null)}
-                  onSave={async (next) => {
-                    await patch(u._id, { positions: next });
+                  onSave={async (next, nextCaps) => {
+                    // Always send capabilities: an empty array clears the
+                    // override, which is how "reset to defaults" is expressed.
+                    await patch(u._id, { positions: next, capabilities: nextCaps ?? [] });
                     setEditing(null);
                   }}
                 />
@@ -703,22 +718,34 @@ function UsersTab() {
 
 function PositionEditor({
   initial,
+  initialCaps,
   onSave,
   onCancel,
 }: {
   initial: PositionKey[];
-  onSave: (next: PositionKey[]) => void;
+  initialCaps: CapabilityKey[] | null;
+  onSave: (next: PositionKey[], caps: CapabilityKey[] | null) => void;
   onCancel: () => void;
 }) {
   const [next, setNext] = useState<PositionKey[]>(initial);
+  const [caps, setCaps] = useState<CapabilityKey[] | null>(initialCaps);
   const toggle = (p: PositionKey) =>
     setNext((prev) => (prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p]));
 
+  const effective = caps ?? capabilitiesFor(next).map((c) => c.key);
+
   return (
     <div className="mt-3 rounded-xl bg-stone-50 p-3">
-      <PositionPicker selected={next} onToggle={toggle} />
+      <PositionPicker selected={next} onToggle={toggle} caps={caps} onCapsChange={setCaps} />
       <div className="mt-3 flex gap-2">
-        <SmallBtn label="Save" tone="green" onClick={() => onSave(next)} disabled={next.length === 0} />
+        <SmallBtn
+          label="Save"
+          tone="green"
+          onClick={() => onSave(next, caps)}
+          // An employee with no functionalities has an empty bot menu and no way
+          // to file anything, so it is never a valid state to save.
+          disabled={next.length === 0 || effective.length === 0}
+        />
         <SmallBtn label="Cancel" onClick={onCancel} />
       </div>
     </div>
@@ -727,13 +754,37 @@ function PositionEditor({
 
 /* ─────────────────────── Department-grouped role picker ────────────────────── */
 
+/**
+ * Positions grant a default set of bot buttons; each button can then be ticked
+ * or unticked for this one employee.
+ *
+ * `caps === null` means "no override — use whatever the ticked positions grant",
+ * which is how every employee behaved before overrides existed. The first time a
+ * box is unticked the resolved set is frozen into an explicit list.
+ */
 function PositionPicker({
   selected,
   onToggle,
+  caps,
+  onCapsChange,
 }: {
   selected: PositionKey[];
   onToggle: (p: PositionKey) => void;
+  caps: CapabilityKey[] | null;
+  onCapsChange: (next: CapabilityKey[] | null) => void;
 }) {
+  const defaults = capabilitiesFor(selected).map((c) => c.key);
+  const effective = caps ?? defaults;
+
+  const toggleCap = (key: CapabilityKey) => {
+    const base = caps ?? defaults;
+    const next = base.includes(key) ? base.filter((k) => k !== key) : [...base, key];
+    // Back to exactly the defaults ⇒ drop the override rather than storing a
+    // list that would then silently stop tracking the position.
+    const same = next.length === defaults.length && [...next].sort().join("|") === [...defaults].sort().join("|");
+    onCapsChange(same ? null : next);
+  };
+
   return (
     <div className="space-y-2.5">
       {POSITION_GROUPS.map((g) => (
@@ -749,33 +800,74 @@ function PositionPicker({
               const pos = POSITIONS[p];
               const on = selected.includes(p);
               return (
-                <label
+                <div
                   key={p}
-                  className={`flex cursor-pointer items-start gap-2 rounded-lg border p-2.5 text-xs transition ${
+                  className={`rounded-lg border p-2.5 text-xs transition ${
                     on ? "border-clay-400 bg-clay-50" : "border-stone-200 bg-white"
                   }`}
                 >
-                  <input
-                    type="checkbox"
-                    checked={on}
-                    onChange={() => onToggle(p)}
-                    className="mt-0.5 accent-clay-700"
-                  />
-                  <span>
-                    <span className="block font-bold text-stone-800">{pos.en}</span>
-                    <span className="block text-stone-500">{pos.am}</span>
-                    {!pos.dailyRequired && (
-                      <span className="mt-1 inline-block rounded-full bg-stone-200 px-1.5 py-0.5 text-[10px] font-bold text-stone-500">
-                        not daily
-                      </span>
-                    )}
-                  </span>
-                </label>
+                  <label className="flex cursor-pointer items-start gap-2">
+                    <input
+                      type="checkbox"
+                      checked={on}
+                      onChange={() => onToggle(p)}
+                      className="mt-0.5 accent-clay-700"
+                    />
+                    <span>
+                      <span className="block font-bold text-stone-800">{pos.en}</span>
+                      <span className="block text-stone-500">{pos.am}</span>
+                      {!pos.dailyRequired && (
+                        <span className="mt-1 inline-block rounded-full bg-stone-200 px-1.5 py-0.5 text-[10px] font-bold text-stone-500">
+                          not daily
+                        </span>
+                      )}
+                    </span>
+                  </label>
+
+                  {/* Individual functionalities, only once the role is ticked. */}
+                  {on && (
+                    <div className="mt-2 space-y-1 border-t border-clay-200/60 pt-2">
+                      {pos.capabilities.map((key) => {
+                        const cap = CAPABILITIES[key];
+                        if (!cap) return null;
+                        return (
+                          <label key={key} className="flex cursor-pointer items-center gap-1.5 text-[11px]">
+                            <input
+                              type="checkbox"
+                              checked={effective.includes(key)}
+                              onChange={() => toggleCap(key)}
+                              className="accent-clay-700"
+                            />
+                            <span className="text-stone-700">{cap.button}</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
               );
             })}
           </div>
         </div>
       ))}
+
+      {caps !== null && (
+        <p className="flex flex-wrap items-center gap-2 rounded-lg bg-amber-50 px-2.5 py-1.5 text-[11px] text-amber-800">
+          <span>⚠️ Custom functionality set — this employee differs from their role defaults.</span>
+          <button
+            type="button"
+            onClick={() => onCapsChange(null)}
+            className="font-bold underline"
+          >
+            Reset to defaults
+          </button>
+        </p>
+      )}
+      {effective.length === 0 && selected.length > 0 && (
+        <p className="rounded-lg bg-red-50 px-2.5 py-1.5 text-[11px] font-bold text-red-700">
+          No functionalities ticked — this employee would have an empty bot menu.
+        </p>
+      )}
     </div>
   );
 }

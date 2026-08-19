@@ -146,11 +146,21 @@ export async function deleteFile(id: string): Promise<void> {
  * numbers/text stay forever and only the heavy image is reclaimed. Returns how
  * many files were removed in this batch (0 = nothing left to purge).
  */
+/**
+ * Kinds the short-retention sweep must leave alone.
+ *
+ * PP bag damage photos are the evidence the duplicate check compares against for
+ * a year; reaping them after 72 hours would make re-submitting an old photo
+ * undetectable. They have their own long sweep — purgePpBagPhotos below.
+ */
+const LONG_RETENTION_KINDS = ["pp_bag_damage"];
+
 export async function purgeOldPhotos(hours = 72, batch = 500): Promise<{ deleted: number }> {
   const rows = await sql<{ id: string; storage_path: string }[]>`
     select id, storage_path
       from stored_files
      where created_at < now() - (${hours} || ' hours')::interval
+       and (kind is null or kind <> all(${LONG_RETENTION_KINDS}))
      limit ${batch}
   `;
   if (rows.length === 0) return { deleted: 0 };
@@ -160,5 +170,37 @@ export async function purgeOldPhotos(hours = 72, batch = 500): Promise<{ deleted
     .catch((e) => console.error("purgeOldPhotos: storage remove failed:", e));
 
   await sql`delete from stored_files where id = any(${rows.map((r) => r.id)})`;
+  return { deleted: rows.length };
+}
+
+/**
+ * Yearly sweep for PP bag damage evidence: the image, its stored_files row, and
+ * its perceptual-hash row.
+ *
+ * Dropping the hash rows is the point, not a side effect — it is what makes the
+ * duplicate window exactly one year rather than forever-growing. The report rows
+ * themselves (reason, quantity, verdict) are the data and are never touched.
+ */
+export async function purgePpBagPhotos(days = 365, batch = 500): Promise<{ deleted: number }> {
+  const rows = await sql<{ id: string; storage_path: string }[]>`
+    select id, storage_path
+      from stored_files
+     where kind = 'pp_bag_damage'
+       and created_at < now() - (${days} || ' days')::interval
+     limit ${batch}
+  `;
+  if (rows.length === 0) return { deleted: 0 };
+
+  await storage()
+    .remove(rows.map((r) => r.storage_path))
+    .catch((e) => console.error("purgePpBagPhotos: storage remove failed:", e));
+
+  const ids = rows.map((r) => r.id);
+  // Photo rows first: file_id is ON DELETE SET NULL, so removing stored_files
+  // first would orphan hash rows that can never be matched to a file again.
+  await sql`delete from pp_bag_damage_photos where file_id = any(${ids})`.catch((e) =>
+    console.error("purgePpBagPhotos: hash rows not removed:", e)
+  );
+  await sql`delete from stored_files where id = any(${ids})`;
   return { deleted: rows.length };
 }

@@ -24,6 +24,8 @@ export interface BotUser {
   full_name: string;
   full_name_key: string;
   positions: string[];
+  /** Per-employee functionality override; null/empty = derive from positions. */
+  capabilities: string[] | null;
   password_hash: string;
   active: boolean;
   session_epoch: number;

@@ -13,6 +13,7 @@ import sql from "@/lib/sql";
 import { getLotBalances } from "@/lib/metrics";
 import { eatDateLabel } from "@/lib/dates";
 import { requiresDailyReport } from "@/lib/positions";
+import { splitByCompliance } from "@/lib/compliance";
 
 /**
  * Company chatbot with full data access via tool-calling. The model decides
@@ -364,20 +365,24 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<unk
       // a receiver-only role (HR, admin) is not a failure to submit.
       const obliged = roster.filter((u) => requiresDailyReport(u.positions));
 
+      // Same definition the reminder cron and the dashboard panel use: each
+      // role's own submission tables, not `daily_reports` alone.
+      const { submitted, missing } = await splitByCompliance(day, obliged);
+
+      // The raw activity log too, so questions about non-obliged staff still
+      // have something to work with.
       const filed = await sql<{ actor: string }[]>`
         select distinct actor from bot_activity
          where action = 'submission' and ok = true
            and created_at >= ${dayStart} and created_at < ${dayEnd}
       `;
-      const filedSet = new Set(filed.map((f) => f.actor));
 
       return {
         date: day,
         obligedCount: obliged.length,
-        submitted: obliged.filter((u) => filedSet.has(u.full_name)).map((u) => u.full_name),
-        missing: obliged.filter((u) => !filedSet.has(u.full_name)).map((u) => u.full_name),
-        // Submissions from people with no daily obligation still show up here.
-        allActorsToday: [...filedSet],
+        submitted: submitted.map((u) => u.full_name),
+        missing: missing.map((u) => u.full_name),
+        allActorsToday: filed.map((f) => f.actor),
       };
     }
 

@@ -20,12 +20,14 @@ import {
   firstStep,
   FLOW_TITLE,
   isSkip as isAssetSkip,
+  MAX_FLOW_PHOTOS,
   nextStep,
   parseQty,
   saveAssetReport,
   type AssetFlowKind,
   type AssetFlowState,
 } from "@/lib/asset-flows";
+import { PP_BAG_PHOTO_KIND, processPpDamageReport, ppVerdictMessage } from "@/lib/pp-bag-damage";
 import {
   answerCallbackQuery,
   CHANGE_CANCEL_KEYBOARD,
@@ -54,7 +56,7 @@ import {
 } from "@/lib/bot-auth";
 import {
   CAPABILITIES,
-  capabilitiesFor,
+  resolveCapabilities,
   HR_KINDS,
   isReceiverOnly,
   positionLabelsAm,
@@ -212,13 +214,20 @@ function view(user: any) {
     id: user.id,
     fullName: user.full_name,
     positions: user.positions || [],
+    // Per-employee override; empty means "whatever the positions grant".
+    capabilities: user.capabilities || [],
     sessionEpoch: user.session_epoch,
     chatId: user.chat_id,
   };
 }
 
+/** The buttons this specific employee gets, honouring any per-user override. */
+function userCapabilities(user: any) {
+  return resolveCapabilities(user.positions || [], user.capabilities || []);
+}
+
 function menuButtons(user: any): string[] {
-  return capabilitiesFor(user.positions || []).map((c) => c.button);
+  return userCapabilities(user).map((c) => c.button);
 }
 
 async function sendRoleMenu(chatId: string, user: any, text?: string) {
@@ -992,7 +1001,16 @@ async function saveCapture(session: any, user: any): Promise<{ reply: string; re
 
 /* ─────────────────────────────── Photo handling ──────────────────────────── */
 
-async function storeIncomingPhoto(msg: any): Promise<{ id: string; buffer: Buffer; contentType: string } | null> {
+/**
+ * `kind` decides retention: everything defaults to "telegram_upload", which the
+ * 72-hour photo purge reclaims. PP bag damage photos are tagged separately so
+ * they survive a year — their perceptual hashes are what the duplicate check
+ * compares against, and a photo reaped after three days can never be matched.
+ */
+async function storeIncomingPhoto(
+  msg: any,
+  kind = "telegram_upload"
+): Promise<{ id: string; buffer: Buffer; contentType: string } | null> {
   const photoSizes = msg.photo as { file_id: string }[] | undefined;
   const docIsImage = msg.document?.mime_type?.startsWith("image/");
   if (!photoSizes?.length && !docIsImage) return null;
@@ -1002,7 +1020,7 @@ async function storeIncomingPhoto(msg: any): Promise<{ id: string; buffer: Buffe
   if (!downloaded) return null;
 
   const contentType = docIsImage ? msg.document.mime_type : "image/jpeg";
-  const stored = await putFile(downloaded.buffer, contentType, { kind: "telegram_upload" });
+  const stored = await putFile(downloaded.buffer, contentType, { kind });
   return { id: stored.id, buffer: downloaded.buffer, contentType };
 }
 
@@ -1167,6 +1185,7 @@ const ASSET_FLOW_BY_CAP: Record<string, AssetFlowKind | undefined> = {
   raw_material_received: "raw_material",
   finished_goods_delivery: "delivery",
   tool_request: "tool_request",
+  pp_bag_damage: "pp_bag_damage",
 };
 
 const assetReviewKeyboard = {
@@ -1174,6 +1193,37 @@ const assetReviewKeyboard = {
   resize_keyboard: true,
   one_time_keyboard: false,
 };
+
+const PHOTOS_DONE_BTN = "✅ ጨርሻለሁ";
+const NORM_PHOTOS_DONE = normaliseChoice(PHOTOS_DONE_BTN);
+
+const photosKeyboard = {
+  keyboard: [[{ text: PHOTOS_DONE_BTN }], [{ text: NAV_BUTTONS.cancel }]],
+  resize_keyboard: true,
+  one_time_keyboard: false,
+};
+
+/**
+ * Analyse a PP bag damage report's photos after the reporter has been answered.
+ *
+ * Deliberately not awaited by the request path: this is a three-provider
+ * fallback chain, and a chain like it is exactly what once ran past the function
+ * limit and left updates unacknowledged, so Telegram redelivered them forever.
+ */
+async function backgroundPpDamageCheck(opts: {
+  reportId: string;
+  fileIds: string[];
+  reason: string;
+  quantity: number;
+  chatId: string;
+}): Promise<void> {
+  try {
+    const verdict = await processPpDamageReport(opts.reportId, opts.fileIds, opts.reason, opts.quantity);
+    await sendMessage(opts.chatId, ppVerdictMessage(verdict)).catch(() => {});
+  } catch (e) {
+    console.error("backgroundPpDamageCheck failed:", e);
+  }
+}
 
 /**
  * A tap on the inline calendar. Paging re-renders the grid; picking a day writes
@@ -1235,6 +1285,10 @@ async function askAssetStep(chatId: string, state: AssetFlowState): Promise<void
         one_time_keyboard: false,
       },
     });
+    return;
+  }
+  if (step.type === "photos") {
+    await sendMessage(chatId, step.prompt, { reply_markup: photosKeyboard });
     return;
   }
   const hint = step.skippable ? '\n<i>ከሌለ "-" ይላኩ።</i>' : "";
@@ -1648,6 +1702,10 @@ export async function POST(req: NextRequest) {
             return NextResponse.json({ ok: true });
           }
           const title = FLOW_TITLE[state.kind];
+          const ppPhotos = state.kind === "pp_bag_damage" ? state.photoFileIds || [] : [];
+          const ppReason = String(state.draft.reason || "");
+          const ppQty = Math.round(Number(state.draft.quantity) || 0);
+
           session.state = "idle";
           session.assetFlow = undefined;
           await persist(session);
@@ -1658,8 +1716,23 @@ export async function POST(req: NextRequest) {
             detail: `${state.kind} ${saved.id}`,
             ok: true,
           }).catch(() => {});
-          await sendMessage(chatId, `✅ ${title} ተመዝግቧል።\n📤 በዳሽቦርዱ ላይ ይታያል።`);
-          await sendReportMenu(chatId, capabilitiesFor(user.positions).map((c) => c.button));
+          await sendMessage(
+            chatId,
+            `✅ ${title} ተመዝግቧል።\n📤 በዳሽቦርዱ ላይ ይታያል።` +
+              (ppPhotos.length > 0 ? "\n🔎 ፎቶዎቹ በጀርባ በኩል እየተጣሩ ነው።" : "")
+          );
+
+          // Answer first, analyse after — see backgroundPpDamageCheck.
+          if (ppPhotos.length > 0) {
+            await backgroundPpDamageCheck({
+              reportId: saved.id,
+              fileIds: ppPhotos,
+              reason: ppReason,
+              quantity: ppQty,
+              chatId,
+            });
+          }
+          await sendReportMenu(chatId, userCapabilities(user).map((c) => c.button));
           return NextResponse.json({ ok: true });
         }
         await askAssetStep(chatId, state);
@@ -1674,7 +1747,7 @@ export async function POST(req: NextRequest) {
         session.assetFlow = undefined;
         await persist(session);
         await sendMessage(chatId, "⚠️ ሪፖርቱ ተቋርጧል። እባክዎ ድጋሚ ይጀምሩ።");
-        await sendReportMenu(chatId, capabilitiesFor(user.positions).map((c) => c.button));
+        await sendReportMenu(chatId, userCapabilities(user).map((c) => c.button));
         return NextResponse.json({ ok: true });
       }
 
@@ -1698,6 +1771,46 @@ export async function POST(req: NextRequest) {
           : { checked: false, plausible: false, confidence: 0, observations: "photo could not be read back" };
 
         await advanceAsset(session, chatId, state);
+        return NextResponse.json({ ok: true });
+      }
+
+      // Multi-photo collector: stays on this step until "✅ ጨርሻለሁ". No AI runs
+      // here — the whole point is that the analysis happens after saving.
+      if (step.type === "photos") {
+        const collected = state.photoFileIds || [];
+        if (hasPhoto(msg)) {
+          if (collected.length >= MAX_FLOW_PHOTOS) {
+            await sendMessage(chatId, `📷 ከ${MAX_FLOW_PHOTOS} በላይ ፎቶ አይቻልም። "✅ ጨርሻለሁ" ይጫኑ።`, {
+              reply_markup: photosKeyboard,
+            });
+            return NextResponse.json({ ok: true });
+          }
+          const stored = await storeIncomingPhoto(msg, PP_BAG_PHOTO_KIND);
+          if (!stored) {
+            await sendMessage(chatId, "⚠️ ፎቶውን ማውረድ አልተቻለም። እባክዎ ድጋሚ ይሞክሩ።", { reply_markup: photosKeyboard });
+            return NextResponse.json({ ok: true });
+          }
+          state.photoFileIds = [...collected, stored.id];
+          session.assetFlow = { ...state };
+          await persist(session);
+          await sendMessage(
+            chatId,
+            `📷 ${state.photoFileIds.length}/${MAX_FLOW_PHOTOS} ተቀብለናል። ተጨማሪ ይላኩ ወይም "✅ ጨርሻለሁ" ይጫኑ።`,
+            { reply_markup: photosKeyboard }
+          );
+          return NextResponse.json({ ok: true });
+        }
+
+        if (normText === NORM_PHOTOS_DONE) {
+          if (collected.length === 0) {
+            await sendMessage(chatId, "📷 ቢያንስ አንድ ፎቶ ያስፈልጋል።", { reply_markup: photosKeyboard });
+            return NextResponse.json({ ok: true });
+          }
+          await advanceAsset(session, chatId, state);
+          return NextResponse.json({ ok: true });
+        }
+
+        await sendMessage(chatId, step.prompt, { reply_markup: photosKeyboard });
         return NextResponse.json({ ok: true });
       }
 
@@ -2202,7 +2315,7 @@ export async function POST(req: NextRequest) {
     const cap = CAP_BY_LABEL.get(normText);
     if (cap) {
       // Admin/HR are receivers — they may never file a report.
-      const allowed = !isReceiverOnly(user.positions) && capabilitiesFor(user.positions).some((c) => c.key === cap.key);
+      const allowed = !isReceiverOnly(user.positions) && userCapabilities(user).some((c) => c.key === cap.key);
 
       if (!allowed) {
         await logActivity({
@@ -2567,7 +2680,7 @@ export async function POST(req: NextRequest) {
 
     /* ── Idle free text ── */
     if (text && user) {
-      const caps = capabilitiesFor(user.positions);
+      const caps = userCapabilities(user);
 
       if (!isReceiverOnly(user.positions) && caps.some((c) => c.key === "ops") && isOpsReportText(text)) {
         const result = await ingestOpsReport(text, user.fullName);
