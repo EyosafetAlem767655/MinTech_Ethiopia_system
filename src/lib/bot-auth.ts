@@ -210,8 +210,8 @@ export type BotActivityAction =
   | "start" | "external_registered" | "login_success" | "login_failed" | "login_locked"
   | "logout" | "session_revoked" | "menu_select" | "unauthorized" | "submission"
   | "submission_rejected" | "reminder_sent" | "purchase_decision" | "chat_question" | "error"
-  // Raised by the dashboard's submissions manager, not the bot.
-  | "report_edited" | "report_deleted";
+  // Raised by the dashboard's submissions manager and review buttons, not the bot.
+  | "report_edited" | "report_deleted" | "report_decided";
 
 export async function logActivity(entry: {
   chatId: string;

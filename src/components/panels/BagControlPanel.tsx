@@ -1,9 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import DecideBtn from "@/components/DecideButton";
 
 /** M1 bag inventory, evidence-backed damage claims and reconciliation. Folded
- *  into the Asset Management department page (was /bags). */
+ *  into the Asset Management department page (was /bags).
+ *
+ *  Claims carry verify/reject buttons: the review endpoint has always existed,
+ *  but nothing on this page called it, so every claim the bot filed sat at
+ *  "pending" forever and never reached the verified column of a lot's balance. */
 
 interface Lot {
   _id: string;
@@ -59,6 +64,8 @@ export default function BagControlPanel() {
   const [claims, setClaims] = useState<Claim[]>([]);
   const [tripwires, setTripwires] = useState<Tripwires | null>(null);
   const [tab, setTab] = useState<"lots" | "claims" | "tripwires">("lots");
+  const [busy, setBusy] = useState<Record<string, boolean>>({});
+  const [error, setError] = useState("");
 
   const load = useCallback(() => {
     fetch("/api/lots").then((r) => r.json()).then((d) => Array.isArray(d) && setLots(d)).catch(() => {});
@@ -67,6 +74,30 @@ export default function BagControlPanel() {
   }, []);
 
   useEffect(load, [load]);
+
+  const decide = useCallback(
+    async (id: string, action: "cosign" | "verify" | "reject") => {
+      setBusy((b) => ({ ...b, [id]: true }));
+      setError("");
+      try {
+        const res = await fetch(`/api/claims/${id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action, by: "Dashboard" }),
+        });
+        if (!res.ok) {
+          // The co-sign rule for Telegram claims is enforced server-side and
+          // surfaces here rather than failing silently.
+          setError((await res.json().catch(() => ({}))).error || "Could not save that decision.");
+          return;
+        }
+        load();
+      } finally {
+        setBusy((b) => ({ ...b, [id]: false }));
+      }
+    },
+    [load]
+  );
 
   const openClaims = claims.filter((c) => c.status === "pending" || c.status === "cosign_required");
   const gaps = lots.filter((lot) => (lot.balance?.gap || 0) > 0);
@@ -153,6 +184,7 @@ export default function BagControlPanel() {
 
       {tab === "claims" && (
         <div className="space-y-3">
+          {error && <p className="card border-l-4 border-l-red-500 p-3 text-xs font-bold text-red-700">{error}</p>}
           {claims.map((claim) => {
             const ai = claim.photos[0]?.ai;
             return (
@@ -199,6 +231,40 @@ export default function BagControlPanel() {
                     Disposal: {claim.disposal.action.replace(/_/g, " ")}
                     {claim.disposal.amount ? ` - ETB ${claim.disposal.amount.toLocaleString()}` : ""}
                   </p>
+                )}
+
+                {(claim.status === "pending" || claim.status === "cosign_required") && (
+                  <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-clay-50 pt-2">
+                    {/* A Telegram claim must be co-signed before it can be
+                        verified — the server refuses otherwise, so the button
+                        is offered in that order rather than failing on click. */}
+                    {claim.source === "telegram" && !claim.cosignedBy && (
+                      <DecideBtn
+                        label="✍️ Co-sign"
+                        tone="purple"
+                        busy={!!busy[claim._id]}
+                        onClick={() => decide(claim._id, "cosign")}
+                      />
+                    )}
+                    <DecideBtn
+                      label="✓ Approve"
+                      tone="green"
+                      busy={!!busy[claim._id]}
+                      disabled={claim.source === "telegram" && !claim.cosignedBy}
+                      title={
+                        claim.source === "telegram" && !claim.cosignedBy
+                          ? "Telegram claims must be co-signed first"
+                          : undefined
+                      }
+                      onClick={() => decide(claim._id, "verify")}
+                    />
+                    <DecideBtn
+                      label="✗ Reject"
+                      tone="red"
+                      busy={!!busy[claim._id]}
+                      onClick={() => decide(claim._id, "reject")}
+                    />
+                  </div>
                 )}
               </div>
             );

@@ -25,6 +25,12 @@ export const SUBMISSION_COLLECTIONS = [
   "tool_request",
   "pp_bag_damage",
   "sales_receipt",
+  "damage_claim",
+  "expense_receipt",
+  "stone_delivery",
+  "shift",
+  "invoice",
+  "payment",
 ] as const;
 
 export type SubmissionCollection = (typeof SUBMISSION_COLLECTIONS)[number];
@@ -46,8 +52,11 @@ export interface SubmissionSpec {
   dateColumn: string;
   /** True when dateColumn is a text "YYYY-MM-DD" rather than a timestamptz. */
   dateIsText?: boolean;
-  /** Who filed it. */
-  authorColumn: string;
+  /**
+   * Who filed it. Optional because `payments` records no author at all — the row
+   * exists, but nobody can be named as having entered it.
+   */
+  authorColumn?: string;
   /** Columns searched by the `q` filter. */
   searchColumns: string[];
   /** Columns shown in the list, in order. */
@@ -58,6 +67,13 @@ export interface SubmissionSpec {
   photosColumn?: string;
   /** single uuid column of an attached photo, if any. */
   photoColumn?: string;
+  /**
+   * Photos held in a child table rather than on the row itself, which is how the
+   * two evidence-backed reports store them (one row per photo, carrying its own
+   * hash and AI verdict). Aggregated into a `photo_ids` array by the API so the
+   * UI treats them exactly like a `uuid[]` column.
+   */
+  photoJoin?: { table: string; foreignKey: string; fileColumn: string };
 }
 
 const TEXT = (column: string, label: string): SubmissionField => ({
@@ -224,10 +240,13 @@ export const SUBMISSIONS: Record<SubmissionCollection, SubmissionSpec> = {
       LONG("reason", "Reason"),
       NUM("quantity", "Quantity"),
       NUM("trust_score", "Trust score"),
+      TEXT("status", "Status"),
       TEXT("reported_by", "By"),
     ],
-    // trust_score is the AI's own output, not something to hand-edit.
+    // trust_score is the AI's own output and status belongs to the review
+    // buttons on the asset panel — neither is something to hand-edit here.
     editableKeys: ["reason", "quantity"],
+    photoJoin: { table: "pp_bag_damage_photos", foreignKey: "report_id", fileColumn: "file_id" },
   },
   sales_receipt: {
     table: "sales_receipts",
@@ -250,6 +269,110 @@ export const SUBMISSIONS: Record<SubmissionCollection, SubmissionSpec> = {
     // are shown but not editable here — changing one in isolation would leave the
     // row internally inconsistent.
     editableKeys: ["customer_name", "fs_no", "att_no", "product_ty", "deposited_bank"],
+  },
+  damage_claim: {
+    table: "damage_claims",
+    label: "Damaged bags claim",
+    icon: "🛡",
+    dateColumn: "created_at",
+    authorColumn: "worker",
+    searchColumns: ["worker", "status", "source"],
+    displayFields: [
+      NUM("quantity", "Bags"),
+      TEXT("worker", "By"),
+      TEXT("shift", "Shift"),
+      TEXT("status", "Status"),
+      TEXT("source", "Source"),
+    ],
+    // status is driven by the verify/reject buttons on the bag-control panel;
+    // editing it here would bypass the co-sign rule those buttons enforce.
+    editableKeys: ["quantity", "shift"],
+    photoJoin: { table: "claim_photos", foreignKey: "claim_id", fileColumn: "file_id" },
+  },
+  expense_receipt: {
+    table: "receipts",
+    label: "Receipt / WHT receipt",
+    icon: "🧾",
+    dateColumn: "created_at",
+    authorColumn: "submitted_by",
+    searchColumns: ["vendor", "client", "category", "tax_invoice_number", "submitted_by"],
+    displayFields: [
+      TEXT("vendor", "Vendor"),
+      TEXT("client", "Client"),
+      NUM("amount", "Amount"),
+      TEXT("category", "Category"),
+      TEXT("tax_invoice_number", "Tax invoice no"),
+      TEXT("submitted_by", "By"),
+    ],
+    editableKeys: ["vendor", "client", "amount", "category", "tax_invoice_number"],
+    photoColumn: "photo_file_id",
+  },
+  stone_delivery: {
+    table: "stone_deliveries",
+    label: "Truck / stone delivery",
+    icon: "🚚",
+    dateColumn: "date",
+    authorColumn: "gate_clerk",
+    searchColumns: ["truck_plate", "supplier", "quarry", "driver_name", "gate_clerk"],
+    displayFields: [
+      TEXT("truck_plate", "Truck plate"),
+      TEXT("supplier", "Supplier"),
+      TEXT("quarry", "Quarry"),
+      TEXT("driver_name", "Driver"),
+      NUM("loads", "Loads"),
+      TEXT("quality_grade", "Grade"),
+      TEXT("gate_clerk", "By"),
+    ],
+    // quality_grade is a checked enum in the database, so a free-text edit here
+    // would be rejected by the constraint rather than saved.
+    editableKeys: ["truck_plate", "supplier", "quarry", "driver_name", "loads"],
+    photoColumn: "photo_file_id",
+  },
+  shift: {
+    table: "shift_reports",
+    label: "Shift report",
+    icon: "🏭",
+    dateColumn: "date",
+    authorColumn: "supervisor",
+    searchColumns: ["supervisor", "shift", "notes"],
+    displayFields: [
+      TEXT("shift", "Shift"),
+      NUM("filled_sacks", "Filled sacks"),
+      NUM("bag_weight_kg", "Bag kg"),
+      NUM("downtime_minutes", "Downtime (min)"),
+      LONG("notes", "Notes"),
+      TEXT("supervisor", "By"),
+    ],
+    editableKeys: ["filled_sacks", "downtime_minutes", "notes"],
+  },
+  invoice: {
+    table: "invoices",
+    label: "Invoice",
+    icon: "📄",
+    dateColumn: "invoiced_at",
+    // No author column: an invoice records the client, not the clerk who filed it.
+    searchColumns: ["invoice_number", "client", "client_phone", "notes"],
+    displayFields: [
+      TEXT("invoice_number", "Invoice no"),
+      TEXT("client", "Client"),
+      NUM("sacks", "Sacks"),
+      NUM("amount", "Amount"),
+      TEXT("client_phone", "Phone"),
+      LONG("notes", "Notes"),
+    ],
+    editableKeys: ["invoice_number", "client", "client_phone", "sacks", "amount", "notes"],
+    photoColumn: "withholding_receipt_file_id",
+  },
+  payment: {
+    table: "payments",
+    label: "Payment received",
+    icon: "💵",
+    dateColumn: "date",
+    // No author column exists on this table, so a payment can never be
+    // attributed to whoever entered it — the row is still listed and deletable.
+    searchColumns: ["method"],
+    displayFields: [NUM("amount", "Amount"), TEXT("method", "Method")],
+    editableKeys: ["amount", "method"],
   },
 };
 

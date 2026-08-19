@@ -1,8 +1,16 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import DecideBtn from "@/components/DecideButton";
 
-/** Tool purchase requests filed from the bot: what, how many, why, and the AI photo check. */
+/**
+ * Tool purchase requests filed from the bot: what, how many, why, the AI photo
+ * check, and the human decision.
+ *
+ * Decisions go to the same `purchase_requests` endpoint the Purchase requests
+ * panel below uses — the two panels are two views of one table, so a request
+ * marked bought here shows as bought there.
+ */
 
 interface PhotoCheck {
   checked: boolean;
@@ -70,15 +78,48 @@ function PhotoBadge({ check, kind }: { check: PhotoCheck | null; kind: Row["kind
   );
 }
 
+const OPEN_STATUSES = new Set(["pending", "deferred"]);
+
 export default function ToolRequestsPanel() {
   const [rows, setRows] = useState<Row[] | null>(null);
+  const [busy, setBusy] = useState<Record<string, boolean>>({});
+  const [error, setError] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const res = await fetch("/api/tool-requests");
+      const data = res.ok ? await res.json() : [];
+      setRows(Array.isArray(data) ? data : []);
+    } catch {
+      setRows([]);
+    }
+  }, []);
 
   useEffect(() => {
-    fetch("/api/tool-requests")
-      .then((r) => (r.ok ? r.json() : []))
-      .then((d) => setRows(Array.isArray(d) ? d : []))
-      .catch(() => setRows([]));
-  }, []);
+    load();
+  }, [load]);
+
+  const decide = useCallback(
+    async (id: string, action: string) => {
+      setBusy((b) => ({ ...b, [id]: true }));
+      setError("");
+      try {
+        const res = await fetch(`/api/purchase-requests/${id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action }),
+        });
+        if (!res.ok) {
+          setError((await res.json().catch(() => ({}))).error || "Could not save that decision.");
+          return;
+        }
+        await load();
+      } finally {
+        setBusy((b) => ({ ...b, [id]: false }));
+      }
+    },
+    [load]
+  );
 
   if (!rows) return <div className="card h-40 animate-pulse bg-clay-50" />;
 
@@ -95,11 +136,13 @@ export default function ToolRequestsPanel() {
         )}
       </div>
 
+      {error && <p className="card border-l-4 border-l-red-500 p-3 text-xs font-bold text-red-700">{error}</p>}
+
       {rows.length === 0 ? (
         <p className="card p-4 text-sm text-stone-400">No tool purchase requests yet.</p>
       ) : (
         <div className="card overflow-x-auto p-0">
-          <table className="w-full min-w-[820px] text-right text-xs">
+          <table className="w-full min-w-[980px] text-right text-xs">
             <thead className="bg-clay-50/70 text-[10px] uppercase tracking-wide text-stone-500">
               <tr>
                 <th className="p-2 text-left font-bold">Date</th>
@@ -111,6 +154,7 @@ export default function ToolRequestsPanel() {
                 <th className="p-2 font-bold">AI check</th>
                 <th className="p-2 text-left font-bold">By</th>
                 <th className="p-2 font-bold">Status</th>
+                <th className="p-2 font-bold">Decision</th>
               </tr>
             </thead>
             <tbody>
@@ -157,6 +201,26 @@ export default function ToolRequestsPanel() {
                     >
                       {r.status}
                     </span>
+                  </td>
+                  <td className="p-2">
+                    {OPEN_STATUSES.has(r.status) ? (
+                      <div className="flex justify-end gap-1">
+                        <DecideBtn
+                          label="✓ Approve"
+                          tone="green"
+                          busy={!!busy[r._id]}
+                          onClick={() => decide(r._id, "approve")}
+                        />
+                        <DecideBtn
+                          label="✗ Reject"
+                          tone="red"
+                          busy={!!busy[r._id]}
+                          onClick={() => decide(r._id, "reject")}
+                        />
+                      </div>
+                    ) : (
+                      <span className="text-[10px] text-stone-400">decided</span>
+                    )}
                   </td>
                 </tr>
               ))}

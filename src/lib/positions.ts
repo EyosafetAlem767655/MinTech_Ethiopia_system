@@ -473,6 +473,46 @@ export function resolveCapabilities(positions: string[], override?: string[] | n
   return (Object.keys(CAPABILITIES) as CapabilityKey[]).filter((k) => set.has(k)).map((k) => CAPABILITIES[k]);
 }
 
+/**
+ * Tick or untick one bot functionality in the dashboard, returning the roles and
+ * the override that should be saved.
+ *
+ * Ticking a functionality whose role is not held also grants that role: the
+ * capability alone would give the employee the button, but the ROLE is what
+ * drives the daily-report obligation and the HR/Admin digests, so a button with
+ * no role behind it would never be tracked. The role's other buttons stay off —
+ * one functionality was asked for, not the whole job.
+ *
+ * `override: null` means "no override, use the roles' defaults". It is restored
+ * whenever the selection lands back exactly on the defaults, so an employee who
+ * matches their role keeps tracking it rather than freezing a copy of it.
+ *
+ * `groupPositions` are the roles of the department whose checkbox was clicked,
+ * which is what keeps `admin` — holder of every capability — from being granted
+ * by a click anywhere else on the screen.
+ */
+export function toggleCapability(
+  key: CapabilityKey,
+  state: { positions: PositionKey[]; override: CapabilityKey[] | null },
+  groupPositions: readonly PositionKey[]
+): { positions: PositionKey[]; override: CapabilityKey[] | null } {
+  const defaults = capabilitiesFor(state.positions).map((c) => c.key);
+  const base = state.override ?? defaults;
+  const turningOn = !base.includes(key);
+
+  let positions = state.positions;
+  if (turningOn && !positions.some((p) => POSITIONS[p].capabilities.includes(key))) {
+    const owner = groupPositions.find((p) => POSITIONS[p].capabilities.includes(key));
+    if (owner) positions = [...positions, owner];
+  }
+
+  const next = turningOn ? [...base, key] : base.filter((k) => k !== key);
+  // Compared against the roles as they are AFTER this click, not before.
+  const after = capabilitiesFor(positions).map((c) => c.key);
+  const same = next.length === after.length && [...next].sort().join("|") === [...after].sort().join("|");
+  return { positions, override: same ? null : next };
+}
+
 export function hasCapability(positions: string[], key: CapabilityKey): boolean {
   return capabilitiesFor(positions).some((c) => c.key === key);
 }

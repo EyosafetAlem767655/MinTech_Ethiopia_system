@@ -28,6 +28,25 @@ export async function GET(req: NextRequest) {
   const to = p.get("to") || "";
   const q = (p.get("q") || "").trim();
 
+  // Which columns this database actually has.
+  //
+  // Deployments routinely run ahead of their migrations here, and a single
+  // column added by an unapplied migration used to blank the entire screen with
+  // a 42703. Asking first costs one cheap catalogue query and means a report is
+  // still listable, editable and deletable while a migration is outstanding —
+  // the newest field simply does not show yet.
+  const present = new Set(
+    (
+      await sql<{ column_name: string }[]>`
+        select column_name from information_schema.columns
+         where table_schema = 'public' and table_name = ${spec.table}
+      `
+    ).map((r) => r.column_name)
+  );
+  if (present.size === 0) {
+    return NextResponse.json({ collection, rows: [], unavailable: true });
+  }
+
   const columns = Array.from(
     new Set(
       [
@@ -38,31 +57,50 @@ export async function GET(req: NextRequest) {
         ...spec.displayFields.map((f) => f.column),
         spec.photosColumn,
         spec.photoColumn,
-      ].filter((c): c is string => Boolean(c))
+      ].filter((c): c is string => Boolean(c) && present.has(c as string))
     )
   );
+  // Sorting by a column that is not there would throw; created_at is on every
+  // one of these tables.
+  const dateColumn = present.has(spec.dateColumn) ? spec.dateColumn : "created_at";
+  const searchColumns = spec.searchColumns.filter((c) => present.has(c));
+
+  // Photos kept in a child table are aggregated into the same `photo_ids` shape
+  // the UI already uses for a uuid[] column, so the two storage layouts are
+  // indistinguishable to everything downstream.
+  const join = spec.photoJoin;
+  const photoIdsSelect = join
+    ? sql`, coalesce((
+          select array_agg(${sql(join.fileColumn)} order by created_at)
+            from ${sql(join.table)}
+           where ${sql(join.foreignKey)} = ${sql(spec.table)}.id
+             and ${sql(join.fileColumn)} is not null
+        ), '{}') as photo_ids`
+    : sql``;
 
   // A text "YYYY-MM-DD" column compares as text; a timestamptz needs a real date
   // bound, and `to` is made exclusive-at-end-of-day so the range includes it.
-  const lower = spec.dateIsText ? from : from ? new Date(`${from}T00:00:00+03:00`) : null;
-  const upper = spec.dateIsText ? to : to ? new Date(`${to}T00:00:00+03:00`) : null;
+  // If the text date column was the one missing, the fallback is a timestamptz.
+  const dateIsText = Boolean(spec.dateIsText) && dateColumn === spec.dateColumn;
+  const lower = dateIsText ? from : from ? new Date(`${from}T00:00:00+03:00`) : null;
+  const upper = dateIsText ? to : to ? new Date(`${to}T00:00:00+03:00`) : null;
   const upperExclusive =
-    !spec.dateIsText && upper instanceof Date ? new Date(upper.getTime() + 86_400_000) : upper;
+    !dateIsText && upper instanceof Date ? new Date(upper.getTime() + 86_400_000) : upper;
 
   try {
     const rows = await sql`
-      select ${sql(columns)}
+      select ${sql(columns)}${photoIdsSelect}
         from ${sql(spec.table)}
-       where ${from ? sql`${sql(spec.dateColumn)} >= ${lower}` : sql`true`}
-         and ${to ? sql`${sql(spec.dateColumn)} < ${upperExclusive}` : sql`true`}
+       where ${from ? sql`${sql(dateColumn)} >= ${lower}` : sql`true`}
+         and ${to ? sql`${sql(dateColumn)} < ${upperExclusive}` : sql`true`}
          and ${
-           q
-             ? sql`(${spec.searchColumns
+           q && searchColumns.length > 0
+             ? sql`(${searchColumns
                  .map((c) => sql`coalesce(${sql(c)}::text, '') ilike ${"%" + q + "%"}`)
                  .reduce((a, b) => sql`${a} or ${b}`)})`
              : sql`true`
          }
-       order by ${sql(spec.dateColumn)} desc, created_at desc
+       order by ${sql(dateColumn)} desc, created_at desc
        limit ${limit}
     `;
     return NextResponse.json({ collection, rows });

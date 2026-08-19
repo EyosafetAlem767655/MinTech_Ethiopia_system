@@ -12,7 +12,7 @@ import {
 import sql from "@/lib/sql";
 import { getLotBalances } from "@/lib/metrics";
 import { eatDateLabel } from "@/lib/dates";
-import { requiresDailyReport } from "@/lib/positions";
+import { requiresDailyReport, resolveCapabilities } from "@/lib/positions";
 import { splitByCompliance } from "@/lib/compliance";
 
 /**
@@ -24,6 +24,71 @@ import { splitByCompliance } from "@/lib/compliance";
  * shared vocabulary with the rest of the codebase — `toGeminiTools` translates
  * it at the call site.
  */
+
+/**
+ * Every table the assistant may read, with the column each is newest-first by.
+ *
+ * A hand-written `switch` of per-table queries drifted: seven tables the bot
+ * writes to were simply absent, so questions about them were answered from
+ * nothing. This list is the single place a table becomes reachable — the tool
+ * schema's enum and the query are both generated from it, so neither can be
+ * updated without the other.
+ *
+ * Read-only by construction: the collection is checked against these keys before
+ * it reaches an identifier position.
+ */
+const READABLE_TABLES = {
+  // Bot submissions
+  daily_reports: "created_at",
+  hr_reports: "created_at",
+  material_counts: "created_at",
+  daily_ops_reports: "date",
+  production_reports: "date",
+  stock_status_reports: "created_at",
+  raw_material_receipts: "date",
+  delivery_reports: "date",
+  purchase_item_reports: "date",
+  pp_bag_damage_reports: "date",
+  sales_receipts: "date",
+  shift_reports: "date",
+  stone_deliveries: "date",
+  damage_claims: "created_at",
+  receipts: "created_at",
+  purchase_requests: "created_at",
+  // Commercial ledger
+  invoices: "invoiced_at",
+  payments: "date",
+  invoice_reminders: "sent_at",
+  // Bag control
+  bag_lots: "received_at",
+  bag_events: "date",
+  claim_photos: "created_at",
+  pp_bag_damage_photos: "created_at",
+  // People and system
+  telegram_users: "created_at",
+  bot_activity: "created_at",
+  briefs: "created_at",
+} as const;
+
+type ReadableTable = keyof typeof READABLE_TABLES;
+
+const isReadableTable = (v: unknown): v is ReadableTable =>
+  typeof v === "string" && Object.prototype.hasOwnProperty.call(READABLE_TABLES, v);
+
+/**
+ * Tables read as an explicit column list rather than `select *`.
+ *
+ * `telegram_users.password_hash` holds every employee's scrypt hash: a `select *`
+ * would load all of them into the model's context, one prompt away from being
+ * repeated back. Nothing here needs the credential columns, so they never leave
+ * the database.
+ */
+const SAFE_COLUMNS: Partial<Record<ReadableTable, string[]>> = {
+  telegram_users: [
+    "id", "full_name", "positions", "active", "chat_id", "logged_in",
+    "last_login_at", "last_seen_at", "note", "created_by", "created_at",
+  ],
+};
 
 const tools: OpenAI.Chat.ChatCompletionTool[] = [
   {
@@ -162,36 +227,67 @@ const tools: OpenAI.Chat.ChatCompletionTool[] = [
   {
     type: "function",
     function: {
-      name: "search_records",
-      description: "Search recent raw records by collection.",
+      name: "get_pp_bag_damage",
+      description:
+        "PP bag damage reports filed by asset management on the Telegram bot: why the bag was " +
+        "damaged, how many, who reported it, the manual approve/reject decision, the AI trust score " +
+        "and any integrity flags (duplicate photo, photo older than 48h, edited image). Use this for " +
+        "any question about damaged or spoiled PP sacks, bag wastage, or suspicious damage reports.",
       parameters: {
         type: "object",
         properties: {
-          collection: {
+          days: { type: "number", description: "How many days back. Default 30." },
+          status: { type: "string", enum: ["pending", "approved", "rejected", "all"] },
+          limit: { type: "number", description: "Max rows. Default 50." },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_tool_requests",
+      description:
+        "Tool and equipment purchase requests: what was asked for, quantity, whether it is " +
+        "maintenance or a new item, the stated reason, the AI verdict on the damaged-item photo, " +
+        "and the approve/reject/bought decision with who made it.",
+      parameters: {
+        type: "object",
+        properties: {
+          status: {
             type: "string",
-            enum: [
-              "invoices",
-              "sales_receipts",
-              "stone_deliveries",
-              "shift_reports",
-              "receipts",
-              "damage_claims",
-              "bag_lots",
-              "purchase_requests",
-              "briefs",
-              "daily_reports",
-              "hr_reports",
-              "material_counts",
-              "daily_ops_reports",
-              "production_reports",
-              "stock_status_reports",
-              "raw_material_receipts",
-              "delivery_reports",
-              "purchase_item_reports",
-              "bot_activity",
-            ],
+            enum: ["pending", "approved", "rejected", "bought", "disregarded", "deferred", "all"],
           },
-          client: { type: "string", description: "Filter invoices by client name (regex, optional)" },
+          days: { type: "number", description: "How many days back. Default 90." },
+          limit: { type: "number", description: "Max rows. Default 50." },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_employees",
+      description:
+        "The employee roster: full name, the roles each person holds, which bot functionalities " +
+        "they have, whether the account is active and signed in, and when they were last seen. " +
+        "Use this for questions about who works here, who can report what, or who is inactive.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "search_records",
+      description:
+        "Read raw rows from any table in the system, newest first. Use this when no other tool " +
+        "covers the question, or to see every column of a record. Every table the company stores " +
+        "is listed in the collection enum.",
+      parameters: {
+        type: "object",
+        properties: {
+          collection: { type: "string", enum: Object.keys(READABLE_TABLES) },
+          client: { type: "string", description: "Filter invoices by client name (partial match, optional)" },
           limit: { type: "number", default: 20 },
         },
         required: ["collection"],
@@ -386,53 +482,112 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<unk
       };
     }
 
+    case "get_pp_bag_damage": {
+      const days = Math.min(Number(args.days) || 30, 365);
+      const limit = Math.min(Number(args.limit) || 50, 200);
+      const since = new Date(Date.now() - days * 86400_000);
+      const status = String(args.status || "all");
+      try {
+        const rows = await sql`
+          select r.date, r.reason, r.quantity, r.reported_by as "reportedBy", r.status,
+                 r.decided_by as "decidedBy", r.decided_at as "decidedAt",
+                 r.trust_score as "trustScore", r.flags, r.ai,
+                 (select count(*) from pp_bag_damage_photos p where p.report_id = r.id) as "photoCount",
+                 (select count(*) from pp_bag_damage_photos p
+                   where p.report_id = r.id and p.duplicate_of_report_id is not null) as "duplicatePhotos"
+            from pp_bag_damage_reports r
+           where r.date >= ${since}
+             and ${status === "all" ? sql`true` : sql`r.status = ${status}`}
+           order by r.date desc limit ${limit}`;
+        const [totals] = await sql<{ n: string; bags: string }[]>`
+          select count(*) as n, coalesce(sum(quantity), 0) as bags
+            from pp_bag_damage_reports where date >= ${since}`;
+        return {
+          days,
+          totals: { reports: Number(totals?.n) || 0, bagsDamaged: Number(totals?.bags) || 0 },
+          rows,
+        };
+      } catch (e) {
+        // The migration may not be applied on this deployment yet. Say so rather
+        // than letting the model read an error as "there is no bag damage".
+        if ((e as { code?: string })?.code === "42P01") {
+          return { error: "The PP bag damage table does not exist in this database yet." };
+        }
+        throw e;
+      }
+    }
+
+    case "get_tool_requests": {
+      const days = Math.min(Number(args.days) || 90, 365);
+      const limit = Math.min(Number(args.limit) || 50, 200);
+      const since = new Date(Date.now() - days * 86400_000);
+      const status = String(args.status || "all");
+      return sql`
+        select created_at as "createdAt", title, quantity, kind, justification, amount,
+               status, requested_by as "requestedBy", decided_by as "decidedBy",
+               decided_at as "decidedAt", legitimacy
+          from purchase_requests
+         where created_at >= ${since}
+           and ${status === "all" ? sql`true` : sql`status = ${status}`}
+         order by created_at desc limit ${limit}`;
+    }
+
+    case "get_employees": {
+      // No password_hash, no session_epoch, no lockout counters — the roster is
+      // a question about people, not about credentials.
+      const rows = await sql<
+        {
+          full_name: string;
+          positions: string[];
+          capabilities: string[] | null;
+          active: boolean;
+          logged_in: boolean;
+          last_seen_at: Date | null;
+        }[]
+      >`
+        select full_name, positions,
+               -- The capabilities column arrives in 0014; a database running
+               -- behind its migrations reads as "no override", the default anyway.
+               (to_jsonb(telegram_users) -> 'capabilities') as capabilities,
+               active, logged_in, last_seen_at
+          from telegram_users order by full_name`;
+      return rows.map((u) => ({
+        fullName: u.full_name,
+        positions: u.positions,
+        // The resolved menu, not the raw override — an empty override means
+        // "the roles' defaults", which is not the same as "no buttons".
+        functionalities: resolveCapabilities(u.positions, u.capabilities).map((c) => c.key),
+        owesDailyReport: requiresDailyReport(u.positions),
+        active: u.active,
+        signedIn: u.logged_in,
+        lastSeenAt: u.last_seen_at,
+      }));
+    }
+
     case "search_records": {
       const limit = Math.min(Number(args.limit) || 20, 50);
-      switch (args.collection) {
-        case "sales_receipts":
-          return sql`select * from sales_receipts order by date desc limit ${limit}`;
-        case "daily_reports":
-          return sql`select * from daily_reports order by created_at desc limit ${limit}`;
-        case "hr_reports":
-          return sql`select * from hr_reports order by created_at desc limit ${limit}`;
-        case "material_counts":
-          return sql`select * from material_counts order by created_at desc limit ${limit}`;
-        case "daily_ops_reports":
-          return sql`select * from daily_ops_reports order by date desc limit ${limit}`;
-        case "production_reports":
-          return sql`select * from production_reports order by date desc limit ${limit}`;
-        case "stock_status_reports":
-          return sql`select * from stock_status_reports order by created_at desc limit ${limit}`;
-        case "raw_material_receipts":
-          return sql`select * from raw_material_receipts order by date desc limit ${limit}`;
-        case "delivery_reports":
-          return sql`select * from delivery_reports order by date desc limit ${limit}`;
-        case "purchase_item_reports":
-          return sql`select * from purchase_item_reports order by date desc limit ${limit}`;
-        case "bot_activity":
-          return sql`select created_at, actor, action, detail, ok from bot_activity
-                      order by created_at desc limit ${limit}`;
-        case "invoices":
-          // Parameterised ILIKE — no unescaped input into a regex.
-          return args.client
-            ? sql`select * from invoices where client ilike '%' || ${String(args.client)} || '%' order by invoiced_at desc limit ${limit}`
-            : sql`select * from invoices order by invoiced_at desc limit ${limit}`;
-        case "stone_deliveries":
-          return sql`select * from stone_deliveries order by date desc limit ${limit}`;
-        case "shift_reports":
-          return sql`select * from shift_reports order by date desc limit ${limit}`;
-        case "receipts":
-          return sql`select * from receipts order by created_at desc limit ${limit}`;
-        case "damage_claims":
-          return sql`select * from damage_claims order by created_at desc limit ${limit}`;
-        case "bag_lots":
-          return sql`select * from bag_lots order by received_at desc limit ${limit}`;
-        case "purchase_requests":
-          return sql`select * from purchase_requests order by created_at desc limit ${limit}`;
-        case "briefs":
-          return sql`select * from briefs order by created_at desc limit ${limit}`;
+      const table = args.collection;
+      if (!isReadableTable(table)) return { error: "unknown collection" };
+      const orderBy = READABLE_TABLES[table];
+
+      // Invoices keep their client filter; parameterised ILIKE, so nothing the
+      // model writes reaches the query as syntax.
+      const where =
+        table === "invoices" && args.client
+          ? sql`where client ilike '%' || ${String(args.client)} || '%'`
+          : sql``;
+
+      const safe = SAFE_COLUMNS[table];
+      try {
+        return await sql`
+          select ${safe ? sql(safe) : sql`*`} from ${sql(table)} ${where}
+           order by ${sql(orderBy)} desc limit ${limit}`;
+      } catch (e) {
+        if ((e as { code?: string })?.code === "42P01") {
+          return { error: `The table ${table} does not exist in this database yet.` };
+        }
+        throw e;
       }
-      return { error: "unknown collection" };
     }
   }
   return { error: "unknown tool" };
@@ -493,9 +648,14 @@ export async function companyChat(
         "and say which channel each figure came from. " +
         "Staff file structured reports on the Telegram bot every day and you CAN read all of them: " +
         "use get_daily_submissions for the free-text daily/HR/material-count reports, get_asset_reports " +
-        "for raw material received, deliveries and purchased items, get_production_reports for the " +
-        "production grid, stock status and daily operations report, and get_submission_compliance for " +
+        "for raw material received, deliveries and purchased items, get_pp_bag_damage for damaged PP " +
+        "sacks, get_tool_requests for tool and equipment purchase requests, get_production_reports for the " +
+        "production grid, stock status and daily operations report, get_employees for the staff roster, " +
+        "and get_submission_compliance for " +
         "who has or has not filed. If a question is about what someone reported, reach for those first. " +
+        "If no specialised tool fits, search_records reads raw rows from ANY table in the system — its " +
+        "collection list is the complete set of tables, so there is no company data you cannot reach. " +
+        "Never answer 'I don't have access to that' without having tried search_records. " +
         "ALWAYS fetch data with tools before quoting figures; " +
         "never estimate or invent numbers. If a tool result says it was TRUNCATED, say the answer is " +
         "partial and narrow the query rather than totalling what you can see. If the data genuinely " +

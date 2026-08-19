@@ -8,6 +8,7 @@ import {
   POSITION_GROUPS,
   capabilitiesFor,
   resolveCapabilities,
+  toggleCapability,
   type CapabilityKey,
   type PositionKey,
 } from "@/lib/positions";
@@ -62,6 +63,9 @@ const ACTION_STYLES: Record<string, string> = {
   menu_select: "bg-stone-100 text-stone-500",
   reminder_sent: "bg-purple-100 text-purple-700",
   purchase_decision: "bg-emerald-100 text-emerald-800",
+  report_decided: "bg-emerald-100 text-emerald-800",
+  report_edited: "bg-blue-100 text-blue-800",
+  report_deleted: "bg-red-100 text-red-700",
   chat_question: "bg-indigo-100 text-indigo-700",
   external_registered: "bg-teal-100 text-teal-800",
   start: "bg-stone-100 text-stone-500",
@@ -205,7 +209,7 @@ function SubmissionsTab() {
   };
 
   const remove = async (row: Record<string, unknown>) => {
-    const who = String(row[spec.authorColumn] ?? "unknown");
+    const who = spec.authorColumn ? String(row[spec.authorColumn] ?? "unknown") : "unknown";
     // A typed confirmation, not a plain OK: this is an unrecoverable delete of
     // someone's filed report, and the row is gone from the reports and the
     // totals along with it.
@@ -233,6 +237,8 @@ function SubmissionsTab() {
       out.push(...(row[spec.photosColumn] as unknown[]).map(String));
     }
     if (spec.photoColumn && row[spec.photoColumn]) out.push(String(row[spec.photoColumn]));
+    // Photos kept in a child table arrive pre-aggregated under this one key.
+    if (Array.isArray(row.photo_ids)) out.push(...(row.photo_ids as unknown[]).map(String));
     return out;
   };
 
@@ -754,6 +760,13 @@ function PositionEditor({
 
 /* ─────────────────────── Department-grouped role picker ────────────────────── */
 
+/** Every bot functionality this department's roles can grant, in menu order. */
+function departmentCapabilities(positions: readonly PositionKey[]): CapabilityKey[] {
+  const set = new Set<CapabilityKey>();
+  for (const p of positions) POSITIONS[p].capabilities.forEach((k) => set.add(k));
+  return (Object.keys(CAPABILITIES) as CapabilityKey[]).filter((k) => set.has(k));
+}
+
 /**
  * Positions grant a default set of bot buttons; each button can then be ticked
  * or unticked for this one employee.
@@ -776,13 +789,14 @@ function PositionPicker({
   const defaults = capabilitiesFor(selected).map((c) => c.key);
   const effective = caps ?? defaults;
 
-  const toggleCap = (key: CapabilityKey) => {
-    const base = caps ?? defaults;
-    const next = base.includes(key) ? base.filter((k) => k !== key) : [...base, key];
-    // Back to exactly the defaults ⇒ drop the override rather than storing a
-    // list that would then silently stop tracking the position.
-    const same = next.length === defaults.length && [...next].sort().join("|") === [...defaults].sort().join("|");
-    onCapsChange(same ? null : next);
+  /**
+   * Tick or untick one bot button. The decision itself lives in positions.ts so
+   * it can be tested; this only applies the result to the two pieces of state.
+   */
+  const toggleCap = (key: CapabilityKey, groupPositions: readonly PositionKey[]) => {
+    const next = toggleCapability(key, { positions: selected, override: caps }, groupPositions);
+    for (const p of next.positions) if (!selected.includes(p)) onToggle(p);
+    onCapsChange(next.override);
   };
 
   return (
@@ -823,30 +837,45 @@ function PositionPicker({
                       )}
                     </span>
                   </label>
-
-                  {/* Individual functionalities, only once the role is ticked. */}
-                  {on && (
-                    <div className="mt-2 space-y-1 border-t border-clay-200/60 pt-2">
-                      {pos.capabilities.map((key) => {
-                        const cap = CAPABILITIES[key];
-                        if (!cap) return null;
-                        return (
-                          <label key={key} className="flex cursor-pointer items-center gap-1.5 text-[11px]">
-                            <input
-                              type="checkbox"
-                              checked={effective.includes(key)}
-                              onChange={() => toggleCap(key)}
-                              className="accent-clay-700"
-                            />
-                            <span className="text-stone-700">{cap.button}</span>
-                          </label>
-                        );
-                      })}
-                    </div>
-                  )}
                 </div>
               );
             })}
+          </div>
+
+          {/* Every bot button this department can hand out, always visible and
+              always clickable — ticking one that belongs to an unheld role turns
+              that role on too. */}
+          <div className="mt-2.5 rounded-lg border border-clay-100 bg-white p-2.5">
+            <p className="text-[10px] font-bold uppercase tracking-widest text-stone-400">Bot functionalities</p>
+            <div className="mt-1.5 grid gap-1 sm:grid-cols-2">
+              {departmentCapabilities(g.positions).map((key) => {
+                const cap = CAPABILITIES[key];
+                if (!cap) return null;
+                const ticked = effective.includes(key);
+                const held = selected.some((p) => POSITIONS[p].capabilities.includes(key));
+                return (
+                  <label
+                    key={key}
+                    className={`flex cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] transition ${
+                      ticked ? "bg-clay-50 text-stone-800" : "text-stone-500 hover:bg-stone-50"
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={ticked}
+                      onChange={() => toggleCap(key, g.positions)}
+                      className="accent-clay-700"
+                    />
+                    <span className="min-w-0 flex-1 truncate" title={cap.button}>
+                      {cap.button}
+                    </span>
+                    {!held && !ticked && (
+                      <span className="shrink-0 text-[9px] font-bold uppercase text-stone-300">+role</span>
+                    )}
+                  </label>
+                );
+              })}
+            </div>
           </div>
         </div>
       ))}

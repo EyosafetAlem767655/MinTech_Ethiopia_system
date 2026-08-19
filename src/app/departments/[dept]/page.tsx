@@ -41,6 +41,9 @@ const PANELS: Record<DepartmentKey, ComponentType[]> = {
   finance: [ReceivablesPanel],
 };
 
+/** Departments shown as their submitted reports alone — no KPI row, no trend. */
+const REPORT_ONLY = new Set<DepartmentKey>(["sales", "asset_management"]);
+
 export default function DepartmentPage() {
   const params = useParams();
   const dept = Array.isArray(params.dept) ? params.dept[0] : params.dept;
@@ -64,9 +67,12 @@ export default function DepartmentPage() {
         ← Brief
       </Link>
 
-      {/* Range-driven summary (KPIs, trend, contributors, submissions). The Sales
-          tab is intentionally report-only — no KPIs/trend/feed — so skip it there. */}
-      {dept !== "sales" && <DepartmentReport dept={dept} />}
+      {/* Range-driven summary (KPIs, trend, contributors, submissions).
+          Sales and Asset Management are intentionally report-only. Asset's KPI
+          row counted material counts and purchase requests — sources that role
+          no longer files — and its trend charted sales, which it does not own;
+          the panels below are the reports it actually submits. */}
+      {!REPORT_ONLY.has(dept) && <DepartmentReport dept={dept} />}
 
       {/* Detailed module reports */}
       <div className="mt-4 space-y-8">

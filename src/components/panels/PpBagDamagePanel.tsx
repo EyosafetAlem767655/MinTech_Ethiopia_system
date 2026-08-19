@@ -1,8 +1,17 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import DecideBtn from "@/components/DecideButton";
 
-/** PP bag damage reports: reason, quantity, evidence photos and the AI verdict. */
+/**
+ * PP bag damage reports: reason, quantity, evidence photos, the AI verdict and
+ * the human decision.
+ *
+ * The trust score is advice, not a verdict — a report the AI could not check at
+ * all must still be approvable, and a convincing photo must still be refusable,
+ * so every report carries approve/reject buttons regardless of what the model
+ * said.
+ */
 
 interface PhotoCheck {
   checked: boolean;
@@ -19,6 +28,8 @@ interface Photo {
   ai: PhotoCheck | null;
 }
 
+type Status = "pending" | "approved" | "rejected";
+
 interface Row {
   _id: string;
   date: string;
@@ -29,8 +40,17 @@ interface Row {
   flags: string[];
   ai: PhotoCheck | null;
   photos: Photo[];
+  status: Status;
+  decidedBy: string | null;
+  decidedAt: string | null;
   createdAt: string;
 }
+
+const STATUS_TONE: Record<Status, string> = {
+  pending: "bg-amber-100 text-amber-800",
+  approved: "bg-green-100 text-green-700",
+  rejected: "bg-red-100 text-red-800",
+};
 
 const fmtDate = (d: string) => new Date(d).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
 
@@ -79,18 +99,50 @@ function TrustBadge({ row }: { row: Row }) {
 
 export default function PpBagDamagePanel() {
   const [rows, setRows] = useState<Row[] | null>(null);
+  const [busy, setBusy] = useState<Record<string, boolean>>({});
+  const [error, setError] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const res = await fetch("/api/pp-bag-damage");
+      const data = res.ok ? await res.json() : [];
+      setRows(Array.isArray(data) ? data : []);
+    } catch {
+      setRows([]);
+    }
+  }, []);
 
   useEffect(() => {
-    fetch("/api/pp-bag-damage")
-      .then((r) => (r.ok ? r.json() : []))
-      .then((d) => setRows(Array.isArray(d) ? d : []))
-      .catch(() => setRows([]));
-  }, []);
+    load();
+  }, [load]);
+
+  const decide = useCallback(
+    async (id: string, action: "approve" | "reject" | "reopen") => {
+      setBusy((b) => ({ ...b, [id]: true }));
+      setError("");
+      try {
+        const res = await fetch(`/api/pp-bag-damage/${id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action }),
+        });
+        if (!res.ok) {
+          setError((await res.json().catch(() => ({}))).error || "Could not save that decision.");
+          return;
+        }
+        await load();
+      } finally {
+        setBusy((b) => ({ ...b, [id]: false }));
+      }
+    },
+    [load]
+  );
 
   if (!rows) return <div className="card h-40 animate-pulse bg-clay-50" />;
 
   const totalBags = rows.reduce((a, r) => a + (Number(r.quantity) || 0), 0);
   const flagged = rows.filter((r) => r.flags?.length > 0).length;
+  const awaiting = rows.filter((r) => (r.status ?? "pending") === "pending").length;
 
   return (
     <section className="space-y-3">
@@ -100,9 +152,12 @@ export default function PpBagDamagePanel() {
           <p className="text-[11px] font-bold text-stone-500">
             {totalBags.toLocaleString()} bags
             {flagged > 0 && <span className="ml-2 text-amber-700">· {flagged} flagged</span>}
+            {awaiting > 0 && <span className="ml-2 text-amber-800">· {awaiting} awaiting decision</span>}
           </p>
         )}
       </div>
+
+      {error && <p className="card border-l-4 border-l-red-500 p-3 text-xs font-bold text-red-700">{error}</p>}
 
       {rows.length === 0 ? (
         <p className="card p-4 text-sm text-stone-400">No PP bag damage reports yet.</p>
@@ -118,7 +173,16 @@ export default function PpBagDamagePanel() {
                   <p className="mt-0.5 whitespace-pre-wrap text-xs text-stone-700">{r.reason}</p>
                   <p className="mt-0.5 text-[10px] text-stone-400">{r.reportedBy}</p>
                 </div>
-                <TrustBadge row={r} />
+                <div className="flex shrink-0 flex-col items-end gap-1">
+                  <span
+                    className={`rounded-full px-2 py-0.5 text-[10px] font-bold capitalize ${
+                      STATUS_TONE[r.status ?? "pending"]
+                    }`}
+                  >
+                    {r.status ?? "pending"}
+                  </span>
+                  <TrustBadge row={r} />
+                </div>
               </div>
 
               {r.photos?.length > 0 && (
@@ -179,6 +243,39 @@ export default function PpBagDamagePanel() {
                   ❗ A photo here was already submitted in an earlier report.
                 </p>
               )}
+
+              <div className="flex flex-wrap items-center gap-1.5 border-t border-clay-50 pt-2">
+                {(r.status ?? "pending") === "pending" ? (
+                  <>
+                    <DecideBtn
+                      label="✓ Approve"
+                      tone="green"
+                      busy={!!busy[r._id]}
+                      onClick={() => decide(r._id, "approve")}
+                    />
+                    <DecideBtn
+                      label="✗ Reject"
+                      tone="red"
+                      busy={!!busy[r._id]}
+                      onClick={() => decide(r._id, "reject")}
+                    />
+                  </>
+                ) : (
+                  <>
+                    <p className="text-[10px] text-stone-400">
+                      {r.status === "approved" ? "Approved" : "Rejected"}
+                      {r.decidedBy ? ` by ${r.decidedBy}` : ""}
+                      {r.decidedAt ? ` · ${fmtDate(r.decidedAt)}` : ""}
+                    </p>
+                    <DecideBtn
+                      label="↺ Reopen"
+                      tone="grey"
+                      busy={!!busy[r._id]}
+                      onClick={() => decide(r._id, "reopen")}
+                    />
+                  </>
+                )}
+              </div>
             </div>
           ))}
         </div>

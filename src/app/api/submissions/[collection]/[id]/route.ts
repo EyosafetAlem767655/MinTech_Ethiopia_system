@@ -20,12 +20,29 @@ function resolve(collection: string, id: string): SubmissionSpec | null {
 
 /** Fetch the row first: acting on an id that does not exist must 404, not report success. */
 async function loadRow(spec: SubmissionSpec, id: string) {
-  const cols = ["id", spec.authorColumn];
+  const cols = ["id"];
+  if (spec.authorColumn) cols.push(spec.authorColumn);
   if (spec.photosColumn) cols.push(spec.photosColumn);
   if (spec.photoColumn) cols.push(spec.photoColumn);
   return first(await sql<Record<string, unknown>[]>`
     select ${sql(Array.from(new Set(cols)))} from ${sql(spec.table)} where id = ${id}
   `);
+}
+
+/**
+ * File ids held in a child table. Read separately from the row because the
+ * cascade delete takes those rows with the parent — after the delete there is
+ * nothing left to ask.
+ */
+async function joinedPhotoIds(spec: SubmissionSpec, id: string): Promise<string[]> {
+  const join = spec.photoJoin;
+  if (!join) return [];
+  const rows = await sql<{ file_id: string | null }[]>`
+    select ${sql(join.fileColumn)} as file_id
+      from ${sql(join.table)}
+     where ${sql(join.foreignKey)} = ${id}
+  `;
+  return rows.map((r) => r.file_id).filter((v): v is string => Boolean(v));
 }
 
 export async function PATCH(req: NextRequest, { params }: { params: { collection: string; id: string } }) {
@@ -92,6 +109,7 @@ export async function DELETE(_req: NextRequest, { params }: { params: { collecti
     if (Array.isArray(arr)) photoIds.push(...arr.map(String));
   }
   if (spec.photoColumn && row[spec.photoColumn]) photoIds.push(String(row[spec.photoColumn]));
+  photoIds.push(...(await joinedPhotoIds(spec, params.id)));
 
   await sql`delete from ${sql(spec.table)} where id = ${params.id}`;
 
@@ -104,7 +122,9 @@ export async function DELETE(_req: NextRequest, { params }: { params: { collecti
   await logActivity({
     ...WEB_ACTOR,
     action: "report_deleted",
-    detail: `${spec.label} ${params.id} by ${String(row[spec.authorColumn] ?? "unknown")}`,
+    detail: `${spec.label} ${params.id} by ${
+      spec.authorColumn ? String(row[spec.authorColumn] ?? "unknown") : "unknown"
+    }`,
     ok: true,
     meta: { collection: params.collection, table: spec.table, photos: photoIds.length },
   });
