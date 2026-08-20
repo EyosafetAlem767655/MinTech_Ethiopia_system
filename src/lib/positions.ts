@@ -303,13 +303,17 @@ export const POSITIONS: Record<PositionKey, Position> = {
     department: "production",
     en: "Daily production report",
     am: "የዕለት ምርት ሪፖርት",
-    description: "Reports production output every day (shift and daily operations).",
-    // The monthly stock-status sheet was dropped: the guided daily report now
-    // captures the stock count, and the monthly accounting sheet duplicated it
-    // less reliably. Its historic rows stay readable in the dashboard and chat.
-    capabilities: ["daily_report", "shift", "ops", "production_report"],
+    description: "Files the guided daily production and stock report.",
+    // One button, deliberately. The free-text daily report, the shift report,
+    // the pasted operations report and the monthly stock sheet all captured
+    // pieces of what the guided flow now asks for column by column — four ways
+    // to record the same day, none of them agreeing. Their tables are untouched
+    // and stay readable; only the way in is gone.
+    capabilities: ["production_report"],
     dailyRequired: true,
-    submissionTables: ["daily_reports", "shift_reports", "daily_ops_reports", "production_reports"],
+    // production_reports is written on every submission; daily_ops_reports only
+    // when the stock half is non-empty, so it cannot stand in as the signal.
+    submissionTables: ["production_reports"],
   },
   asset_materials: {
     key: "asset_materials",

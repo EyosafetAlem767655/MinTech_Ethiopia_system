@@ -1,13 +1,17 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { HR_KINDS } from "@/lib/positions";
 
 /**
- * Daily-report compliance (who submitted / who missed) plus the day's daily, HR
- * and material reports. Moved out of Settings onto the Brief. Reads the existing
+ * Daily-report compliance — who submitted and who missed — plus the day's
+ * submitted reports. Moved out of Settings onto the Brief. Reads the existing
  * /api/daily-reports endpoint (compliance is already filtered to roles that
  * require a daily report).
+ *
+ * The HR and material-count feeds that used to sit below were dropped: they are
+ * two of a dozen report types and had no more claim to the Brief than the rest.
+ * Every collection is still listed, editable and deletable under
+ * Settings → Submissions, which is the one place that shows all of them.
  */
 
 interface DailyReportRow {
@@ -16,24 +20,6 @@ interface DailyReportRow {
   positions: string[];
   dateKey: string;
   text: string;
-  photoFileIds: string[];
-  createdAt: string;
-}
-
-interface HrRow {
-  _id: string;
-  fullName: string;
-  kind: keyof typeof HR_KINDS;
-  text: string;
-  photoFileIds: string[];
-  createdAt: string;
-}
-
-interface MaterialRow {
-  _id: string;
-  countedBy: string;
-  dateKey: string;
-  rawText: string;
   photoFileIds: string[];
   createdAt: string;
 }
@@ -52,14 +38,12 @@ interface ComplianceRow {
 const fmtTime = (d: string) =>
   new Date(d).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 
-type Collection = "daily" | "hr" | "materials";
+type Collection = "daily";
 
 export default function DailyReportsPanel() {
   const [data, setData] = useState<{
     today: string;
     daily: DailyReportRow[];
-    hr: HrRow[];
-    materials: MaterialRow[];
     missingToday: { _id: string; fullName: string }[];
     compliance: ComplianceRow[];
     summary: { total: number; submittedToday: number; missingToday: number };
@@ -80,11 +64,10 @@ export default function DailyReportsPanel() {
   // log and photo cleanup — the column each collection stores its text in comes
   // from the registry in lib/submissions.ts.
   const saveEdit = async (collection: Collection, id: string, text: string) => {
-    const key = collection === "materials" ? "raw_text" : "text";
     const res = await fetch(`/api/submissions/${collection}/${id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ [key]: text }),
+      body: JSON.stringify({ text }),
     });
     if (res.ok) await load();
     return res.ok;
@@ -173,34 +156,6 @@ export default function DailyReportsPanel() {
         ))}
       </Section>
 
-      <Section title="HR & customer reports">
-        {data.hr.map((r) => (
-          <Card
-            key={r._id}
-            who={r.fullName}
-            when={r.createdAt}
-            photos={r.photoFileIds}
-            text={r.text}
-            badge={HR_KINDS[r.kind]?.en}
-            onSave={(t) => saveEdit("hr", r._id, t)}
-            onDelete={() => deleteRow("hr", r._id)}
-          />
-        ))}
-      </Section>
-
-      <Section title="Material counts">
-        {data.materials.map((r) => (
-          <Card
-            key={r._id}
-            who={r.countedBy}
-            when={r.createdAt}
-            photos={r.photoFileIds}
-            text={r.rawText}
-            onSave={(t) => saveEdit("materials", r._id, t)}
-            onDelete={() => deleteRow("materials", r._id)}
-          />
-        ))}
-      </Section>
     </div>
   );
 }

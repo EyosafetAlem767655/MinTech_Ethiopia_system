@@ -892,9 +892,14 @@ function PositionPicker({
           </button>
         </p>
       )}
+      {/* An empty set is stored as "no override", so it reverts to the role
+          defaults rather than leaving someone with no way to report. Say that
+          plainly — the previous wording promised an empty menu the API will not
+          actually produce, and with single-button roles it is one click away. */}
       {effective.length === 0 && selected.length > 0 && (
-        <p className="rounded-lg bg-red-50 px-2.5 py-1.5 text-[11px] font-bold text-red-700">
-          No functionalities ticked — this employee would have an empty bot menu.
+        <p className="rounded-lg bg-amber-50 px-2.5 py-1.5 text-[11px] font-bold text-amber-800">
+          Nothing ticked — saving now reverts this employee to their role&apos;s default buttons. To stop
+          someone reporting, deactivate them instead.
         </p>
       )}
     </div>

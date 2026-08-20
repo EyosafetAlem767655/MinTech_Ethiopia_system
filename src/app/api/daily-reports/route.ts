@@ -17,21 +17,14 @@ export async function GET(req: NextRequest) {
   const window7 = recentDateKeys(7);
   const cutoff30 = eatDateKey(new Date(Date.now() - 30 * 86400000));
 
-  const [daily, hr, materials, activeEmployees] = await Promise.all([
+  // The HR and material-count feeds were removed from the Brief, so they are no
+  // longer fetched here. Both collections remain fully manageable under
+  // Settings → Submissions, which reads /api/submissions instead.
+  const [daily, activeEmployees] = await Promise.all([
     sql`
       select id as _id, full_name as "fullName", positions, date_key as "dateKey",
              text, photo_file_ids as "photoFileIds", created_at as "createdAt"
         from daily_reports order by created_at desc limit ${limit}
-    `,
-    sql`
-      select id as _id, full_name as "fullName", kind, text,
-             photo_file_ids as "photoFileIds", created_at as "createdAt"
-        from hr_reports order by created_at desc limit ${limit}
-    `,
-    sql`
-      select id as _id, counted_by as "countedBy", date_key as "dateKey", raw_text as "rawText",
-             photo_file_ids as "photoFileIds", created_at as "createdAt"
-        from material_counts order by created_at desc limit ${limit}
     `,
     sql<{ id: string; full_name: string; positions: string[] }[]>`
       select id, full_name, positions from telegram_users where active = true order by full_name
@@ -78,8 +71,6 @@ export async function GET(req: NextRequest) {
   return NextResponse.json({
     today,
     daily,
-    hr,
-    materials,
     missingToday,
     compliance,
     summary: {
