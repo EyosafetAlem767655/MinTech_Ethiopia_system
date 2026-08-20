@@ -12,7 +12,9 @@ export const PRODUCT_LABEL: Record<string, string> = {
   ETL6: "ETL-6",
   "5EL": "5-EL",
   "3EL": "3-EL",
-  W2EL: "W2-EL",
+  // Wollega-2-EL. Written with both hyphens so it cannot be misread as 2-EL,
+  // which is a different brand sitting right beside it in every table.
+  W2EL: "W-2-EL",
   "2EL": "2-EL",
   "1EL": "1-EL",
   EC15: "EC-15",
@@ -23,15 +25,46 @@ export const PRODUCT_LABEL: Record<string, string> = {
 /**
  * Preferred column order for grids/tables (matches the company report layout).
  *
- * 1EL keeps its label above but is deliberately absent here: it is not on the
- * current delivery sheet, so it sorts after the canonical columns via
- * orderProducts' alphabetical tail rather than holding a slot the company no
- * longer uses. Historic rows carrying it still render.
+ * 1EL keeps its label above but is deliberately absent here: it is not produced,
+ * so it sorts after the canonical columns via orderProducts' alphabetical tail
+ * rather than holding a slot nothing fills. Historic rows carrying it still
+ * render with a proper name instead of a raw code.
  */
 export const PRODUCT_ORDER = ["ETL15", "ETL9", "ETL6", "5EL", "3EL", "W2EL", "2EL", "Talk", "EC15", "EC90"];
 
-/** The delivery report's product columns, in sheet order. */
+/**
+ * Production, delivery and the daily stock count all report the same ten
+ * products, so they share one list.
+ *
+ * These are ALIASES, not copies — editing PRODUCT_ORDER adds or removes a
+ * question from every guided flow and a column from every table at once. That is
+ * the intent, but it means the constant is load-bearing well beyond the grid it
+ * is named for.
+ */
 export const DELIVERY_PRODUCTS = PRODUCT_ORDER;
+export const PRODUCTION_PRODUCTS = PRODUCT_ORDER;
+
+/**
+ * Empty-bag inventory, as size → colours.
+ *
+ * Matches the shape `daily_ops_reports.bags` has always used
+ * ({ kg25: { Yellow: n, … }, kg40: { … } }), so the guided stock step and the
+ * pasted ops report write the same structure.
+ */
+export const BAG_SIZES = ["kg25", "kg40"] as const;
+export type BagSize = (typeof BAG_SIZES)[number];
+
+export const BAG_STOCK: Record<BagSize, readonly string[]> = {
+  kg25: ["Yellow", "White", "Beige"],
+  kg40: ["Yellow", "Green", "Beige"],
+};
+
+export const BAG_SIZE_LABEL: Record<BagSize, string> = { kg25: "25KG", kg40: "40KG" };
+
+/** "25KG Yellow" — the column heading and the paste-template key. */
+export function bagLabel(size: BagSize, colour: string): string {
+  return `${BAG_SIZE_LABEL[size]} ${colour}`;
+}
 
 /**
  * The raw-material intake columns, in sheet order.

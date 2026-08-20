@@ -22,7 +22,6 @@ export type CapabilityKey =
   | "hr"
   // Structured department report formats (text / photo / Excel).
   | "production_report"
-  | "stock_status"
   | "raw_material_received"
   | "finished_goods_delivery"
   | "purchase_items"
@@ -139,21 +138,13 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
   },
   production_report: {
     key: "production_report",
-    button: "🏭 የምርት ሪፖርት",
-    captureMode: "llm",
-    docType: "production_report",
+    button: "🏭 የቀኑ የምርት ሪፖርት",
+    // Was "llm": a free-text/photo/Excel report the model guessed columns from.
+    // Now guided, for the same reason the asset reports were converted — what
+    // lands in the table is what was typed, not what was inferred.
+    captureMode: "asset_entry",
     input: "any",
-    question:
-      "🏭 የዕለቱን ምርት ይላኩ — ጽሑፍ፣ ፎቶ ወይም የExcel ሉህ። ቀን፣ FGR ቁጥር እና የእያንዳንዱን ምርት ቶን ያካትቱ።",
-  },
-  stock_status: {
-    key: "stock_status",
-    button: "📦 የክምችት ሁኔታ ሪፖርት",
-    captureMode: "llm",
-    docType: "stock_status",
-    input: "any",
-    question:
-      "📦 የወሩን የክምችት ሁኔታ ሪፖርት ይላኩ — ጽሑፍ፣ ፎቶ ወይም Excel። ለእያንዳንዱ ምርት፦ የመነሻ ሚዛን፣ የገባ፣ ሽያጭ፣ የነጠላ ዋጋ እና ቀሪ ክምችት።",
+    question: "🏭 የቀኑን የምርትና የክምችት ሪፖርት በደረጃ እናስገባለን።",
   },
   raw_material_received: {
     key: "raw_material_received",
@@ -313,9 +304,12 @@ export const POSITIONS: Record<PositionKey, Position> = {
     en: "Daily production report",
     am: "የዕለት ምርት ሪፖርት",
     description: "Reports production output every day (shift and daily operations).",
-    capabilities: ["daily_report", "shift", "ops", "production_report", "stock_status"],
+    // The monthly stock-status sheet was dropped: the guided daily report now
+    // captures the stock count, and the monthly accounting sheet duplicated it
+    // less reliably. Its historic rows stay readable in the dashboard and chat.
+    capabilities: ["daily_report", "shift", "ops", "production_report"],
     dailyRequired: true,
-    submissionTables: ["daily_reports", "shift_reports", "daily_ops_reports", "production_reports", "stock_status_reports"],
+    submissionTables: ["daily_reports", "shift_reports", "daily_ops_reports", "production_reports"],
   },
   asset_materials: {
     key: "asset_materials",

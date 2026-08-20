@@ -105,6 +105,73 @@ export function isOpsReportText(text: string): boolean {
   return hasDate && (hasSection || hasProduct);
 }
 
+/**
+ * The canonical `date_label` for a day: d/m/yyyy with NO leading zeros.
+ *
+ * Must match what `parseDateLabel` produces from a pasted report, or the guided
+ * production flow and the paste would land on different sides of the unique
+ * index and create two rival rows for the same day.
+ */
+export function opsDateLabel(date: Date): string {
+  return `${date.getUTCDate()}/${date.getUTCMonth() + 1}/${date.getUTCFullYear()}`;
+}
+
+/**
+ * Merge one day's figures into its `daily_ops_reports` row.
+ *
+ * Shared by the pasted ops report and the guided production flow, so both write
+ * the day the same way. Any section passed as `{}` leaves the stored one
+ * untouched, which is what lets the guided flow contribute stock and bags
+ * without disturbing delivered/received that only the paste carries.
+ */
+export async function upsertOpsDay(entry: {
+  dateLabel: string;
+  date: Date;
+  reportedBy: string;
+  delivered?: Record<string, number>;
+  received?: Record<string, number>;
+  stock?: Record<string, number>;
+  bags?: Record<string, Record<string, number>>;
+  rawText?: string;
+}): Promise<{ inserted: boolean }> {
+  // The Mongo version did findOne → merge in JS → markModified ×4 → save,
+  // a check-then-act race guarded only by the unique index. Here the merge is
+  // a single atomic statement: `||` concatenates jsonb, so a section absent
+  // from this paste ('{}') leaves the stored one untouched, which reproduces
+  // the old "only overwrite sections present in the new entry" rule.
+  const bags: Record<string, unknown> = {};
+  for (const [size, inner] of Object.entries(entry.bags || {})) {
+    if (inner && Object.keys(inner).length) bags[size] = inner;
+  }
+
+  const [row] = await sql<{ inserted: boolean }[]>`
+    insert into daily_ops_reports
+      (date_label, date, reported_by, delivered, received, stock, bags, raw_text, source)
+    values
+      (${entry.dateLabel}, ${entry.date}, ${entry.reportedBy},
+       ${jsonb(entry.delivered || {})}, ${jsonb(entry.received || {})}, ${jsonb(entry.stock || {})},
+       ${jsonb(bags)}, ${(entry.rawText || "").slice(0, 500)}, 'telegram')
+    on conflict (date_label) do update set
+      -- These three are flat maps, so a shallow jsonb merge is exactly right:
+      -- keys absent from this paste keep their stored values.
+      delivered = daily_ops_reports.delivered || excluded.delivered,
+      received  = daily_ops_reports.received  || excluded.received,
+      stock     = daily_ops_reports.stock     || excluded.stock,
+      -- bags is nested one level deeper. A shallow merge would let a paste
+      -- containing only 25kg figures replace the whole kg25 object (dropping
+      -- previously-recorded product codes), so merge each weight class.
+      bags = jsonb_build_object(
+        'kg25', coalesce(daily_ops_reports.bags -> 'kg25', '{}'::jsonb)
+                  || coalesce(excluded.bags -> 'kg25', '{}'::jsonb),
+        'kg40', coalesce(daily_ops_reports.bags -> 'kg40', '{}'::jsonb)
+                  || coalesce(excluded.bags -> 'kg40', '{}'::jsonb)
+      ),
+      updated_at = now()
+    returning (xmax = 0) as inserted
+  `;
+  return { inserted: row.inserted };
+}
+
 export async function ingestOpsReport(
   text: string,
   reportedBy: string
@@ -114,41 +181,17 @@ export async function ingestOpsReport(
   let updated = 0;
 
   for (const entry of entries) {
-    // The Mongo version did findOne → merge in JS → markModified ×4 → save,
-    // a check-then-act race guarded only by the unique index. Here the merge is
-    // a single atomic statement: `||` concatenates jsonb, so a section absent
-    // from this paste ('{}') leaves the stored one untouched, which reproduces
-    // the old "only overwrite sections present in the new entry" rule.
-    const bags: Record<string, unknown> = {};
-    if (Object.keys(entry.bags.kg25).length) bags.kg25 = entry.bags.kg25;
-    if (Object.keys(entry.bags.kg40).length) bags.kg40 = entry.bags.kg40;
-
-    const [row] = await sql<{ inserted: boolean }[]>`
-      insert into daily_ops_reports
-        (date_label, date, reported_by, delivered, received, stock, bags, raw_text, source)
-      values
-        (${entry.dateLabel}, ${entry.date}, ${reportedBy},
-         ${jsonb(entry.delivered)}, ${jsonb(entry.received)}, ${jsonb(entry.stock)},
-         ${jsonb(bags)}, ${text.slice(0, 500)}, 'telegram')
-      on conflict (date_label) do update set
-        -- These three are flat maps, so a shallow jsonb merge is exactly right:
-        -- keys absent from this paste keep their stored values.
-        delivered = daily_ops_reports.delivered || excluded.delivered,
-        received  = daily_ops_reports.received  || excluded.received,
-        stock     = daily_ops_reports.stock     || excluded.stock,
-        -- bags is nested one level deeper. A shallow merge would let a paste
-        -- containing only 25kg figures replace the whole kg25 object (dropping
-        -- previously-recorded product codes), so merge each weight class.
-        bags = jsonb_build_object(
-          'kg25', coalesce(daily_ops_reports.bags -> 'kg25', '{}'::jsonb)
-                    || coalesce(excluded.bags -> 'kg25', '{}'::jsonb),
-          'kg40', coalesce(daily_ops_reports.bags -> 'kg40', '{}'::jsonb)
-                    || coalesce(excluded.bags -> 'kg40', '{}'::jsonb)
-        ),
-        updated_at = now()
-      returning (xmax = 0) as inserted
-    `;
-    if (row.inserted) saved++;
+    const { inserted } = await upsertOpsDay({
+      dateLabel: entry.dateLabel,
+      date: entry.date,
+      reportedBy,
+      delivered: entry.delivered,
+      received: entry.received,
+      stock: entry.stock,
+      bags: entry.bags,
+      rawText: text,
+    });
+    if (inserted) saved++;
     else updated++;
   }
 

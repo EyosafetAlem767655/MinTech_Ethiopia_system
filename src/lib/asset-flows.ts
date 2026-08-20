@@ -1,21 +1,40 @@
 import sql from "@/lib/sql";
-import { DELIVERY_PRODUCTS, productLabel, RAW_MATERIALS } from "@/lib/products";
+import {
+  BAG_SIZES,
+  BAG_STOCK,
+  DELIVERY_PRODUCTS,
+  PRODUCTION_PRODUCTS,
+  bagLabel,
+  productLabel,
+  RAW_MATERIALS,
+  type BagSize,
+} from "@/lib/products";
+import { upsertOpsDay, opsDateLabel } from "@/lib/ops-report";
+import { bagKey, productionTemplate, PROD_PREFIX, STOCK_PREFIX } from "@/lib/production-paste";
 import type { ToolPhotoCheck } from "@/lib/llm";
 
 /**
- * Guided step-by-step data entry for the three Asset Management reports.
+ * Guided step-by-step data entry for the reports filed from the bot — the three
+ * Asset Management ones and the daily production report.
  *
  * These used to be captured as free text and handed to an LLM to guess the
  * columns, which is why the resulting tables were unreliable. The bot now asks
- * for each column by name, so what lands in the database is what the asset
- * manager actually typed — no inference anywhere in the path.
+ * for each column by name, so what lands in the database is what the person
+ * actually typed — no inference anywhere in the path.
  *
  * The steps are a data table rather than a chain of if-blocks: the webhook only
  * has to ask `nextStep()` what comes next, which keeps the 2 300-line handler
- * from growing three more state machines.
+ * from growing four more state machines. The file keeps its "asset" name because
+ * renaming the state, the session column and every call site would be pure
+ * churn; read it as "guided flows".
  */
 
-export type AssetFlowKind = "raw_material" | "delivery" | "tool_request" | "pp_bag_damage";
+export type AssetFlowKind =
+  | "raw_material"
+  | "delivery"
+  | "tool_request"
+  | "pp_bag_damage"
+  | "production_daily";
 
 export interface AssetFlowState {
   kind: AssetFlowKind;
@@ -33,17 +52,29 @@ export interface AssetFlowState {
 /** Max photos a multi-photo step will accept. */
 export const MAX_FLOW_PHOTOS = 3;
 
+export type StepValidation = { ok: true; value: string } | { ok: false; error: string };
+
 export interface AssetStep {
   id: string;
   /** Amharic question shown to the user. */
   prompt: string;
-  /** "photos" collects several and waits for a done button; "photo" takes one. */
-  type: "date" | "text" | "number" | "choice" | "photo" | "photos";
+  /**
+   * "photos" collects several and waits for a done button; "photo" takes one;
+   * "paste" sends a fill-in template and reads a whole block back at once.
+   */
+  type: "date" | "text" | "number" | "choice" | "photo" | "photos" | "paste";
   choices?: { label: string; value: string }[];
   /** Skip the step unless this holds — used for the maintenance/new-item branch. */
   when?: (draft: Record<string, string | number>) => boolean;
   /** Accept "-" / "የለም" as empty instead of demanding a value. */
   skippable?: boolean;
+  /**
+   * Extra check for a text step, returning the normalised value or a reason to
+   * re-ask. Needed where a field is digits but NOT a quantity: `parseQty` strips
+   * commas, so a comma-separated FGR pair would be silently fused into one
+   * number.
+   */
+  validate?: (raw: string) => StepValidation;
 }
 
 /* ─────────────────────────────── Step tables ──────────────────────────────── */
@@ -111,11 +142,82 @@ const PP_BAG_DAMAGE_STEPS: AssetStep[] = [
   },
 ];
 
+/**
+ * FGR numbers: one or two four-digit document numbers.
+ *
+ * Deliberately NOT a `number` step — `parseQty` strips commas, so "1234, 1235"
+ * would be recorded as the single number 12341235 with nothing to show anything
+ * had gone wrong.
+ */
+export function validateFgr(raw: string): StepValidation {
+  const parts = raw
+    .split(",")
+    .map((p) => p.trim())
+    .filter(Boolean);
+  if (parts.length === 0 || parts.length > 2) {
+    return { ok: false, error: "❌ አንድ ወይም ሁለት የFGR ቁጥር ብቻ — ሁለት ከሆኑ በኮማ ይለያዩ (ለምሳሌ 1234, 1235)።" };
+  }
+  if (!parts.every((p) => /^\d{4}$/.test(p))) {
+    return { ok: false, error: "❌ እያንዳንዱ የFGR ቁጥር በ4 አሃዝ መሆን አለበት (ለምሳሌ 1234)።" };
+  }
+  return { ok: true, value: parts.join(", ") };
+}
+
+/**
+ * One button, two tables: what was produced today, then what is on hand.
+ *
+ * The paste step comes second, straight after the date, because answering all of
+ * this one question at a time is 28 messages. Whatever the paste leaves blank
+ * falls through to the individual questions below it.
+ */
+const PRODUCTION_STEPS: AssetStep[] = [
+  { id: "date", prompt: "📅 የሪፖርቱን ቀን ይምረጡ።", type: "date" },
+  {
+    id: "fill",
+    prompt: "📋 እንዴት ማስገባት ይፈልጋሉ?",
+    type: "choice",
+    choices: [
+      { label: "📋 በአንድ ላይ (ሠንጠረዥ)", value: "paste" },
+      { label: "1️⃣ በደረጃ በደረጃ", value: "steps" },
+    ],
+  },
+  {
+    id: "paste",
+    prompt: "📋 የሚከተለውን ቅጂ ሞልተው ይመልሱት። ያልሞሉት መስመር በጥያቄ ይጠየቃል።",
+    type: "paste",
+    when: (d) => d.fill === "paste",
+  },
+  {
+    id: "fgrNo",
+    prompt: "🔢 የFGR ቁጥር ይፃፉ። ሁለት ከሆኑ በኮማ ይለያዩ (ለምሳሌ 1234, 1235)።",
+    type: "text",
+    validate: validateFgr,
+  },
+  ...PRODUCTION_PRODUCTS.map<AssetStep>((code) => ({
+    id: `${PROD_PREFIX}${code}`,
+    prompt: `🏭 የዛሬ ምርት — የ<b>${productLabel(code)}</b> ብዛት በቶን። ከሌለ 0 ይፃፉ።`,
+    type: "number",
+  })),
+  ...PRODUCTION_PRODUCTS.map<AssetStep>((code) => ({
+    id: `${STOCK_PREFIX}${code}`,
+    prompt: `📦 ክምችት — የ<b>${productLabel(code)}</b> ቀሪ ብዛት በቶን። ከሌለ 0 ይፃፉ።`,
+    type: "number",
+  })),
+  ...BAG_SIZES.flatMap((size) =>
+    BAG_STOCK[size].map<AssetStep>((colour) => ({
+      id: bagKey(size, colour),
+      prompt: `🧺 ክምችት — የ<b>${bagLabel(size, colour)}</b> ከረጢት ብዛት (ቁጥር)። ከሌለ 0 ይፃፉ።`,
+      type: "number",
+    }))
+  ),
+];
+
 const STEPS: Record<AssetFlowKind, AssetStep[]> = {
   raw_material: RAW_MATERIAL_STEPS,
   delivery: DELIVERY_STEPS,
   tool_request: TOOL_REQUEST_STEPS,
   pp_bag_damage: PP_BAG_DAMAGE_STEPS,
+  production_daily: PRODUCTION_STEPS,
 };
 
 export const FLOW_TITLE: Record<AssetFlowKind, string> = {
@@ -123,7 +225,28 @@ export const FLOW_TITLE: Record<AssetFlowKind, string> = {
   delivery: "🚛 የማድረሻ ሪፖርት",
   tool_request: "🔧 የመሣሪያ ግዢ ጥያቄ",
   pp_bag_damage: "💔 የPP ከረጢት ብልሽት ሪፖርት",
+  production_daily: "🏭 የቀኑ የምርት ሪፖርት",
 };
+
+/** The template text for a paste step. */
+export function pasteTemplate(kind: AssetFlowKind): string {
+  return kind === "production_daily" ? productionTemplate() : "";
+}
+
+/**
+ * The first step still unanswered, or "review".
+ *
+ * Used after a paste to resume at whatever was left blank instead of marching
+ * back through questions the template already answered.
+ */
+export function firstUnanswered(kind: AssetFlowKind, draft: Record<string, string | number>): string {
+  for (const s of stepsFor(kind, draft)) {
+    if (s.type === "paste" || s.type === "choice") continue;
+    const v = draft[s.id];
+    if (v === undefined || v === "") return s.id;
+  }
+  return "review";
+}
 
 export function stepsFor(kind: AssetFlowKind, draft: Record<string, string | number>): AssetStep[] {
   return STEPS[kind].filter((s) => !s.when || s.when(draft));
@@ -180,6 +303,26 @@ export function deliveryTotal(draft: Record<string, string | number>): number {
   return Math.round(sum * 1000) / 1000;
 }
 
+/** Total produced today — summed from the columns, never asked for. */
+export function productionTotal(draft: Record<string, string | number>): number {
+  const sum = PRODUCTION_PRODUCTS.reduce((a, code) => a + (Number(draft[`${PROD_PREFIX}${code}`]) || 0), 0);
+  return Math.round(sum * 1000) / 1000;
+}
+
+/** The stock count as `daily_ops_reports.bags` stores it: { kg25: {…}, kg40: {…} }. */
+function bagMap(draft: Record<string, string | number>): Record<string, Record<string, number>> {
+  const out: Record<string, Record<string, number>> = {};
+  for (const size of BAG_SIZES) {
+    const inner: Record<string, number> = {};
+    for (const colour of BAG_STOCK[size]) {
+      const v = Number(draft[bagKey(size as BagSize, colour)]) || 0;
+      if (v !== 0) inner[colour] = v;
+    }
+    if (Object.keys(inner).length > 0) out[size] = inner;
+  }
+  return out;
+}
+
 function jsonMap(draft: Record<string, string | number>, prefix: string, keys: readonly string[]) {
   const out: Record<string, number> = {};
   for (const k of keys) {
@@ -227,6 +370,25 @@ export function assetPreview(state: AssetFlowState): string {
       `📄 Deli.: ${esc(d.deliveryNo) || "—"}\n\n` +
       `⚖️ <b>ብዛት (ቶን)</b>\n${lines || "  —"}\n` +
       `  ─────────\n  <b>Total quantity: ${qty(deliveryTotal(d))}</b>\n`
+    );
+  }
+
+  if (state.kind === "production_daily") {
+    const prod = PRODUCTION_PRODUCTS.map((c) => `  • ${productLabel(c)}: ${qty(Number(d[`${PROD_PREFIX}${c}`]) || 0)}`).join("\n");
+    // Stock lists every product even at zero: "we have none left" is a real and
+    // important answer, unlike a product simply not produced that day.
+    const stock = PRODUCTION_PRODUCTS.map((c) => `  • ${productLabel(c)}: ${qty(Number(d[`${STOCK_PREFIX}${c}`]) || 0)}`).join("\n");
+    const bags = BAG_SIZES.flatMap((size) =>
+      BAG_STOCK[size].map((colour) => `  • ${bagLabel(size, colour)}: ${qty(Number(d[bagKey(size, colour)]) || 0)}`)
+    ).join("\n");
+    return (
+      head +
+      `📅 Date: ${esc(d.date)}\n` +
+      `🔢 FGR No: ${esc(d.fgrNo) || "—"}\n\n` +
+      `🏭 <b>የቀኑ ምርት (ቶን)</b>\n${prod}\n` +
+      `  ─────────\n  <b>Total: ${qty(productionTotal(d))}</b>\n\n` +
+      `📦 <b>ክምችት (ቶን)</b>\n${stock}\n\n` +
+      `🧺 <b>የከረጢት ክምችት (ብዛት)</b>\n${bags}\n`
     );
   }
 
@@ -302,6 +464,33 @@ export async function saveAssetReport(
               ${sql.json(jsonMap(d, "prod:", DELIVERY_PRODUCTS))}, 'telegram')
       returning id`;
     return { id: row.id, table: "delivery_reports" };
+  }
+
+  if (state.kind === "production_daily") {
+    const date = reportDate(d.date);
+    const [row] = await sql<{ id: string }[]>`
+      insert into production_reports (date, fgr_no, reported_by, products, source)
+      values (${date}, ${String(d.fgrNo || "") || null}, ${reportedBy},
+              ${sql.json(jsonMap(d, PROD_PREFIX, PRODUCTION_PRODUCTS))}, 'telegram')
+      returning id`;
+
+    // The stock half belongs to the day's ops row, which is where the pasted
+    // ops report has always written it. One number per day per column, whoever
+    // entered it — a second table would let the two disagree with nothing to
+    // reconcile them.
+    const stock = jsonMap(d, STOCK_PREFIX, PRODUCTION_PRODUCTS);
+    const bags = bagMap(d);
+    if (Object.keys(stock).length > 0 || Object.keys(bags).length > 0) {
+      await upsertOpsDay({
+        dateLabel: opsDateLabel(date),
+        date,
+        reportedBy,
+        stock,
+        bags,
+        rawText: `የቀኑ የምርት ሪፖርት · FGR ${String(d.fgrNo || "—")}`,
+      });
+    }
+    return { id: row.id, table: "production_reports" };
   }
 
   if (state.kind === "pp_bag_damage") {

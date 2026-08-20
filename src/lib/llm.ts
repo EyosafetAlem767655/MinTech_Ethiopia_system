@@ -875,7 +875,7 @@ const INGESTION_SCHEMA = `Return STRICT JSON:
   "question": "ONE short friendly question asking for the most important missing field(s)",
   "complete": boolean
 }
-Product codes are always one of: ETL15, ETL9, ETL6, 5EL, 3EL, 2EL, 1EL, EC15, EC90, Talk (normalise any spacing/hyphens like "ETL-9" or "ETL 9μ" to these codes; "Micro Talc"/"Talc" -> Talk).
+Product codes are always one of: ETL15, ETL9, ETL6, 5EL, 3EL, W2EL, 2EL, EC15, EC90, Talk (normalise any spacing/hyphens like "ETL-9" or "ETL 9μ" to these codes; "Micro Talc"/"Talc" -> Talk; "W-2-EL"/"W2-EL"/"Wollega 2-EL" -> W2EL, which is a DIFFERENT product from 2-EL).
 Required fields per type:
 - receipt: vendor, amount (number, ETB), category, receiptDate (YYYY-MM-DD), client if visible
 - purchase_request: title, amount (number, ETB), justification

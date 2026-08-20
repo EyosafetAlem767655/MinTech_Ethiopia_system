@@ -12,7 +12,7 @@ import GatePanel from "@/components/panels/GatePanel";
 import ShiftPanel from "@/components/panels/ShiftPanel";
 import ProductionOpsPanel from "@/components/panels/ProductionOpsPanel";
 import ProductionGridPanel from "@/components/panels/ProductionGridPanel";
-import StockStatusPanel from "@/components/panels/StockStatusPanel";
+import DailyStockPanel from "@/components/panels/DailyStockPanel";
 import RawMaterialReceivedPanel from "@/components/panels/RawMaterialReceivedPanel";
 import DeliveryReportPanel from "@/components/panels/DeliveryReportPanel";
 import ToolRequestsPanel from "@/components/panels/ToolRequestsPanel";
@@ -25,7 +25,10 @@ import SalesReceiptsPanel from "@/components/panels/SalesReceiptsPanel";
  * deliveries, purchased items), then the existing operational panels.
  */
 const PANELS: Record<DepartmentKey, ComponentType[]> = {
-  production: [ProductionGridPanel, StockStatusPanel, ProductionOpsPanel, ShiftPanel, GatePanel],
+  // The two halves of the guided daily report come first, then the wider
+  // operational context. The monthly stock-status sheet is gone — the daily
+  // count replaced it; its historic rows live under Settings → Submissions.
+  production: [ProductionGridPanel, DailyStockPanel, ProductionOpsPanel, ShiftPanel, GatePanel],
   // The three reports the asset manager files come first, then the wider bag /
   // purchase context. Stock status and purchased items are gone: the asset role
   // no longer files either, so a panel for them would only ever show stale rows.

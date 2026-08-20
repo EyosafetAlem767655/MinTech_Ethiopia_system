@@ -19,14 +19,18 @@ import {
   findStep,
   firstStep,
   FLOW_TITLE,
+  firstUnanswered,
   isSkip as isAssetSkip,
   MAX_FLOW_PHOTOS,
   nextStep,
   parseQty,
+  pasteTemplate,
   saveAssetReport,
+  stepsFor,
   type AssetFlowKind,
   type AssetFlowState,
 } from "@/lib/asset-flows";
+import { parseProductionPaste } from "@/lib/production-paste";
 import { PP_BAG_PHOTO_KIND, processPpDamageReport, ppVerdictMessage } from "@/lib/pp-bag-damage";
 import {
   answerCallbackQuery,
@@ -1186,6 +1190,7 @@ const ASSET_FLOW_BY_CAP: Record<string, AssetFlowKind | undefined> = {
   finished_goods_delivery: "delivery",
   tool_request: "tool_request",
   pp_bag_damage: "pp_bag_damage",
+  production_report: "production_daily",
 };
 
 const assetReviewKeyboard = {
@@ -1289,6 +1294,14 @@ async function askAssetStep(chatId: string, state: AssetFlowState): Promise<void
   }
   if (step.type === "photos") {
     await sendMessage(chatId, step.prompt, { reply_markup: photosKeyboard });
+    return;
+  }
+  if (step.type === "paste") {
+    await sendMessage(chatId, step.prompt, { reply_markup: CHANGE_CANCEL_KEYBOARD });
+    // The template goes in its own message with no markup so it can be copied
+    // cleanly on mobile — a long <pre> block mixed into the instructions is
+    // awkward to select, and this is the message the user edits and sends back.
+    await sendMessage(chatId, `<pre>${escapeHtml(pasteTemplate(state.kind))}</pre>`);
     return;
   }
   const hint = step.skippable ? '\n<i>ከሌለ "-" ይላኩ።</i>' : "";
@@ -1851,8 +1864,67 @@ export async function POST(req: NextRequest) {
           return NextResponse.json({ ok: true });
         }
         state.draft[step.id] = n;
+      } else if (step.type === "paste") {
+        const parsed = parseProductionPaste(val);
+        const filled = Object.keys(parsed.values).length;
+        if (filled === 0) {
+          await sendMessage(
+            chatId,
+            "⚠️ ከቅጂው ምንም ማንበብ አልተቻለም። እባክዎ የተላከውን ቅጂ ሞልተው ይመልሱት፣ ወይም ከታች ያለውን ይጫኑ።",
+            { reply_markup: CHANGE_CANCEL_KEYBOARD }
+          );
+          return NextResponse.json({ ok: true });
+        }
+        Object.assign(state.draft, parsed.values);
+
+        // A pasted value still has to pass the step's own validator. Clearing a
+        // bad one drops it back to being asked for, rather than storing an FGR
+        // number the guided path would have rejected.
+        const badFields: string[] = [];
+        for (const s of stepsFor(state.kind, state.draft)) {
+          if (!s.validate) continue;
+          const v = state.draft[s.id];
+          if (v === undefined || v === "") continue;
+          if (!s.validate(String(v)).ok) {
+            delete state.draft[s.id];
+            badFields.push(s.id);
+          }
+        }
+
+        // Report what could not be read rather than dropping it silently — a
+        // mistyped line the user believes was recorded is the worst outcome here.
+        const problems = [...parsed.invalid, ...parsed.unknown].slice(0, 6);
+        if (problems.length > 0) {
+          await sendMessage(
+            chatId,
+            `⚠️ እነዚህ መስመሮች አልተነበቡም፦\n${problems.map((p) => `• ${escapeHtml(p)}`).join("\n")}\n\n` +
+              `<i>የቀሩት በጥያቄ ይጠየቃሉ።</i>`
+          );
+        }
+
+        // Resume at whatever the template left blank instead of re-asking
+        // everything it already answered.
+        state.step = firstUnanswered(state.kind, state.draft);
+        session.assetFlow = { ...state };
+        await persist(session);
+        await sendMessage(
+          chatId,
+          `✅ ${filled - badFields.length} መስክ ተነብቧል።` +
+            (badFields.length > 0 ? `\n⚠️ ${badFields.length} መስክ ድጋሚ ይጠየቃል።` : "")
+        );
+        await askAssetStep(chatId, state);
+        return NextResponse.json({ ok: true });
       } else {
-        state.draft[step.id] = isAssetSkip(val) ? "" : val;
+        if (step.validate && !isAssetSkip(val)) {
+          const result = step.validate(val);
+          if (!result.ok) {
+            await sendMessage(chatId, result.error, { reply_markup: CHANGE_CANCEL_KEYBOARD });
+            return NextResponse.json({ ok: true });
+          }
+          state.draft[step.id] = result.value;
+        } else {
+          state.draft[step.id] = isAssetSkip(val) ? "" : val;
+        }
       }
 
       await advanceAsset(session, chatId, state);

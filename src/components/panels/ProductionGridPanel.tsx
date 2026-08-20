@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { productLabel, orderProducts } from "@/lib/products";
+import { PRODUCTION_PRODUCTS, productLabel, orderProducts } from "@/lib/products";
 
 /** Image 2 — daily production grid: Date × product (tons), with FGR No. */
 
@@ -28,7 +28,13 @@ export default function ProductionGridPanel() {
 
   if (!rows) return <div className="card h-40 animate-pulse bg-clay-50" />;
 
-  const cols = orderProducts(Array.from(new Set(rows.flatMap((r) => Object.keys(r.products || {})))));
+  // Seeded with the canonical list, not derived from the data alone. Zero-valued
+  // products are dropped from the stored jsonb, so a data-only column set
+  // silently changed shape from one day to the next — a product simply vanished
+  // from the sheet on a day nobody made it. Unknown historic codes still append.
+  const cols = orderProducts(
+    Array.from(new Set([...PRODUCTION_PRODUCTS, ...rows.flatMap((r) => Object.keys(r.products || {}))]))
+  );
   const rowTotal = (p: Record<string, number>) => Object.values(p || {}).reduce((a, b) => a + b, 0);
   const colTotal = (c: string) => rows.reduce((a, r) => a + (r.products?.[c] || 0), 0);
   const grand = rows.reduce((a, r) => a + rowTotal(r.products), 0);
