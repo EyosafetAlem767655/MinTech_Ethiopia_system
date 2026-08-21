@@ -8,13 +8,9 @@ import { isDepartmentKey, type DepartmentKey } from "@/lib/departments";
 import BagControlPanel from "@/components/panels/BagControlPanel";
 import PurchasesPanel from "@/components/panels/PurchasesPanel";
 import ReceivablesPanel from "@/components/panels/ReceivablesPanel";
-import GatePanel from "@/components/panels/GatePanel";
-import ShiftPanel from "@/components/panels/ShiftPanel";
-import ProductionOpsPanel from "@/components/panels/ProductionOpsPanel";
-import ProductionGridPanel from "@/components/panels/ProductionGridPanel";
-import DailyStockPanel from "@/components/panels/DailyStockPanel";
 import RawMaterialReceivedPanel from "@/components/panels/RawMaterialReceivedPanel";
 import DeliveryReportPanel from "@/components/panels/DeliveryReportPanel";
+import ProductionPanels from "@/components/panels/ProductionPanels";
 import ToolRequestsPanel from "@/components/panels/ToolRequestsPanel";
 import PpBagDamagePanel from "@/components/panels/PpBagDamagePanel";
 import SalesReceiptsPanel from "@/components/panels/SalesReceiptsPanel";
@@ -25,10 +21,11 @@ import SalesReceiptsPanel from "@/components/panels/SalesReceiptsPanel";
  * deliveries, purchased items), then the existing operational panels.
  */
 const PANELS: Record<DepartmentKey, ComponentType[]> = {
-  // The two halves of the guided daily report come first, then the wider
-  // operational context. The monthly stock-status sheet is gone — the daily
-  // count replaced it; its historic rows live under Settings → Submissions.
-  production: [ProductionGridPanel, DailyStockPanel, ProductionOpsPanel, ShiftPanel, GatePanel],
+  // One component, because a single range control has to drive all four views.
+  // Shift analysis and stone traceability were removed from the system; the
+  // monthly stock-status sheet went earlier. Historic rows for all three remain
+  // readable and deletable under Settings → Submissions.
+  production: [ProductionPanels],
   // The three reports the asset manager files come first, then the wider bag /
   // purchase context. Stock status and purchased items are gone: the asset role
   // no longer files either, so a panel for them would only ever show stale rows.
@@ -44,8 +41,13 @@ const PANELS: Record<DepartmentKey, ComponentType[]> = {
   finance: [ReceivablesPanel],
 };
 
-/** Departments shown as their submitted reports alone — no KPI row, no trend. */
-const REPORT_ONLY = new Set<DepartmentKey>(["sales", "asset_management"]);
+/**
+ * Departments shown as their submitted reports alone — no KPI row, no generic
+ * trend, no contributor strip. Production joined them once its KPIs lost their
+ * source: they counted shift reports, downtime and truckloads, none of which
+ * exist any more. Its own two charts live inside ProductionPanels.
+ */
+const REPORT_ONLY = new Set<DepartmentKey>(["sales", "asset_management", "production"]);
 
 export default function DepartmentPage() {
   const params = useParams();

@@ -19,7 +19,6 @@ const EAT = "Africa/Addis_Ababa";
 
 export interface DayNumbers {
   date: string;
-  truckloads: number;
   tonsProduced: number;
   tonsSold: number;
   revenueInvoiced: number;
@@ -47,7 +46,6 @@ export async function getDayNumbers(start: Date, end: Date): Promise<DayNumbers>
   // Six separate Mongo aggregates collapse into one round trip.
   const [r] = await sql<
     {
-      truckloads: string;
       tons_produced: string;
       tons_sold: string;
       revenue_invoiced: string;
@@ -57,15 +55,27 @@ export async function getDayNumbers(start: Date, end: Date): Promise<DayNumbers>
     }[]
   >`
     select
-      (select coalesce(sum(loads), 0)
-         from stone_deliveries where date >= ${start} and date < ${end})            as truckloads,
-
-      -- Production = "Delivered" tonnage from the daily ops report (the plant's
-      -- own definition of output). Was shift_reports, which the bot doesn't feed.
-      (select coalesce(sum((e.value)::numeric), 0)
-         from daily_ops_reports r
-         cross join lateral jsonb_each_text(r.delivered) as e(key, value)
-        where r.date >= ${start} and r.date < ${end})                               as tons_produced,
+        -- Production = the tonnage on the guided daily production report, which is
+      -- the plant's own record of output. It used to sum daily_ops_reports.delivered,
+      -- but the guided flow writes production_reports and only ever touches the ops
+      -- row's stock/bags — so every report filed since the switch read as zero tons.
+      -- Historic days that only ever had a pasted ops report still fall back to
+      -- the delivered map; the coalesce is per-day, so a day with both is never counted twice.
+      (select coalesce(sum(d.tons), 0) from (
+         select coalesce(p.n, o.n) as tons
+           from (select (r.date at time zone ${EAT})::date as d,
+                        sum((e.value)::numeric) as n
+                   from production_reports r
+                   cross join lateral jsonb_each_text(r.products) as e(key, value)
+                  where r.date >= ${start} and r.date < ${end}
+                  group by 1) p
+           full outer join (select (r.date at time zone ${EAT})::date as d,
+                                   sum((e.value)::numeric) as n
+                              from daily_ops_reports r
+                              cross join lateral jsonb_each_text(r.delivered) as e(key, value)
+                             where r.date >= ${start} and r.date < ${end}
+                             group by 1) o on o.d = p.d
+       ) d)                                                                         as tons_produced,
 
       (select coalesce(sum(case when bag_weight_kg > 0
                                 then sacks * bag_weight_kg / 1000.0
@@ -133,7 +143,6 @@ export async function getDayNumbers(start: Date, end: Date): Promise<DayNumbers>
 
   return {
     date: eatDateLabel(start),
-    truckloads: Number(r.truckloads) || 0,
     tonsProduced: Math.round(Number(r.tons_produced) * 1000) / 1000,
     tonsSold: Math.round(Number(r.tons_sold) * 1000) / 1000,
     revenueInvoiced: Number(r.revenue_invoiced) || 0,
@@ -244,13 +253,25 @@ export async function getBucketedSeries(
         ${step}::interval
       ) as b
     ),
+    -- Per DAY first, then bucketed: production_reports is the guided flow's own
+    -- table, with historic pasted ops rows falling back to the delivered map. Coalescing
+    -- per day means a day recorded both ways contributes once, not twice.
+    prod_day as (
+      select coalesce(p.d, o.d) as d, coalesce(p.n, o.n) as n
+        from (select (r.date at time zone ${EAT})::date as d, sum((e.value)::numeric) as n
+                from production_reports r
+                cross join lateral jsonb_each_text(r.products) as e(key, value)
+               where r.date >= ${start} and r.date < ${end}
+               group by 1) p
+        full outer join
+             (select (r.date at time zone ${EAT})::date as d, sum((e.value)::numeric) as n
+                from daily_ops_reports r
+                cross join lateral jsonb_each_text(r.delivered) as e(key, value)
+               where r.date >= ${start} and r.date < ${end}
+               group by 1) o on o.d = p.d
+    ),
     prod as (
-      select date_trunc(${bucket}, r.date at time zone ${EAT}) as b,
-             sum((e.value)::numeric) as n
-        from daily_ops_reports r
-        cross join lateral jsonb_each_text(r.delivered) as e(key, value)
-       where r.date >= ${start} and r.date < ${end}
-       group by 1
+      select date_trunc(${bucket}, d) as b, sum(n) as n from prod_day group by 1
     ),
     sales as (
       select date_trunc(${bucket}, invoiced_at at time zone ${EAT}) as b, sum(amount) as n
@@ -590,14 +611,7 @@ export async function detectExceptions(
     );
   }
 
-  // 3. Poor stone quality at the gate yesterday
-  const badLoads = await sql<{ truck_plate: string }[]>`
-    select truck_plate from stone_deliveries
-     where date >= ${start} and date < ${end} and quality_grade = 'dark/weathered'
-  `;
-  for (const l of badLoads) {
-    exceptions.push(`Truck ${l.truck_plate}'s load scored dark/weathered at the gate.`);
-  }
+  // 3. (Gate stone-quality exception removed with the traceability module.)
 
   // 4. Lot balance gaps (possible theft / unrecorded use)
   for (const lot of deps.lotGaps ?? (await getLotGaps())) {

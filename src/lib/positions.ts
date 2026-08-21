@@ -15,8 +15,6 @@ export type CapabilityKey =
   | "purchase"
   | "wht"
   | "sales"
-  | "truck"
-  | "shift"
   | "ops"
   | "materials"
   | "hr"
@@ -109,24 +107,6 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
     input: "any",
     question:
       "💵 የክፍያ ማረጋገጫ ፎቶ ይላኩ፣ ወይም የደረሰኝ ቁጥሩን (invoice number)፣ ደንበኛውን፣ የገንዘቡን መጠን፣ የክፍያ ቀኑን እና የክፍያ መንገዱን ይፃፉ።",
-  },
-  truck: {
-    key: "truck",
-    button: "🚚 የጭነት መኪና ሁኔታ",
-    captureMode: "llm",
-    docType: "stone_delivery",
-    input: "photo",
-    question:
-      "🚚 የጭነት መኪናውን ወይም የድንጋዩን ፎቶ ከሰሌዳ ቁጥሩ፣ ከጭነት ብዛቱ፣ ከተጫነበት ማዕድን ማውጫ (ኳሪ) እና ከታወቀ የአሽከርካሪው ስም ጋር ይላኩ።",
-  },
-  shift: {
-    key: "shift",
-    button: "🏭 የፈረቃ ሪፖርት",
-    captureMode: "llm",
-    docType: "shift_report",
-    input: "any",
-    question:
-      "🏭 የተሞሉ ከረጢቶችን ብዛት፣ የከረጢቱን ክብደት (25 ወይም 40 ኪ.ግ)፣ የሥራ መቋረጥ ደቂቃዎችን፣ ፈረቃውን እና ማናቸውንም ማስታወሻዎች ይፃፉ።",
   },
   ops: {
     key: "ops",
@@ -305,10 +285,11 @@ export const POSITIONS: Record<PositionKey, Position> = {
     am: "የዕለት ምርት ሪፖርት",
     description: "Files the guided daily production and stock report.",
     // One button, deliberately. The free-text daily report, the shift report,
-    // the pasted operations report and the monthly stock sheet all captured
-    // pieces of what the guided flow now asks for column by column — four ways
-    // to record the same day, none of them agreeing. Their tables are untouched
-    // and stay readable; only the way in is gone.
+    // the truck/stone gate log, the pasted operations report and the monthly
+    // stock sheet all captured pieces of what the guided flow now asks for
+    // column by column — five ways to record the same day, none of them
+    // agreeing. Shift analysis and stone traceability are gone from the system
+    // entirely; their historic rows stay readable under Settings → Submissions.
     capabilities: ["production_report"],
     dailyRequired: true,
     // production_reports is written on every submission; daily_ops_reports only

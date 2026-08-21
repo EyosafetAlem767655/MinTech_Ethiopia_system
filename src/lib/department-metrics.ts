@@ -36,7 +36,7 @@ export interface Kpi {
 export interface Submission {
   id: string;
   /** Source table, used for the icon/label in the feed. */
-  source: "daily_report" | "shift" | "stone" | "material" | "purchase" | "damage" | "receipt" | "invoice" | "payment";
+  source: "daily_report" | "production" | "material" | "purchase" | "damage" | "receipt" | "invoice" | "payment";
   who: string;
   when: string; // ISO timestamp
   title: string;
@@ -110,16 +110,16 @@ async function departmentKpis(
 ): Promise<Kpi[]> {
   switch (dept) {
     case "production": {
-      const [r] = await sql<{ shifts: string; downtime: string }[]>`
-        select
-          (select count(*) from shift_reports where date >= ${start} and date < ${end})                    as shifts,
-          (select coalesce(sum(downtime_minutes),0) from shift_reports where date >= ${start} and date < ${end}) as downtime
+      // Shift analysis and stone traceability were removed from the system, so
+      // their KPIs went with them. What is left is what the guided daily report
+      // actually records: tonnage produced and how many days were filed.
+      const [r] = await sql<{ reports: string }[]>`
+        select count(*) as reports from production_reports
+         where date >= ${start} and date < ${end}
       `;
       return [
-        { icon: "🪨", label: "Truckloads received", value: base.truckloads },
         { icon: "🏭", label: "Tons produced", value: base.tonsProduced, suffix: " t", decimals: 2 },
-        { icon: "👷", label: "Shift reports", value: Number(r.shifts) || 0 },
-        { icon: "⏱️", label: "Downtime", value: Number(r.downtime) || 0, suffix: " min" },
+        { icon: "📋", label: "Production reports", value: Number(r.reports) || 0 },
       ];
     }
 
@@ -200,39 +200,26 @@ async function departmentSubmissions(dept: DepartmentKey, start: Date, end: Date
 
   switch (dept) {
     case "production": {
-      const [shifts, stones] = await Promise.all([
-        sql<{ id: string; supervisor: string; filled_sacks: number; downtime_minutes: number; shift: string; notes: string | null; date: Date }[]>`
-          select id, supervisor, filled_sacks, downtime_minutes, shift, notes, date
-            from shift_reports where date >= ${start} and date < ${end} order by date desc limit 30`,
-        sql<{ id: string; truck_plate: string; driver_name: string | null; gate_clerk: string | null; loads: number; quality_grade: string; notes: string | null; date: Date }[]>`
-          select id, truck_plate, driver_name, gate_clerk, loads, quality_grade, notes, date
-            from stone_deliveries where date >= ${start} and date < ${end} order by date desc limit 30`,
-      ]);
-      typed = [
-        ...shifts.map<Submission>((r) => ({
+      // The production grid is the department's submission now; the shift and
+      // gate feeds were removed with their modules.
+      const prod = await sql<{ id: string; fgr_no: string | null; reported_by: string; products: Record<string, number>; date: Date }[]>`
+        select id, fgr_no, reported_by, products, date
+          from production_reports where date >= ${start} and date < ${end}
+         order by date desc limit 30`;
+      typed = prod.map<Submission>((r) => {
+        const tons = Object.values(r.products || {}).reduce((a, b) => a + Number(b || 0), 0);
+        return {
           id: r.id,
-          source: "shift",
-          who: r.supervisor,
+          source: "production",
+          who: r.reported_by,
           when: iso(r.date),
-          title: `${r.shift === "night" ? "Night" : "Day"} shift · ${r.filled_sacks} sacks`,
-          detail: r.notes ?? undefined,
-          badge: r.downtime_minutes > 0 ? `${r.downtime_minutes}m downtime` : undefined,
+          title: `${tons.toFixed(2)} t produced`,
+          badge: r.fgr_no ? `FGR ${r.fgr_no}` : undefined,
           photos: [],
-        })),
-        ...stones.map<Submission>((r) => ({
-          id: r.id,
-          source: "stone",
-          who: r.gate_clerk || r.driver_name || "Gate",
-          when: iso(r.date),
-          title: `Truck ${r.truck_plate} · ${r.loads} load${r.loads === 1 ? "" : "s"}`,
-          detail: r.notes ?? undefined,
-          badge: r.quality_grade,
-          photos: [],
-        })),
-      ];
+        };
+      });
       break;
     }
-
     case "asset_management": {
       const [materials, purchases, damage] = await Promise.all([
         sql<{ id: string; counted_by: string; raw_text: string; photo_file_ids: string[]; created_at: Date }[]>`
@@ -387,17 +374,15 @@ async function departmentActivityCounts(
 
   switch (dept) {
     case "production": {
-      const [a] = await sql<{ shifts: string; deliveries: string }[]>`
-        select
-          (select count(*) from shift_reports    where date >= ${start} and date < ${end}) as shifts,
-          (select count(*) from stone_deliveries where date >= ${start} and date < ${end}) as deliveries`;
-      const shifts = Number(a.shifts) || 0;
-      const deliveries = Number(a.deliveries) || 0;
+      const [a] = await sql<{ production: string }[]>`
+        select count(*) as production from production_reports
+         where date >= ${start} and date < ${end}`;
+      const production = Number(a.production) || 0;
       return {
-        total: reports + shifts + deliveries,
+        total: reports + production,
         headline: [
+          { icon: "🏭", label: "Production reports", value: production },
           { icon: "📝", label: "Daily reports", value: reports },
-          { icon: "👷", label: "Shift reports", value: shifts },
         ],
       };
     }

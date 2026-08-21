@@ -41,7 +41,6 @@ export async function assembleAndSendBrief(now = new Date()) {
 
   // "Yesterday in five lines" — figures rendered from queries, never the LLM.
   const fiveLines = [
-    `🪨 ${numbers.truckloads} ጭነቶች ድንጋይ ደርሷል`,
     `🏭 ${numbers.tonsProduced.toFixed(2)} ቶን ተሰርቷል`,
     `🤝 ${numbers.tonsSold.toFixed(2)} ቶን ተሸጧል · ${etb(numbers.revenueInvoiced)} ብር ደረሰኝ ተቋቁሟል`,
     `💵 ${etb(numbers.cashCollected)} ብር ተሰብስቧል`,

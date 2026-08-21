@@ -23,7 +23,6 @@ const SOURCES: Record<string, { who: string; when: string }> = {
   daily_reports: { who: "full_name", when: "created_at" },
   hr_reports: { who: "full_name", when: "created_at" },
   material_counts: { who: "counted_by", when: "created_at" },
-  shift_reports: { who: "supervisor", when: "created_at" },
   daily_ops_reports: { who: "reported_by", when: "created_at" },
   production_reports: { who: "reported_by", when: "created_at" },
   stock_status_reports: { who: "reported_by", when: "created_at" },

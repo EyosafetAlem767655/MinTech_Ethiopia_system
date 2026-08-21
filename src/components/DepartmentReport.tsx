@@ -18,8 +18,7 @@ import type { DepartmentReport as Report, Kpi, Submission } from "@/lib/departme
 
 const SOURCE_ICON: Record<Submission["source"], string> = {
   daily_report: "📝",
-  shift: "👷",
-  stone: "🚚",
+  production: "🏭",
   material: "📦",
   purchase: "🛒",
   damage: "🛡",

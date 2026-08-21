@@ -680,62 +680,6 @@ export async function checkReceiptQRCode(imageBase64: string, contentType: strin
   }
 }
 
-/* ───────────────────────── Gate stone quality scoring ─────────────────────── */
-
-export interface StoneScore {
-  visible_stone: boolean;
-  qualityGrade: "good" | "fair" | "dark/weathered";
-  confidence: number;
-  reasons: string[];
-  recommendation: string;
-}
-
-const STONE_SCORE_FALLBACK: StoneScore = {
-  visible_stone: false,
-  qualityGrade: "fair",
-  confidence: 0,
-  reasons: ["ai_check_failed"],
-  recommendation: "Hold for manual gate review before unloading.",
-};
-
-export async function scoreStonePhoto(imageBase64: string, contentType: string): Promise<StoneScore> {
-  try {
-    const res = await visionAI().chat.completions.create({
-      model: VISION_MODEL,
-      max_tokens: 350,
-      messages: [
-        {
-          role: "system",
-          content:
-            "You inspect raw stone arriving at a mining/crushing site gate. Return STRICT JSON with: " +
-            "visible_stone (boolean), qualityGrade ('good'|'fair'|'dark/weathered'), confidence (0 to 1), " +
-            "reasons (short string array), recommendation (short operational action). " +
-            "Mark dark/weathered when the load appears unusually dark, weathered, contaminated, wet, clay-heavy, or likely to produce bad product.",
-        },
-        {
-          role: "user",
-          content: [
-            { type: "text", text: "Score this truckload of incoming raw stone for production suitability." },
-            { type: "image_url", image_url: { url: `data:${contentType};base64,${imageBase64}`, detail: "low" } },
-          ],
-        },
-      ],
-    });
-    const parsed = extractJson(res.choices[0]?.message?.content);
-    const qualityGrade = ["good", "fair", "dark/weathered"].includes(parsed.qualityGrade) ? parsed.qualityGrade : "fair";
-    return {
-      visible_stone: !!parsed.visible_stone,
-      qualityGrade,
-      confidence: Math.max(0, Math.min(1, Number(parsed.confidence) || 0)),
-      reasons: Array.isArray(parsed.reasons) ? parsed.reasons.map(String).slice(0, 6) : [],
-      recommendation: String(parsed.recommendation || ""),
-    };
-  } catch (e) {
-    console.error("scoreStonePhoto failed:", e);
-    return STONE_SCORE_FALLBACK;
-  }
-}
-
 /* ─────────────────────── Morning brief narrative writer ───────────────────── */
 
 /**
@@ -798,7 +742,6 @@ export async function verifyRequestLegitimacy(
     receipt: "a payment receipt or invoice from a vendor",
     purchase_request: "supporting evidence for a purchase request (item photo, quotation, or related document)",
     damage_claim: "a photo showing bag damage at a factory or warehouse",
-    stone_delivery: "a truck delivering raw stone to a gate",
     other: "a business document",
   };
   const docDesc = typeDescriptions[docType] || typeDescriptions.other;
@@ -850,8 +793,6 @@ export interface IngestionExtraction {
     | "receipt"
     | "purchase_request"
     | "damage_claim"
-    | "stone_delivery"
-    | "shift_report"
     | "invoice"
     | "payment"
     | "withholding_receipt"
@@ -869,7 +810,7 @@ export interface IngestionExtraction {
 
 const INGESTION_SCHEMA = `Return STRICT JSON:
 {
-  "docType": "receipt" | "purchase_request" | "damage_claim" | "stone_delivery" | "shift_report" | "invoice" | "payment" | "withholding_receipt" | "production_report" | "stock_status" | "raw_material_received" | "finished_goods_delivery" | "purchase_items" | "other",
+  "docType": "receipt" | "purchase_request" | "damage_claim" | "invoice" | "payment" | "withholding_receipt" | "production_report" | "stock_status" | "raw_material_received" | "finished_goods_delivery" | "purchase_items" | "other",
   "fields": { ... extracted fields ... },
   "missing": [field names still needed],
   "question": "ONE short friendly question asking for the most important missing field(s)",
@@ -880,8 +821,6 @@ Required fields per type:
 - receipt: vendor, amount (number, ETB), category, receiptDate (YYYY-MM-DD), client if visible
 - purchase_request: title, amount (number, ETB), justification
 - damage_claim: quantity (number of damaged bags reported by worker; lotCode only if visible in image or caption)
-- stone_delivery: truckPlate, loads (number), qualityGrade ("good"|"fair"|"dark/weathered"), supplier, quarry, driverName if visible
-- shift_report: filledSacks (number), bagWeightKg (25 or 40 — the weight in kg of each filled sack), downtimeMinutes (number), shift ("day"|"night"), notes
 - invoice: invoiceNumber, client, amount (number, ETB), sacks, bagWeightKg (25 or 40 — the weight in kg of each sold sack), dueDate (YYYY-MM-DD), clientPhone
 - payment: invoiceNumber, client, amount (number, ETB), paymentDate (YYYY-MM-DD), method
 - withholding_receipt: invoiceNumber, client, amount (number, ETB), receiptDate (YYYY-MM-DD)

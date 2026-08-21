@@ -8,7 +8,6 @@ import {
   checkReceiptQRCode,
   classifyIngestion,
   extractReceiptGemini,
-  scoreStonePhoto,
   verifyRequestLegitimacy,
   type GeminiReceipt,
   type IngestionExtraction,
@@ -332,8 +331,6 @@ const EDITABLE_TABLES = new Set([
   "receipts",
   "purchase_requests",
   "damage_claims",
-  "stone_deliveries",
-  "shift_reports",
   "invoices",
   "payments",
   "production_reports",
@@ -772,48 +769,6 @@ async function saveExtractedRecord(
           mismatchNote +
           `\n\nየተቆጣጣሪ ፊርማ ያስፈልጋል።`,
         ref: { table: "damage_claims", id: claim.id },
-      };
-    }
-
-    case "stone_delivery": {
-      let aiScore;
-      if (opts.fileId) {
-        const file = await getFileBytes(opts.fileId);
-        if (file) aiScore = await scoreStonePhoto(file.base64, file.contentType);
-      }
-      const qualityGrade = ["good", "fair", "dark/weathered"].includes(f.qualityGrade)
-        ? f.qualityGrade
-        : aiScore?.qualityGrade || "good";
-      const truckPlate = String(f.truckPlate || "UNKNOWN").toUpperCase();
-      const loads = Number(f.loads) || 1;
-      const [row] = await sql<{ id: string }[]>`
-        insert into stone_deliveries (truck_plate, supplier, quarry, driver_name, gate_clerk, loads, quality_grade, photo_file_id, ai_score, notes)
-        values (${truckPlate}, ${f.supplier ? String(f.supplier) : null}, ${f.quarry ? String(f.quarry) : null},
-                ${f.driverName ? String(f.driverName) : null}, ${opts.userName}, ${loads}, ${qualityGrade},
-                ${opts.fileId || null}, ${aiScore ? sql.json(aiScore as any) : null},
-                ${f.notes ? String(f.notes) : aiScore?.recommendation ?? null})
-        returning id
-      `;
-      return {
-        reply: `🚚 የጭነት መኪና ማድረሻ ተቀምጧል፦ <b>${truckPlate}</b>፣ ${loads} ጭነት(ቶች)፣ ጥራት፦ ${qualityGrade}።`,
-        ref: { table: "stone_deliveries", id: row.id },
-      };
-    }
-
-    case "shift_report": {
-      const bagWeightKg = [25, 40].includes(Number(f.bagWeightKg)) ? Number(f.bagWeightKg) : null;
-      const filledSacks = Number(f.filledSacks) || 0;
-      const [row] = await sql<{ id: string }[]>`
-        insert into shift_reports (supervisor, filled_sacks, bag_weight_kg, downtime_minutes, shift, notes)
-        values (${opts.userName}, ${filledSacks}, ${bagWeightKg}, ${Number(f.downtimeMinutes) || 0},
-                ${f.shift === "night" ? "night" : "day"}, ${f.notes ? String(f.notes) : null})
-        returning id
-      `;
-      const tons = bagWeightKg ? ((filledSacks * bagWeightKg) / 1000).toFixed(2) : null;
-      const tonsStr = tons ? ` (${tons} ቶን)` : "";
-      return {
-        reply: `🏭 የፈረቃ ሪፖርት ተቀምጧል፦ ${filledSacks} ከረጢቶች${tonsStr}፣ ${Number(f.downtimeMinutes) || 0} ደቂቃ የሥራ መቋረጥ።`,
-        ref: { table: "shift_reports", id: row.id },
       };
     }
 

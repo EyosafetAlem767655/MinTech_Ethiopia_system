@@ -95,7 +95,7 @@ const tools: OpenAI.Chat.ChatCompletionTool[] = [
     type: "function",
     function: {
       name: "get_yesterday_numbers",
-      description: "Yesterday's key numbers: truckloads, sacks produced/sold, revenue invoiced, cash collected, damage claims.",
+      description: "Yesterday's key numbers: tons produced and sold, revenue invoiced, cash collected, damage claims.",
       parameters: { type: "object", properties: {} },
     },
   },
