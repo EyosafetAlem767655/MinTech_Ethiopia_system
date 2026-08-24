@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import sql from "@/lib/sql";
-import { purgeOldPhotos, purgePpBagPhotos } from "@/lib/storage";
+import { purgeFinanceReceipts, purgeOldPhotos, purgePpBagPhotos } from "@/lib/storage";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -20,6 +20,8 @@ export async function GET(req: NextRequest) {
   const hours = Math.max(1, Number(req.nextUrl.searchParams.get("hours")) || 72);
   const ppDaysRaw = req.nextUrl.searchParams.get("ppDays");
   const ppDays = ppDaysRaw === null ? 365 : Math.max(0, Number(ppDaysRaw) || 0);
+  const finDaysRaw = req.nextUrl.searchParams.get("financeDays");
+  const financeDays = finDaysRaw === null ? 730 : Math.max(0, Number(finDaysRaw) || 0);
 
   // Drain in batches so a large backlog can't blow the function time budget;
   // whatever isn't cleared this run is picked up on the next schedule.
@@ -36,6 +38,15 @@ export async function GET(req: NextRequest) {
   for (let i = 0; i < 10; i++) {
     const res = await purgePpBagPhotos(ppDays);
     ppDeleted += res.deleted;
+    if (res.deleted === 0) break;
+  }
+
+  // Purchase receipts back a money figure, so they outlive both sweeps above and
+  // are excluded from the 72-hour one.
+  let financeDeleted = 0;
+  for (let i = 0; i < 10; i++) {
+    const res = await purgeFinanceReceipts(financeDays);
+    financeDeleted += res.deleted;
     if (res.deleted === 0) break;
   }
 
@@ -56,6 +67,8 @@ export async function GET(req: NextRequest) {
     olderThanHours: hours,
     ppBagDeleted: ppDeleted,
     ppBagOlderThanDays: ppDays,
+    financeReceiptsDeleted: financeDeleted,
+    financeReceiptsOlderThanDays: financeDays,
     dedupeRowsDeleted: Number(dedupe[0]?.count || 0),
   });
 }

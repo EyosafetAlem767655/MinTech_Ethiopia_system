@@ -793,9 +793,6 @@ export interface IngestionExtraction {
     | "receipt"
     | "purchase_request"
     | "damage_claim"
-    | "invoice"
-    | "payment"
-    | "withholding_receipt"
     | "production_report"
     | "stock_status"
     | "raw_material_received"
@@ -810,7 +807,7 @@ export interface IngestionExtraction {
 
 const INGESTION_SCHEMA = `Return STRICT JSON:
 {
-  "docType": "receipt" | "purchase_request" | "damage_claim" | "invoice" | "payment" | "withholding_receipt" | "production_report" | "stock_status" | "raw_material_received" | "finished_goods_delivery" | "purchase_items" | "other",
+  "docType": "receipt" | "purchase_request" | "damage_claim" | "production_report" | "stock_status" | "raw_material_received" | "finished_goods_delivery" | "purchase_items" | "other",
   "fields": { ... extracted fields ... },
   "missing": [field names still needed],
   "question": "ONE short friendly question asking for the most important missing field(s)",
@@ -821,9 +818,6 @@ Required fields per type:
 - receipt: vendor, amount (number, ETB), category, receiptDate (YYYY-MM-DD), client if visible
 - purchase_request: title, amount (number, ETB), justification
 - damage_claim: quantity (number of damaged bags reported by worker; lotCode only if visible in image or caption)
-- invoice: invoiceNumber, client, amount (number, ETB), sacks, bagWeightKg (25 or 40 — the weight in kg of each sold sack), dueDate (YYYY-MM-DD), clientPhone
-- payment: invoiceNumber, client, amount (number, ETB), paymentDate (YYYY-MM-DD), method
-- withholding_receipt: invoiceNumber, client, amount (number, ETB), receiptDate (YYYY-MM-DD)
 - production_report: date (YYYY-MM-DD), fgrNo (the FGR document number), items (array of {product: productCode, tons: number})
 - stock_status: month (e.g. "2026-06" or the sheet's month label), rows (array of {code: productCode, description, category ("finished"|"raw"|"packing"), bBalance (opening balance ton), received (ton), sales (ton), unitPrice (ETB), stockTon (ton on hand), etb (stock value ETB)})
 - raw_material_received: date (YYYY-MM-DD), supplier, dnNo (delivery-note number), truckPlate, mrvNo (material receiving voucher number), items (array of {material, qty: number})

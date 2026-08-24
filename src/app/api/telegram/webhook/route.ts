@@ -30,6 +30,8 @@ import {
   type AssetFlowState,
 } from "@/lib/asset-flows";
 import { parseProductionPaste } from "@/lib/production-paste";
+import { parseFinancePaste } from "@/lib/finance-paste";
+import { FINANCE_RECEIPT_KIND, backgroundPurchaseReceiptCheck } from "@/lib/finance-receipts";
 import { PP_BAG_PHOTO_KIND, processPpDamageReport, ppVerdictMessage } from "@/lib/pp-bag-damage";
 import {
   answerCallbackQuery,
@@ -331,8 +333,6 @@ const EDITABLE_TABLES = new Set([
   "receipts",
   "purchase_requests",
   "damage_claims",
-  "invoices",
-  "payments",
   "production_reports",
   "stock_status_reports",
   "raw_material_receipts",
@@ -423,12 +423,6 @@ async function getPhotoBase64(fileId: string): Promise<{ base64: string; content
   return { base64: file.base64, contentType: file.contentType };
 }
 
-/** Case-insensitive invoice lookup, replacing the old `{$regex: ^n$ /i}`. */
-async function findInvoiceByNumber(invoiceNumber: string) {
-  return first<{ id: string; client: string }>(await sql`
-    select id, client from invoices where lower(invoice_number) = lower(${invoiceNumber}) limit 1
-  `);
-}
 
 /** Parse a report date string; falls back to now on anything unparseable. */
 function parseReportDate(v: unknown): Date {
@@ -772,132 +766,6 @@ async function saveExtractedRecord(
       };
     }
 
-    case "invoice": {
-      const bagWeightKg = [25, 40].includes(Number(f.bagWeightKg)) ? Number(f.bagWeightKg) : null;
-      const invoiceNumber = String(f.invoiceNumber || `TG-${Date.now()}`);
-      const client = String(f.client || "Unknown client");
-      const amount = Number(f.amount) || 0;
-      const [row] = await sql<{ id: string }[]>`
-        insert into invoices (invoice_number, client, client_phone, sacks, bag_weight_kg, amount, invoiced_at, due_date, withholding_receipt_received, notes)
-        values (${invoiceNumber}, ${client}, ${f.clientPhone ? String(f.clientPhone) : null},
-                ${Number(f.sacks) || 0}, ${bagWeightKg}, ${amount},
-                ${f.invoiceDate ? new Date(String(f.invoiceDate)) : new Date()},
-                ${f.dueDate ? new Date(String(f.dueDate)) : new Date(Date.now() + 30 * 86400000)},
-                false, ${f.notes ? String(f.notes) : null})
-        returning id
-      `;
-      return {
-        reply: `💵 የሽያጭ ደረሰኝ ተቀምጧል፦ <b>${invoiceNumber}</b> — ${client} — ${amount.toLocaleString()} ETB።`,
-        ref: { table: "invoices", id: row.id },
-      };
-    }
-
-    case "payment": {
-      const invoiceNumber = String(f.invoiceNumber || "").trim();
-      if (!invoiceNumber) return { reply: "🔢 ለዚህ ክፍያ የደረሰኝ ቁጥሩን (invoice number) ያካትቱ።" };
-
-      const invoice = await findInvoiceByNumber(invoiceNumber);
-      if (!invoice)
-        return {
-          reply: `🔍 የደረሰኝ ቁጥር <b>${invoiceNumber}</b> አልተገኘም። እባክዎ መጀመሪያ የሽያጭ ደረሰኙን ይላኩ፣ ወይም ቁጥሩን ያስተካክሉ።`,
-        };
-
-      const amount = Number(f.amount) || 0;
-      const [row] = await sql<{ id: string }[]>`
-        insert into payments (invoice_id, amount, date, method)
-        values (${invoice.id}, ${amount},
-                ${f.paymentDate ? new Date(String(f.paymentDate)) : new Date()},
-                ${f.method ? String(f.method) : "telegram"})
-        returning id
-      `;
-      return {
-        reply: `💵 የክፍያ መረጃ ለ<b>${invoiceNumber}</b> ተቀምጧል፦ ${amount.toLocaleString()} ETB።`,
-        ref: { table: "payments", id: row.id },
-      };
-    }
-
-    case "withholding_receipt": {
-      const invoiceNumber = String(f.invoiceNumber || "").trim();
-      if (!invoiceNumber) return { reply: "🔢 የደረሰኝ ቁጥሩን (invoice number) ያካትቱ።" };
-
-      const invoice = await findInvoiceByNumber(invoiceNumber);
-      if (!invoice) return { reply: `🔍 የደረሰኝ ቁጥር <b>${invoiceNumber}</b> አልተገኘም። እባክዎ ትክክለኛውን ቁጥር ይላኩ።` };
-
-      await sql`
-        update invoices set
-          withholding_receipt_received = true,
-          withholding_receipt_received_at = ${f.receiptDate ? new Date(String(f.receiptDate)) : new Date()},
-          withholding_receipt_file_id = ${opts.fileId || null}
-        where id = ${invoice.id}
-      `;
-      return { reply: `📄 የታክስ ደረሰኝ ለ<b>${invoiceNumber}</b> (${invoice.client}) ተቀምጧል።` };
-    }
-
-    /* ─────────────── Department report formats (text / photo / Excel) ─────────────── */
-
-    case "production_report": {
-      const products = itemsToMap(f.items, "product", "tons");
-      const fgrNo = f.fgrNo ? String(f.fgrNo) : null;
-      const [row] = await sql<{ id: string }[]>`
-        insert into production_reports (date, fgr_no, reported_by, products, source)
-        values (${parseReportDate(f.date)}, ${fgrNo}, ${opts.userName}, ${sql.json(products)}, 'telegram')
-        returning id
-      `;
-      const total = Object.values(products).reduce((a, b) => a + b, 0);
-      return {
-        reply: `🏭 የምርት ሪፖርት ተቀምጧል${fgrNo ? ` · FGR ${fgrNo}` : ""} · ${Object.keys(products).length} ምርት · ${total.toFixed(2)} ቶን።`,
-        ref: { table: "production_reports", id: row.id },
-      };
-    }
-
-    case "stock_status": {
-      const items = Array.isArray(f.rows) ? f.rows : [];
-      const month = String(f.month || new Date().toISOString().slice(0, 7));
-      const [row] = await sql<{ id: string }[]>`
-        insert into stock_status_reports (month, reported_by, items, source)
-        values (${month}, ${opts.userName}, ${sql.json(items)}, 'telegram')
-        returning id
-      `;
-      return {
-        reply: `📦 የክምችት ሁኔታ ሪፖርት (${month}) ተቀምጧል · ${items.length} ምርት።`,
-        ref: { table: "stock_status_reports", id: row.id },
-      };
-    }
-
-    case "raw_material_received": {
-      const materials = itemsToMap(f.items, "material", "qty");
-      const [row] = await sql<{ id: string }[]>`
-        insert into raw_material_receipts (date, supplier, dn_no, truck_plate, mrv_no, reported_by, materials, source)
-        values (${parseReportDate(f.date)}, ${f.supplier ? String(f.supplier) : null},
-                ${f.dnNo ? String(f.dnNo) : null}, ${f.truckPlate ? String(f.truckPlate) : null},
-                ${f.mrvNo ? String(f.mrvNo) : null}, ${opts.userName}, ${sql.json(materials)}, 'telegram')
-        returning id
-      `;
-      const total = Object.values(materials).reduce((a, b) => a + b, 0);
-      return {
-        reply: `🚚 የጥሬ ዕቃ ገቢ ተቀምጧል${f.supplier ? ` · ${String(f.supplier)}` : ""} · ${total.toFixed(2)} ብዛት።`,
-        ref: { table: "raw_material_receipts", id: row.id },
-      };
-    }
-
-    case "finished_goods_delivery": {
-      const products = itemsToMap(f.items, "product", "qty");
-      const paymentType = f.paymentType === "credit" ? "credit" : f.paymentType === "cash" ? "cash" : null;
-      const qty = Number(f.qty) || Object.values(products).reduce((a, b) => a + b, 0);
-      const customer = String(f.customer || "Unknown customer");
-      const [row] = await sql<{ id: string }[]>`
-        insert into delivery_reports (date, customer, invoice_no, payment_type, qty, delivery_no, reported_by, products, source)
-        values (${parseReportDate(f.date)}, ${customer}, ${f.invoiceNo ? String(f.invoiceNo) : null},
-                ${paymentType}, ${qty}, ${f.deliveryNo ? String(f.deliveryNo) : null},
-                ${opts.userName}, ${sql.json(products)}, 'telegram')
-        returning id
-      `;
-      return {
-        reply: `🚛 የሽያጭ ማድረሻ ተቀምጧል፦ <b>${customer}</b>${paymentType ? ` · ${paymentType}` : ""} · ${qty} ብዛት።`,
-        ref: { table: "delivery_reports", id: row.id },
-      };
-    }
-
     case "purchase_items": {
       const description = String(f.description || f.title || "Purchase item");
       const amount = f.amount != null ? Number(f.amount) : null;
@@ -1146,6 +1014,25 @@ const ASSET_FLOW_BY_CAP: Record<string, AssetFlowKind | undefined> = {
   tool_request: "tool_request",
   pp_bag_damage: "pp_bag_damage",
   production_report: "production_daily",
+  base_balance: "base_balance",
+  material_issue: "material_issue",
+  tool_purchase: "tool_purchase",
+  pp_bag_purchase: "pp_bag_purchase",
+  price_list: "price_list",
+  wht_holder: "wht_holder",
+};
+
+/**
+ * Storage `kind` per flow, which is what decides retention.
+ *
+ * A finance receipt is the evidence behind a money figure and must outlive the
+ * 72-hour sweep that clears ordinary uploads, so it gets its own kind and its
+ * own longer sweep.
+ */
+const PHOTO_KIND_BY_FLOW: Partial<Record<AssetFlowKind, string>> = {
+  pp_bag_damage: PP_BAG_PHOTO_KIND,
+  tool_purchase: FINANCE_RECEIPT_KIND,
+  pp_bag_purchase: FINANCE_RECEIPT_KIND,
 };
 
 const assetReviewKeyboard = {
@@ -1673,6 +1560,11 @@ export async function POST(req: NextRequest) {
           const ppPhotos = state.kind === "pp_bag_damage" ? state.photoFileIds || [] : [];
           const ppReason = String(state.draft.reason || "");
           const ppQty = Math.round(Number(state.draft.quantity) || 0);
+          // Purchase receipts are read after the reply too, for the same reason.
+          const receiptFlow = state.kind === "tool_purchase" || state.kind === "pp_bag_purchase";
+          const receiptPhotos = receiptFlow ? state.photoFileIds || [] : [];
+          const receiptTotal = Number(state.draft.totalAmount) || 0;
+          const receiptCurrency = String(state.draft.currency || "ETB");
 
           session.state = "idle";
           session.assetFlow = undefined;
@@ -1687,7 +1579,7 @@ export async function POST(req: NextRequest) {
           await sendMessage(
             chatId,
             `✅ ${title} ተመዝግቧል።\n📤 በዳሽቦርዱ ላይ ይታያል።` +
-              (ppPhotos.length > 0 ? "\n🔎 ፎቶዎቹ በጀርባ በኩል እየተጣሩ ነው።" : "")
+              (ppPhotos.length + receiptPhotos.length > 0 ? "\n🔎 ፎቶዎቹ በጀርባ በኩል እየተጣሩ ነው።" : "")
           );
 
           // Answer first, analyse after — see backgroundPpDamageCheck.
@@ -1699,6 +1591,18 @@ export async function POST(req: NextRequest) {
               quantity: ppQty,
               chatId,
             });
+          }
+          if (receiptPhotos.length > 0) {
+            const note = await backgroundPurchaseReceiptCheck({
+              table: saved.table === "pp_bag_purchases" ? "pp_bag_purchases" : "finance_purchase_batches",
+              id: saved.id,
+              fileIds: receiptPhotos,
+              enteredTotal: receiptTotal,
+              currency: receiptCurrency,
+            });
+            // Silence means the receipt agreed with what was typed. Only a
+            // disagreement, or a check that could not run, is worth a message.
+            if (note) await sendMessage(chatId, note).catch(() => {});
           }
           await sendReportMenu(chatId, userCapabilities(user).map((c) => c.button));
           return NextResponse.json({ ok: true });
@@ -1753,7 +1657,7 @@ export async function POST(req: NextRequest) {
             });
             return NextResponse.json({ ok: true });
           }
-          const stored = await storeIncomingPhoto(msg, PP_BAG_PHOTO_KIND);
+          const stored = await storeIncomingPhoto(msg, PHOTO_KIND_BY_FLOW[state.kind] ?? PP_BAG_PHOTO_KIND);
           if (!stored) {
             await sendMessage(chatId, "⚠️ ፎቶውን ማውረድ አልተቻለም። እባክዎ ድጋሚ ይሞክሩ።", { reply_markup: photosKeyboard });
             return NextResponse.json({ ok: true });
@@ -1820,7 +1724,14 @@ export async function POST(req: NextRequest) {
         }
         state.draft[step.id] = n;
       } else if (step.type === "paste") {
-        const parsed = parseProductionPaste(val);
+        // Each pasteable flow has its own parser: the production template has
+        // two identically-named product blocks, and the finance ones carry
+        // "Talc" as both a brand and a raw material. A shared parser would have
+        // to guess which column a line belonged to.
+        const parsed =
+          state.kind === "production_daily"
+            ? parseProductionPaste(val)
+            : parseFinancePaste(val, { usdRate: state.kind === "price_list" });
         const filled = Object.keys(parsed.values).length;
         if (filled === 0) {
           await sendMessage(

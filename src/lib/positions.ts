@@ -4,8 +4,8 @@
  *
  * A user holds one or more roles; their bot menu is the union of the capabilities
  * of those roles. Roles can span departments (a person may report both sales and
- * production). `finance_daily` includes `wht`, so filing withholding receipts is
- * part of the daily finance role rather than a separate one.
+ * production). Finance holds the three things the department actually does:
+ * tool purchase reports, the monthly asset report, and chasing WHT receipts.
  */
 
 export type CapabilityKey =
@@ -13,8 +13,6 @@ export type CapabilityKey =
   | "damage"
   | "receipt"
   | "purchase"
-  | "wht"
-  | "sales"
   | "ops"
   | "materials"
   | "hr"
@@ -26,7 +24,15 @@ export type CapabilityKey =
   | "sales_receipt_scan"
   | "sales_report_entry"
   | "tool_request"
-  | "pp_bag_damage";
+  | "pp_bag_damage"
+  // Asset management feeds the monthly finance report.
+  | "base_balance"
+  | "material_issue"
+  // Finance.
+  | "tool_purchase"
+  | "pp_bag_purchase"
+  | "price_list"
+  | "wht_holder";
 
 /** How the bot collects a capability's payload. */
 export type CaptureMode =
@@ -90,24 +96,6 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
     question:
       "📝 ዕቃውን ወይም አገልግሎቱን፣ የገንዘቡን መጠን እና ምክንያቱን ይፃፉ። ደጋፊ ማስረጃ ካለዎት ፎቶ ያያይዙ።",
   },
-  wht: {
-    key: "wht",
-    button: "📄 WHT ደረሰኝ",
-    captureMode: "llm",
-    docType: "withholding_receipt",
-    input: "photo",
-    question:
-      "📄 የ3% ታክስ (WHT) ደረሰኝ ፎቶውን ከደረሰኝ ቁጥሩ (invoice number)፣ ከደንበኛው ስም እና ከገንዘቡ መጠን ጋር ይላኩ።",
-  },
-  sales: {
-    key: "sales",
-    button: "💵 ሽያጭ / ክፍያ",
-    captureMode: "llm",
-    docType: "payment",
-    input: "any",
-    question:
-      "💵 የክፍያ ማረጋገጫ ፎቶ ይላኩ፣ ወይም የደረሰኝ ቁጥሩን (invoice number)፣ ደንበኛውን፣ የገንዘቡን መጠን፣ የክፍያ ቀኑን እና የክፍያ መንገዱን ይፃፉ።",
-  },
   ops: {
     key: "ops",
     button: "📊 የዕለታዊ ክንውን ሪፖርት",
@@ -153,6 +141,48 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
     captureMode: "asset_entry",
     input: "photo",
     question: "💔 የPP ከረጢት ብልሽት ሪፖርት በደረጃ እናስገባለን።",
+  },
+  base_balance: {
+    key: "base_balance",
+    button: "📊 የወሩ የመነሻ ሚዛን",
+    captureMode: "asset_entry",
+    input: "any",
+    question: "📊 የሚቀጥለውን ወር የመነሻ ሚዛን በደረጃ እናስገባለን።",
+  },
+  material_issue: {
+    key: "material_issue",
+    button: "🔥 የቀኑ ጥሬ ዕቃ ፍጆታ",
+    captureMode: "asset_entry",
+    input: "any",
+    question: "🔥 ዛሬ ለምርት የዋለውን ጥሬ ዕቃና ከረጢት እናስመዘግባለን።",
+  },
+  tool_purchase: {
+    key: "tool_purchase",
+    button: "🧾 የመሣሪያ ግዢ ሪፖርት",
+    captureMode: "asset_entry",
+    input: "any",
+    question: "🧾 የመሣሪያ ግዢ ሪፖርት በደረጃ እናስገባለን።",
+  },
+  pp_bag_purchase: {
+    key: "pp_bag_purchase",
+    button: "🛍 የPP ከረጢት ግዢ",
+    captureMode: "asset_entry",
+    input: "any",
+    question: "🛍 የተገዙትን የPP ከረጢቶች እናስመዘግባለን።",
+  },
+  price_list: {
+    key: "price_list",
+    button: "💲 የወሩ የዋጋ ዝርዝር",
+    captureMode: "asset_entry",
+    input: "any",
+    question: "💲 የወሩን የነጠላ ዋጋ ዝርዝር በደረጃ እናስገባለን።",
+  },
+  wht_holder: {
+    key: "wht_holder",
+    button: "📄 WHT ደረሰኝ ያዢ",
+    captureMode: "asset_entry",
+    input: "any",
+    question: "📄 የWHT ደረሰኝ ያልመለሰ ደንበኛ እናስመዘግባለን።",
   },
   purchase_items: {
     key: "purchase_items",
@@ -244,8 +274,7 @@ export type PositionKey =
   | "asset_materials"
   | "asset_purchase"
   | "sales_daily"
-  | "finance_daily"
-  | "finance_monthly"
+  | "finance"
   | "hr"
   | "admin";
 
@@ -305,9 +334,22 @@ export const POSITIONS: Record<PositionKey, Position> = {
     // Deliberately just the two guided flows. The free-text daily report, stock
     // status and material count were left over from before those flows existed
     // and only duplicated, less reliably, what the guided steps now capture.
-    capabilities: ["raw_material_received", "finished_goods_delivery", "pp_bag_damage"],
+    capabilities: [
+      "raw_material_received",
+      "finished_goods_delivery",
+      "pp_bag_damage",
+      // Both feed the monthly finance report: the daily issue figures fill its
+      // consumption column, and the base balance opens each month.
+      "material_issue",
+      "base_balance",
+    ],
     dailyRequired: true,
-    submissionTables: ["raw_material_receipts", "delivery_reports", "pp_bag_damage_reports"],
+    submissionTables: [
+      "raw_material_receipts",
+      "delivery_reports",
+      "pp_bag_damage_reports",
+      "material_issues",
+    ],
   },
   asset_purchase: {
     key: "asset_purchase",
@@ -329,26 +371,20 @@ export const POSITIONS: Record<PositionKey, Position> = {
     dailyRequired: true,
     submissionTables: ["sales_receipts"],
   },
-  finance_daily: {
-    key: "finance_daily",
+  finance: {
+    key: "finance",
     department: "finance",
-    en: "Daily financial report",
-    am: "የዕለታዊ ፋይናንስ ሪፖርት",
-    description: "Files the daily financial report and 3% withholding (WHT) receipts.",
-    capabilities: ["daily_report", "sales", "wht"],
-    dailyRequired: true,
-    // payments has no author column, so it can never be attributed to a person.
-    submissionTables: ["daily_reports", "receipts"],
-  },
-  finance_monthly: {
-    key: "finance_monthly",
-    department: "finance",
-    en: "Monthly financial report",
-    am: "የወርሃዊ ፋይናንስ ሪፖርት",
-    description: "Files the monthly financial summary (monthly, not daily).",
-    capabilities: ["sales"],
+    en: "Finance",
+    am: "ፋይናንስ",
+    description:
+      "Files tool purchase reports, the monthly price list and PP bag purchases, and registers the customers who still owe a WHT receipt.",
+    // Invoicing, payments and receivables went with the old module. These four
+    // are the whole of what finance files.
+    capabilities: ["tool_purchase", "pp_bag_purchase", "price_list", "wht_holder"],
+    // Purchases are on-demand and the price list is monthly, so there is no
+    // daily obligation to chase. The WHT chase is its own cron, not a reminder.
     dailyRequired: false,
-    submissionTables: [],
+    submissionTables: ["finance_purchase_batches", "pp_bag_purchases", "wht_holders"],
   },
   hr: {
     key: "hr",
@@ -402,7 +438,7 @@ export const POSITION_GROUPS: PositionGroup[] = [
     positions: ["asset_materials", "asset_purchase"],
   },
   { key: "sales", name: "Sales", am: "ሽያጭ", icon: "🤝", positions: ["sales_daily"] },
-  { key: "finance", name: "Finance", am: "ፋይናንስ", icon: "💵", positions: ["finance_daily", "finance_monthly"] },
+  { key: "finance", name: "Finance", am: "ፋይናንስ", icon: "💵", positions: ["finance"] },
   {
     key: "hr",
     name: "HR",

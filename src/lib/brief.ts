@@ -6,7 +6,6 @@ import {
   getYesterdayNumbers,
   monthOnMonth,
   pendingPurchaseRequests,
-  receivablesAging,
 } from "@/lib/metrics";
 import { sendBriefMessage } from "@/lib/telegram";
 import { broadcastPush } from "@/lib/push";
@@ -23,11 +22,10 @@ export async function assembleAndSendBrief(now = new Date()) {
   const { start, end } = yesterdayRange(now);
   const dateLabel = eatDateLabel(start);
 
-  const [numbers, exceptions, mom, aging, prs, submissions] = await Promise.all([
+  const [numbers, exceptions, mom, prs, submissions] = await Promise.all([
     getYesterdayNumbers(now),
     detectExceptions(now),
     monthOnMonth(now),
-    receivablesAging(now),
     pendingPurchaseRequests(),
     // What staff actually filed yesterday. Guarded so a missing table can never
     // take the whole brief down with it.
@@ -42,8 +40,8 @@ export async function assembleAndSendBrief(now = new Date()) {
   // "Yesterday in five lines" — figures rendered from queries, never the LLM.
   const fiveLines = [
     `🏭 ${numbers.tonsProduced.toFixed(2)} ቶን ተሰርቷል`,
-    `🤝 ${numbers.tonsSold.toFixed(2)} ቶን ተሸጧል · ${etb(numbers.revenueInvoiced)} ብር ደረሰኝ ተቋቁሟል`,
-    `💵 ${etb(numbers.cashCollected)} ብር ተሰብስቧል`,
+    `🤝 ${numbers.tonsSold.toFixed(2)} ቶን ተላልፏል`,
+    `🧾 ${numbers.salesReportsCount} የሽያጭ ሪፖርት · ${etb(numbers.salesReportedEtb)} ብር`,
     `🛡 ${numbers.damagedClaimed} ከረጢቶች ጉዳት ተጠይቋል · ${numbers.damagedVerified} ተረጋግጧል`,
   ];
 
@@ -68,13 +66,11 @@ export async function assembleAndSendBrief(now = new Date()) {
     fiveLines.push(`🔧 ${numbers.openToolRequests} የመሣሪያ ግዢ ጥያቄ ውሳኔ ይጠብቃል`);
   }
 
-  const totalOverdue = aging.overdueClients.reduce((a, c) => a + c.outstanding, 0);
   const narrative = await writeBriefNarrative({
     date: dateLabel,
     yesterday: numbers,
     exceptions,
     month_on_month_change_pct: mom.changePct,
-    receivables: { total_overdue_etb: Math.round(totalOverdue), overdue_invoices: aging.overdueClients.length },
     purchase_requests_pending: prs.length,
     sales_team_reports: {
       count: numbers.salesReportsCount,
@@ -120,7 +116,7 @@ export async function assembleAndSendBrief(now = new Date()) {
     body:
       exceptions.length > 0
         ? `🚨 ${exceptions[0]}`
-        : `${numbers.tonsProduced.toFixed(2)} ቶን ተሰርቷል · ${etb(numbers.cashCollected)} ብር ተሰብስቧል። ሙሉ ሪፖርቱን ለማየት ይጫኑ።`,
+        : `${numbers.tonsProduced.toFixed(2)} ቶን ተሰርቷል · ${etb(numbers.salesReportedEtb)} ብር ተሸጧል። ሙሉ ሪፖርቱን ለማየት ይጫኑ።`,
     url: "/",
     tag: `brief-${dateLabel}`,
   });

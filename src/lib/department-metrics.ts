@@ -16,8 +16,6 @@ import {
   getBucketedSeries,
   getDayNumbers,
   getLotGaps,
-  missingWithholding,
-  receivablesAging,
   type TrendPoint,
 } from "@/lib/metrics";
 import { DEPARTMENTS, DEPARTMENT_KEYS, type DepartmentKey } from "@/lib/departments";
@@ -144,25 +142,32 @@ async function departmentKpis(
     }
 
     case "sales": {
-      const [r] = await sql<{ invoices: string }[]>`
-        select count(*) as invoices from invoices where invoiced_at >= ${start} and invoiced_at < ${end}
+      // Invoicing went with the old finance module; the sales team's own bot
+      // reports are the record now.
+      const [r] = await sql<{ n: string; grand: string }[]>`
+        select count(*) as n, coalesce(sum(grand_total), 0) as grand
+          from sales_receipts where date >= ${start} and date < ${end}
       `;
       return [
-        { icon: "🤝", label: "Tons sold", value: base.tonsSold, suffix: " t", decimals: 2 },
-        { icon: "🧾", label: "Revenue invoiced", value: base.revenueInvoiced, prefix: "ETB " },
-        { icon: "📄", label: "Invoices issued", value: Number(r.invoices) || 0 },
+        { icon: "🤝", label: "Tons dispatched", value: base.tonsSold, suffix: " t", decimals: 2 },
+        { icon: "🧾", label: "Sales reported", value: Number(r.grand) || 0, prefix: "ETB " },
+        { icon: "📄", label: "Sales reports", value: Number(r.n) || 0 },
       ];
     }
 
     case "finance": {
-      const [aging, wht] = await Promise.all([receivablesAging(), missingWithholding()]);
-      const outstanding =
-        aging.buckets.current + aging.buckets.d1_30 + aging.buckets.d31_60 + aging.buckets.d61_90 + aging.buckets.d90_plus;
+      const [r] = await sql<{ batches: string; spend: string; wht: string }[]>`
+        select
+          (select count(*) from finance_purchase_batches
+            where date >= ${start} and date < ${end})                       as batches,
+          (select coalesce(sum(total_amount), 0) from finance_purchase_batches
+            where date >= ${start} and date < ${end} and currency = 'ETB')  as spend,
+          (select count(*) from wht_holders where status = 'pending')       as wht
+      `.catch(() => [{ batches: "0", spend: "0", wht: "0" }]);
       return [
-        { icon: "💵", label: "Cash collected", value: base.cashCollected, prefix: "ETB " },
-        { icon: "🧾", label: "Revenue invoiced", value: base.revenueInvoiced, prefix: "ETB " },
-        { icon: "⏳", label: "Receivables outstanding", value: outstanding, prefix: "ETB " },
-        { icon: "⚠️", label: "Missing withholding", value: wht.length },
+        { icon: "🧾", label: "Purchase batches", value: Number(r.batches) || 0 },
+        { icon: "💰", label: "Purchase value", value: Number(r.spend) || 0, prefix: "ETB " },
+        { icon: "📄", label: "WHT receipts owed", value: Number(r.wht) || 0 },
       ];
     }
   }
@@ -266,50 +271,34 @@ async function departmentSubmissions(dept: DepartmentKey, start: Date, end: Date
     }
 
     case "sales": {
-      const [receipts, invoices] = await Promise.all([
-        sql<{ id: string; submitted_by: string | null; vendor: string; client: string | null; amount: string; created_at: Date }[]>`
-          select id, submitted_by, vendor, client, amount, created_at
-            from receipts where created_at >= ${start} and created_at < ${end} order by created_at desc limit 30`,
-        sql<{ id: string; client: string; invoice_number: string; amount: string; invoiced_at: Date }[]>`
-          select id, client, invoice_number, amount, invoiced_at
-            from invoices where invoiced_at >= ${start} and invoiced_at < ${end} order by invoiced_at desc limit 30`,
-      ]);
-      typed = [
-        ...invoices.map<Submission>((r) => ({
-          id: r.id,
-          source: "invoice",
-          who: r.client,
-          when: iso(r.invoiced_at),
-          title: `Invoice ${r.invoice_number}`,
-          detail: `ETB ${Math.round(Number(r.amount)).toLocaleString()}`,
-          photos: [],
-        })),
-        ...receipts.map<Submission>((r) => ({
-          id: r.id,
-          source: "receipt",
-          who: r.submitted_by || r.client || r.vendor,
-          when: iso(r.created_at),
-          title: `Receipt · ${r.vendor}`,
-          detail: `ETB ${Math.round(Number(r.amount)).toLocaleString()}`,
-          photos: [],
-        })),
-      ];
+      const receipts = await sql<{ id: string; submitted_by: string | null; vendor: string; client: string | null; amount: string; created_at: Date }[]>`
+        select id, submitted_by, vendor, client, amount, created_at
+          from receipts where created_at >= ${start} and created_at < ${end}
+         order by created_at desc limit 30`;
+      typed = receipts.map<Submission>((r) => ({
+        id: r.id,
+        source: "receipt",
+        who: r.submitted_by || r.client || r.vendor,
+        when: iso(r.created_at),
+        title: `Receipt · ${r.vendor}`,
+        detail: `ETB ${Math.round(Number(r.amount)).toLocaleString()}`,
+        photos: [],
+      }));
       break;
     }
 
     case "finance": {
-      const payments = await sql<{ id: string; client: string; amount: string; method: string | null; date: Date }[]>`
-        select p.id, i.client, p.amount, p.method, p.date
-          from payments p join invoices i on i.id = p.invoice_id
-         where p.date >= ${start} and p.date < ${end}
-         order by p.date desc limit 40`;
-      typed = payments.map<Submission>((r) => ({
+      const batches = await sql<{ id: string; sr_no: number; purchaser: string | null; reported_by: string; currency: string; total_amount: string | null; date: Date }[]>`
+        select id, sr_no, purchaser, reported_by, currency, total_amount, date
+          from finance_purchase_batches where date >= ${start} and date < ${end}
+         order by date desc limit 40`.catch(() => []);
+      typed = batches.map<Submission>((r) => ({
         id: r.id,
-        source: "payment",
-        who: r.client,
+        source: "purchase",
+        who: r.purchaser || r.reported_by,
         when: iso(r.date),
-        title: `Payment received`,
-        detail: `ETB ${Math.round(Number(r.amount)).toLocaleString()}${r.method ? ` · ${r.method}` : ""}`,
+        title: `Purchase batch #${r.sr_no}`,
+        detail: r.total_amount ? `${r.currency} ${Math.round(Number(r.total_amount)).toLocaleString()}` : undefined,
         photos: [],
       }));
       break;
@@ -404,29 +393,33 @@ async function departmentActivityCounts(
       };
     }
     case "sales": {
-      const [a] = await sql<{ invoices: string; receipts: string }[]>`
+      const [a] = await sql<{ sales: string; receipts: string }[]>`
         select
-          (select count(*) from invoices where invoiced_at >= ${start} and invoiced_at < ${end}) as invoices,
-          (select count(*) from receipts where created_at  >= ${start} and created_at  < ${end}) as receipts`;
-      const invoices = Number(a.invoices) || 0;
+          (select count(*) from sales_receipts where date >= ${start} and date < ${end}) as sales,
+          (select count(*) from receipts where created_at >= ${start} and created_at < ${end}) as receipts`;
+      const sales = Number(a.sales) || 0;
       const receipts = Number(a.receipts) || 0;
       return {
-        total: reports + invoices + receipts,
+        total: reports + sales + receipts,
         headline: [
-          { icon: "📄", label: "Invoices", value: invoices },
-          { icon: "🧾", label: "Receipts", value: receipts },
+          { icon: "🧾", label: "Sales reports", value: sales },
+          { icon: "📄", label: "Receipts", value: receipts },
         ],
       };
     }
     case "finance": {
-      const [a] = await sql<{ payments: string }[]>`
-        select (select count(*) from payments where date >= ${start} and date < ${end}) as payments`;
-      const payments = Number(a.payments) || 0;
+      const [a] = await sql<{ batches: string; wht: string }[]>`
+        select
+          (select count(*) from finance_purchase_batches where date >= ${start} and date < ${end}) as batches,
+          (select count(*) from wht_holders where created_at >= ${start} and created_at < ${end}) as wht
+      `.catch(() => [{ batches: "0", wht: "0" }]);
+      const batches = Number(a.batches) || 0;
+      const wht = Number(a.wht) || 0;
       return {
-        total: reports + payments,
+        total: batches + wht,
         headline: [
-          { icon: "💵", label: "Payments", value: payments },
-          { icon: "📝", label: "Daily reports", value: reports },
+          { icon: "🧾", label: "Purchase batches", value: batches },
+          { icon: "📄", label: "WHT holders", value: wht },
         ],
       };
     }

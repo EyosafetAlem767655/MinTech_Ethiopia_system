@@ -31,6 +31,13 @@ export const SUBMISSION_COLLECTIONS = [
   "shift",
   "invoice",
   "payment",
+  // Finance, rebuilt.
+  "tool_purchase",
+  "pp_bag_purchase",
+  "base_balance",
+  "price_list",
+  "material_issue",
+  "wht_holder",
 ] as const;
 
 export type SubmissionCollection = (typeof SUBMISSION_COLLECTIONS)[number];
@@ -344,6 +351,92 @@ export const SUBMISSIONS: Record<SubmissionCollection, SubmissionSpec> = {
       TEXT("supervisor", "By"),
     ],
     editableKeys: ["filled_sacks", "downtime_minutes", "notes"],
+  },
+  tool_purchase: {
+    table: "finance_purchase_batches",
+    label: "Tool purchase batch",
+    icon: "🧾",
+    dateColumn: "date",
+    authorColumn: "reported_by",
+    searchColumns: ["supplier", "cost_center", "purchaser", "reported_by"],
+    displayFields: [
+      NUM("sr_no", "Sr.No"),
+      TEXT("supplier", "Supplier"),
+      TEXT("cost_center", "Cost centre"),
+      TEXT("purchaser", "Purchaser"),
+      TEXT("currency", "Currency"),
+      NUM("total_amount", "Total"),
+    ],
+    // sr_no is the batch number written on the paper and allocated by a
+    // sequence; editing it here would let two batches claim the same one.
+    editableKeys: ["supplier", "cost_center", "purchaser", "total_amount"],
+    photosColumn: "photo_file_ids",
+  },
+  pp_bag_purchase: {
+    table: "pp_bag_purchases",
+    label: "PP bag purchase",
+    icon: "🛍",
+    dateColumn: "date",
+    authorColumn: "reported_by",
+    searchColumns: ["supplier", "reported_by"],
+    displayFields: [
+      TEXT("supplier", "Supplier"),
+      TEXT("currency", "Currency"),
+      NUM("total_amount", "Total"),
+      TEXT("reported_by", "By"),
+    ],
+    editableKeys: ["supplier", "total_amount"],
+    photosColumn: "photo_file_ids",
+  },
+  base_balance: {
+    table: "monthly_base_balances",
+    label: "Monthly base balance",
+    icon: "📊",
+    dateColumn: "created_at",
+    authorColumn: "reported_by",
+    searchColumns: ["month", "reported_by"],
+    displayFields: [TEXT("month", "Month"), TEXT("reported_by", "By")],
+    // The figures live in three jsonb maps; correcting one means re-filing the
+    // month through the bot, which upserts on the month rather than duplicating.
+    editableKeys: [],
+  },
+  price_list: {
+    table: "monthly_price_lists",
+    label: "Monthly price list",
+    icon: "💲",
+    dateColumn: "created_at",
+    authorColumn: "reported_by",
+    searchColumns: ["month", "reported_by"],
+    displayFields: [TEXT("month", "Month"), NUM("usd_rate", "USD rate"), TEXT("reported_by", "By")],
+    editableKeys: ["usd_rate"],
+  },
+  material_issue: {
+    table: "material_issues",
+    label: "Raw material issued",
+    icon: "🔥",
+    dateColumn: "date",
+    authorColumn: "reported_by",
+    searchColumns: ["date_label", "reported_by"],
+    displayFields: [TEXT("date_label", "Date"), TEXT("reported_by", "By")],
+    editableKeys: [],
+  },
+  wht_holder: {
+    table: "wht_holders",
+    label: "WHT receipt holder",
+    icon: "📄",
+    dateColumn: "created_at",
+    authorColumn: "registered_by",
+    searchColumns: ["company", "phone", "description", "registered_by"],
+    displayFields: [
+      TEXT("company", "Company"),
+      TEXT("phone", "Phone"),
+      LONG("description", "Description"),
+      TEXT("status", "Status"),
+      TEXT("registered_by", "By"),
+    ],
+    // status is driven by the "receipt received" button, which is what stops the
+    // daily SMS; editing it as free text here would bypass that.
+    editableKeys: ["company", "phone", "description"],
   },
   invoice: {
     table: "invoices",

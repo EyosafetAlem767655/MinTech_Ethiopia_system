@@ -20,17 +20,11 @@ const EAT = "Africa/Addis_Ababa";
 export interface DayNumbers {
   date: string;
   tonsProduced: number;
+  /** Finished goods dispatched, from the asset team's delivery reports. */
   tonsSold: number;
-  revenueInvoiced: number;
-  cashCollected: number;
   damagedClaimed: number;
   damagedVerified: number;
-  /**
-   * Cash sales filed by the sales team through the bot (`sales_receipts`).
-   * Tracked separately from `revenueInvoiced`, which counts `invoices` only —
-   * these are two different flows and adding them together would double-count
-   * nothing but would also hide which channel a figure came from.
-   */
+  /** Cash sales filed by the sales team through the bot (`sales_receipts`). */
   salesReportedEtb: number;
   salesReportedNetEtb: number;
   salesReportsCount: number;
@@ -48,8 +42,6 @@ export async function getDayNumbers(start: Date, end: Date): Promise<DayNumbers>
     {
       tons_produced: string;
       tons_sold: string;
-      revenue_invoiced: string;
-      cash_collected: string;
       damaged_claimed: string;
       damaged_verified: string;
     }[]
@@ -77,17 +69,13 @@ export async function getDayNumbers(start: Date, end: Date): Promise<DayNumbers>
                              group by 1) o on o.d = p.d
        ) d)                                                                         as tons_produced,
 
-      (select coalesce(sum(case when bag_weight_kg > 0
-                                then sacks * bag_weight_kg / 1000.0
-                                else 0 end), 0)
-         from invoices where invoiced_at >= ${start} and invoiced_at < ${end})      as tons_sold,
-
-      (select coalesce(sum(amount), 0)
-         from invoices where invoiced_at >= ${start} and invoiced_at < ${end})      as revenue_invoiced,
-
-      -- payments is a real table now, so no $unwind
-      (select coalesce(sum(amount), 0)
-         from payments where date >= ${start} and date < ${end})                    as cash_collected,
+      -- Dispatched tonnage, from the asset team's delivery reports. It used to
+      -- come from invoices.sacks x bag_weight_kg, but nothing has created an
+      -- invoice since the finance module was retired, so that read as zero.
+      (select coalesce(sum((e.value)::numeric), 0)
+         from delivery_reports r
+         cross join lateral jsonb_each_text(r.products) as e(key, value)
+        where r.date >= ${start} and r.date < ${end})                               as tons_sold,
 
       (select coalesce(sum(quantity), 0)
          from damage_claims where created_at >= ${start} and created_at < ${end})   as damaged_claimed,
@@ -145,8 +133,6 @@ export async function getDayNumbers(start: Date, end: Date): Promise<DayNumbers>
     date: eatDateLabel(start),
     tonsProduced: Math.round(Number(r.tons_produced) * 1000) / 1000,
     tonsSold: Math.round(Number(r.tons_sold) * 1000) / 1000,
-    revenueInvoiced: Number(r.revenue_invoiced) || 0,
-    cashCollected: Number(r.cash_collected) || 0,
     damagedClaimed: Number(r.damaged_claimed) || 0,
     damagedVerified: Number(r.damaged_verified) || 0,
     salesReportedEtb: Number(s?.grand) || 0,
@@ -199,15 +185,20 @@ export async function getDailySeries(days: number, now = new Date()): Promise<Tr
        where r.date >= ${start} and r.date < ${end}
        group by 1
     ),
+    -- Sales = what the sales team filed on the bot. It used to be invoices.amount,
+    -- but nothing has created an invoice since the finance module was retired,
+    -- so that line read flat zero.
     sales as (
-      select (invoiced_at at time zone ${EAT})::date as d, sum(amount) as n
-        from invoices
-       where invoiced_at >= ${start} and invoiced_at < ${end}
+      select (date at time zone ${EAT})::date as d, sum(grand_total) as n
+        from sales_receipts
+       where date >= ${start} and date < ${end}
        group by 1
     ),
+    -- Collections = the same reports net of withholding. Payments against an
+    -- invoice no longer exist as a concept.
     coll as (
-      select (date at time zone ${EAT})::date as d, sum(amount) as n
-        from payments
+      select (date at time zone ${EAT})::date as d, sum(net_pay) as n
+        from sales_receipts
        where date >= ${start} and date < ${end}
        group by 1
     )
@@ -274,14 +265,14 @@ export async function getBucketedSeries(
       select date_trunc(${bucket}, d) as b, sum(n) as n from prod_day group by 1
     ),
     sales as (
-      select date_trunc(${bucket}, invoiced_at at time zone ${EAT}) as b, sum(amount) as n
-        from invoices
-       where invoiced_at >= ${start} and invoiced_at < ${end}
+      select date_trunc(${bucket}, date at time zone ${EAT}) as b, sum(grand_total) as n
+        from sales_receipts
+       where date >= ${start} and date < ${end}
        group by 1
     ),
     coll as (
-      select date_trunc(${bucket}, date at time zone ${EAT}) as b, sum(amount) as n
-        from payments
+      select date_trunc(${bucket}, date at time zone ${EAT}) as b, sum(net_pay) as n
+        from sales_receipts
        where date >= ${start} and date < ${end}
        group by 1
     )
@@ -361,71 +352,7 @@ export async function monthOnMonth(now = new Date()) {
   return monthOnMonthFrom(await getDailySeries(60, now));
 }
 
-/* ─────────────────────────────── Money section ────────────────────────────── */
-
-export interface AgingBuckets {
-  current: number;
-  d1_30: number;
-  d31_60: number;
-  d61_90: number;
-  d90_plus: number;
-}
-
-export interface OverdueClient {
-  client: string;
-  invoiceNumber: string;
-  outstanding: number;
-  daysOverdue: number;
-}
-
-export async function receivablesAging(now = new Date()) {
-  // The Mongo version pulled EVERY invoice into Node and bucketed in JS — an
-  // unbounded scan that grew with the business. Net the payments off in SQL and
-  // return only what is actually outstanding.
-  const rows = await sql<{ client: string; invoice_number: string; outstanding: string; due_date: Date }[]>`
-    select i.client,
-           i.invoice_number,
-           i.due_date,
-           i.amount - coalesce((select sum(p.amount) from payments p where p.invoice_id = i.id), 0) as outstanding
-      from invoices i
-     where i.amount - coalesce((select sum(p.amount) from payments p where p.invoice_id = i.id), 0) > 0
-  `;
-
-  const buckets: AgingBuckets = { current: 0, d1_30: 0, d31_60: 0, d61_90: 0, d90_plus: 0 };
-  const overdueClients: OverdueClient[] = [];
-
-  for (const r of rows) {
-    const outstanding = Number(r.outstanding);
-    const overdue = daysBetween(new Date(r.due_date), now);
-    if (overdue <= 0) buckets.current += outstanding;
-    else if (overdue <= 30) buckets.d1_30 += outstanding;
-    else if (overdue <= 60) buckets.d31_60 += outstanding;
-    else if (overdue <= 90) buckets.d61_90 += outstanding;
-    else buckets.d90_plus += outstanding;
-
-    if (overdue > 0) {
-      overdueClients.push({
-        client: r.client,
-        invoiceNumber: r.invoice_number,
-        outstanding,
-        daysOverdue: overdue,
-      });
-    }
-  }
-  overdueClients.sort((a, b) => b.daysOverdue - a.daysOverdue);
-  return { buckets, overdueClients };
-}
-
-export async function missingWithholding() {
-  const rows = await sql`
-    select i.id as _id, i.invoice_number as "invoiceNumber", i.client, i.amount, i.invoiced_at as "invoicedAt"
-      from invoices i
-     where i.withholding_receipt_received = false
-       and exists (select 1 from payments p where p.invoice_id = i.id)
-     order by i.invoiced_at desc
-  `;
-  return rows.map((r) => ({ ...r, amount: Number(r.amount) }));
-}
+/* ─────────────────────────── Purchase requests ────────────────────────────── */
 
 export async function pendingPurchaseRequests() {
   const rows = await sql`
@@ -571,7 +498,7 @@ export async function damageTripwires(now = new Date()) {
  */
 export async function detectExceptions(
   now = new Date(),
-  deps: { aging?: Awaited<ReturnType<typeof receivablesAging>>; lotGaps?: LotBalance[] } = {}
+  deps: { lotGaps?: LotBalance[] } = {}
 ): Promise<string[]> {
   const exceptions: string[] = [];
   const { start, end } = yesterdayRange(now);
@@ -593,23 +520,18 @@ export async function detectExceptions(
     );
   }
 
-  // 2. Clients newly crossing 30 days overdue
-  const { overdueClients } = deps.aging ?? (await receivablesAging(now));
-  for (const c of overdueClients) {
-    if (c.daysOverdue >= 30 && c.daysOverdue <= 31) {
-      exceptions.push(
-        `${c.client} crossed 30 days overdue on invoice ${c.invoiceNumber} (ETB ${Math.round(c.outstanding).toLocaleString()} outstanding).`
-      );
-    }
-  }
-  const over60 = overdueClients.filter((c) => c.daysOverdue > 60);
-  if (over60.length > 0) {
+  // 2. The month has opened with no base balance, so the finance report cannot
+  //    be computed at all. Worth the owner's attention on day one, not day 20.
+  const month = new Date(now.getTime() + 3 * 3600_000).toISOString().slice(0, 7);
+  const filed = await sql<{ month: string }[]>`
+    select month from monthly_base_balances where month = ${month}
+  `.catch(() => [{ month }]);
+  if (filed.length === 0) {
     exceptions.push(
-      `${over60.length} invoice(s) are more than 60 days overdue, totalling ETB ${Math.round(
-        over60.reduce((a, c) => a + c.outstanding, 0)
-      ).toLocaleString()}.`
+      `No opening balance has been filed for ${month}, so the monthly finance report cannot be produced.`
     );
   }
+
 
   // 3. (Gate stone-quality exception removed with the traceability module.)
 

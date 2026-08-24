@@ -40,6 +40,7 @@ export function integrationEnvChecks(): Record<string, EnvCheck> {
     ai: check(["NIVIDA_API_KEY", "QWEN_API", "GEMINI_API_KEY"]),
     telegram: check(["TELEGRAM_BOT_TOKEN", "TELEGRAM_CEO_CHAT_ID", "TELEGRAM_WEBHOOK_SECRET", "APP_URL"]),
     cron: check(["CRON_SECRET"]),
+  sms: check(["SMS_GATEWAY_USER", "SMS_GATEWAY_PASSWORD"]),
     push: check(["VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY", "VAPID_SUBJECT", "NEXT_PUBLIC_VAPID_PUBLIC_KEY"]),
     dashboardAuth: check(["ADMIN_PASSWORD"]),
   };

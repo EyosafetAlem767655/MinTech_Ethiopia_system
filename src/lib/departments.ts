@@ -78,8 +78,8 @@ export const DEPARTMENTS: Record<DepartmentKey, Department> = {
     icon: "💵",
     accent: "bg-violet-600",
     color: "#7c3aed",
-    blurb: "Cash collected, receivables and withholding.",
-    positions: ["finance_daily", "finance_monthly"],
+    blurb: "Tool purchases, the monthly asset report and WHT receipts.",
+    positions: ["finance"],
   },
 };
 

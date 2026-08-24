@@ -8,10 +8,8 @@ import {
   getDailySeries,
   getLotGaps,
   getYesterdayNumbers,
-  missingWithholding,
   monthOnMonthFrom,
   pendingPurchaseRequests,
-  receivablesAging,
 } from "@/lib/metrics";
 
 export const dynamic = "force-dynamic";
@@ -28,9 +26,9 @@ export async function GET() {
   const series7 = series90.slice(-7);
   const mom = monthOnMonthFrom(series90);
 
-  // These are needed both for the payload and by detectExceptions, so fetch
-  // them once and hand them down rather than letting it re-query.
-  const [aging, flaggedLots] = await Promise.all([receivablesAging(), getLotGaps()]);
+  // Needed both for the payload and by detectExceptions, so fetch once and hand
+  // it down rather than letting it re-query.
+  const flaggedLots = await getLotGaps();
 
   // Start of today in East Africa Time, for the sales-of-the-day summary.
   const eatMidnight = new Date(`${new Date(Date.now() + 3 * 3600_000).toISOString().slice(0, 10)}T00:00:00+03:00`);
@@ -38,7 +36,6 @@ export async function GET() {
   const [
     yesterday,
     exceptions,
-    withholding,
     prs,
     latestBrief,
     pendingClaimsRows,
@@ -46,8 +43,7 @@ export async function GET() {
     salesTodayRows,
   ] = await Promise.all([
     getYesterdayNumbers(),
-    detectExceptions(new Date(), { aging, lotGaps: flaggedLots }),
-    missingWithholding(),
+    detectExceptions(new Date(), { lotGaps: flaggedLots }),
     pendingPurchaseRequests(),
     fetchLatestBrief(),
     sql<{ n: string }[]>`select count(*) as n from damage_claims where status in ('pending','cosign_required')`,
@@ -82,8 +78,6 @@ export async function GET() {
       collections: bestAndWorstDays(series30, "collections"),
     },
     monthOnMonth: mom,
-    receivables: aging,
-    missingWithholding: withholding,
     purchaseRequests: prs,
     brief: latestBrief,
     flaggedLots,

@@ -4,10 +4,8 @@ import {
   damageTripwires,
   getDailySeries,
   getYesterdayNumbers,
-  missingWithholding,
   monthOnMonth,
   pendingPurchaseRequests,
-  receivablesAging,
 } from "@/lib/metrics";
 import sql from "@/lib/sql";
 import { getLotBalances } from "@/lib/metrics";
@@ -50,15 +48,24 @@ const READABLE_TABLES = {
   purchase_item_reports: "date",
   pp_bag_damage_reports: "date",
   sales_receipts: "date",
-  shift_reports: "date",
-  stone_deliveries: "date",
   damage_claims: "created_at",
   receipts: "created_at",
   purchase_requests: "created_at",
-  // Commercial ledger
+  // Finance
+  finance_purchase_batches: "date",
+  finance_purchase_items: "created_at",
+  pp_bag_purchases: "date",
+  monthly_base_balances: "created_at",
+  monthly_price_lists: "created_at",
+  material_issues: "date",
+  wht_holders: "created_at",
+  wht_sms_log: "sent_on",
+  // Retired modules — no writer any more, kept so history stays answerable.
   invoices: "invoiced_at",
   payments: "date",
   invoice_reminders: "sent_at",
+  shift_reports: "date",
+  stone_deliveries: "date",
   // Bag control
   bag_lots: "received_at",
   bag_events: "date",
@@ -95,7 +102,7 @@ const tools: OpenAI.Chat.ChatCompletionTool[] = [
     type: "function",
     function: {
       name: "get_yesterday_numbers",
-      description: "Yesterday's key numbers: tons produced and sold, revenue invoiced, cash collected, damage claims.",
+      description: "Yesterday's key numbers: tons produced, tons dispatched, sales reported by the sales team, damage claims, raw material in and open tool requests.",
       parameters: { type: "object", properties: {} },
     },
   },
@@ -103,7 +110,7 @@ const tools: OpenAI.Chat.ChatCompletionTool[] = [
     type: "function",
     function: {
       name: "get_trends",
-      description: "Daily series of production (sacks), sales (ETB invoiced) and collections (ETB) for the last N days, plus month-on-month comparison.",
+      description: "Daily series of production (tonnes) and sales for the last N days, plus month-on-month comparison.",
       parameters: {
         type: "object",
         properties: { days: { type: "number", description: "7, 30 or 90", default: 30 } },
@@ -114,7 +121,10 @@ const tools: OpenAI.Chat.ChatCompletionTool[] = [
     type: "function",
     function: {
       name: "get_money_status",
-      description: "Receivables aging buckets, overdue clients, invoices missing withholding receipts, pending purchase requests.",
+      description:
+        "Finance status: tool purchase batches and what they cost, PP bag purchases, WHT receipt " +
+        "holders still owing a receipt and how long they have been chased, and pending purchase " +
+        "requests awaiting a decision.",
       parameters: { type: "object", properties: {} },
     },
   },
@@ -290,7 +300,7 @@ const tools: OpenAI.Chat.ChatCompletionTool[] = [
         type: "object",
         properties: {
           collection: { type: "string", enum: Object.keys(READABLE_TABLES) },
-          client: { type: "string", description: "Filter invoices by client name (partial match, optional)" },
+          client: { type: "string", description: "Filter sales receipts by customer name (partial match, optional)" },
           limit: { type: "number", default: 20 },
         },
         required: ["collection"],
@@ -309,12 +319,23 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<unk
       return { days, series, monthOnMonth: mom };
     }
     case "get_money_status": {
-      const [aging, withholding, prs] = await Promise.all([
-        receivablesAging(),
-        missingWithholding(),
+      const [purchases, bags, wht, prs] = await Promise.all([
+        sql`select b.sr_no as "srNo", b.date, b.supplier, b.cost_center as "costCenter",
+                   b.purchaser, b.currency, b.total_amount as "totalAmount", b.receipt_check as "receiptCheck",
+                   coalesce((select jsonb_agg(jsonb_build_object(
+                       'description', i.description, 'uom', i.uom, 'quantity', i.quantity)
+                     order by i.position) from finance_purchase_items i where i.batch_id = b.id), '[]'::jsonb) as items
+              from finance_purchase_batches b
+             order by b.date desc limit 50`.catch(() => []),
+        sql`select date, bags, supplier, currency, total_amount as "totalAmount", reported_by as "reportedBy"
+              from pp_bag_purchases order by date desc limit 30`.catch(() => []),
+        sql`select company, phone, description, status, registered_by as "registeredBy",
+                   created_at as "createdAt", resolved_at as "resolvedAt",
+                   (select count(*) from wht_sms_log l where l.holder_id = h.id and l.ok) as "smsSent"
+              from wht_holders h order by (status = 'pending') desc, created_at desc limit 100`.catch(() => []),
         pendingPurchaseRequests(),
       ]);
-      return { receivablesAging: aging, missingWithholdingReceipts: withholding, pendingPurchaseRequests: prs };
+      return { toolPurchases: purchases, ppBagPurchases: bags, whtHolders: wht, pendingPurchaseRequests: prs };
     }
     case "get_bag_control": {
       const [lots, claims, tripwires] = await Promise.all([
@@ -573,11 +594,11 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<unk
       if (!isReadableTable(table)) return { error: "unknown collection" };
       const orderBy = READABLE_TABLES[table];
 
-      // Invoices keep their client filter; parameterised ILIKE, so nothing the
-      // model writes reaches the query as syntax.
+      // Sales receipts keep a customer filter; parameterised ILIKE, so nothing
+      // the model writes reaches the query as syntax.
       const where =
-        table === "invoices" && args.client
-          ? sql`where client ilike '%' || ${String(args.client)} || '%'`
+        table === "sales_receipts" && args.client
+          ? sql`where customer_name ilike '%' || ${String(args.client)} || '%'`
           : sql``;
 
       const safe = SAFE_COLUMNS[table];

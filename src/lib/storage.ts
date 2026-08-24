@@ -152,8 +152,13 @@ export async function deleteFile(id: string): Promise<void> {
  * PP bag damage photos are the evidence the duplicate check compares against for
  * a year; reaping them after 72 hours would make re-submitting an old photo
  * undetectable. They have their own long sweep — purgePpBagPhotos below.
+ *
+ * Finance receipts are excluded for a different reason: they are the evidence
+ * behind a money figure, and an auditor asking about a purchase three months on
+ * needs the paper, not just the number that was typed. purgeFinanceReceipts
+ * sweeps them on their own retention.
  */
-const LONG_RETENTION_KINDS = ["pp_bag_damage"];
+const LONG_RETENTION_KINDS = ["pp_bag_damage", "finance_receipt"];
 
 export async function purgeOldPhotos(hours = 72, batch = 500): Promise<{ deleted: number }> {
   const rows = await sql<{ id: string; storage_path: string }[]>`
@@ -181,6 +186,32 @@ export async function purgeOldPhotos(hours = 72, batch = 500): Promise<{ deleted
  * duplicate window exactly one year rather than forever-growing. The report rows
  * themselves (reason, quantity, verdict) are the data and are never touched.
  */
+/**
+ * Purchase receipts, swept on their own retention.
+ *
+ * `photo_file_ids` on the purchase row is a plain uuid[] with no foreign key, so
+ * nothing cascades — the ids simply stop resolving once the files are gone. The
+ * row keeps its total, its items and the AI verdict, which is what the report is
+ * actually built from.
+ */
+export async function purgeFinanceReceipts(days = 730, batch = 500): Promise<{ deleted: number }> {
+  const rows = await sql<{ id: string; storage_path: string }[]>`
+    select id, storage_path
+      from stored_files
+     where kind = 'finance_receipt'
+       and created_at < now() - (${days} || ' days')::interval
+     limit ${batch}
+  `;
+  if (rows.length === 0) return { deleted: 0 };
+
+  await storage()
+    .remove(rows.map((r) => r.storage_path))
+    .catch((e) => console.error("purgeFinanceReceipts: storage remove failed:", e));
+
+  await sql`delete from stored_files where id = any(${rows.map((r) => r.id)})`;
+  return { deleted: rows.length };
+}
+
 export async function purgePpBagPhotos(days = 365, batch = 500): Promise<{ deleted: number }> {
   const rows = await sql<{ id: string; storage_path: string }[]>`
     select id, storage_path

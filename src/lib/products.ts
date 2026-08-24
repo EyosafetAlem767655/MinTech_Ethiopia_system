@@ -75,6 +75,44 @@ export function bagLabel(size: BagSize, colour: string): string {
 export const RAW_MATERIALS = ["Talc", "Kuni", "Chips", "Guji", "Lime Stone"] as const;
 
 /**
+ * The same raw materials as finance accounts for them.
+ *
+ * Asset management receives Kuni, Chips and Guji as three separate materials and
+ * will keep reporting them that way. Finance values them identically, so they are
+ * summed into one Dolomite line. The mapping lives here rather than in the report
+ * so the intake tables never have to know about it.
+ */
+export const FINANCE_RAW_MATERIALS = ["Dolomite", "Lime Stone", "Talc"] as const;
+export type FinanceRawMaterial = (typeof FINANCE_RAW_MATERIALS)[number];
+
+const DOLOMITE_SOURCES = ["Kuni", "Chips", "Guji"] as const;
+
+/** Which finance line an asset-management raw material rolls up into. */
+export function financeMaterial(assetMaterial: string): FinanceRawMaterial | null {
+  if ((DOLOMITE_SOURCES as readonly string[]).includes(assetMaterial)) return "Dolomite";
+  if (assetMaterial === "Lime Stone") return "Lime Stone";
+  if (assetMaterial === "Talc") return "Talc";
+  return null;
+}
+
+/**
+ * Roll an asset-management `{ material: tons }` map up into finance's three lines.
+ *
+ * Note that "Talc" is a raw material here and a FINISHED BRAND elsewhere (product
+ * code `Talk`, sold as Micro Talc). They are genuinely different things and never
+ * share a figure — one is received and consumed, the other produced and sold.
+ */
+export function rollUpMaterials(assetMaterials: Record<string, number> | null | undefined) {
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(assetMaterials || {})) {
+    const target = financeMaterial(k);
+    if (!target) continue;
+    out[target] = (out[target] || 0) + (Number(v) || 0);
+  }
+  return out;
+}
+
+/**
  * Product colours — a palette validated as a set (lightness band, chroma floor,
  * CVD + normal-vision separation, contrast). The ordering keeps neighbouring
  * stacked-bar segments apart, so keep it aligned with the alphabetical order the

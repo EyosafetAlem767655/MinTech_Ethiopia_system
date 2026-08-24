@@ -1,8 +1,11 @@
 import sql from "@/lib/sql";
 import {
   BAG_SIZES,
+  BAG_SIZE_LABEL,
   BAG_STOCK,
   DELIVERY_PRODUCTS,
+  FINANCE_RAW_MATERIALS,
+  PRODUCT_ORDER,
   PRODUCTION_PRODUCTS,
   bagLabel,
   productLabel,
@@ -11,6 +14,17 @@ import {
 } from "@/lib/products";
 import { upsertOpsDay, opsDateLabel } from "@/lib/ops-report";
 import { bagKey, productionTemplate, PROD_PREFIX, STOCK_PREFIX } from "@/lib/production-paste";
+import {
+  BAG_PREFIX,
+  BRAND_PREFIX,
+  MATERIAL_PREFIX,
+  bagFinanceKey,
+  baseBalanceTemplate,
+  brandKey,
+  materialKey,
+  priceListTemplate,
+} from "@/lib/finance-paste";
+import { monthLabel, nextMonth, priceListItems } from "@/lib/finance-report";
 import type { ToolPhotoCheck } from "@/lib/llm";
 
 /**
@@ -34,7 +48,15 @@ export type AssetFlowKind =
   | "delivery"
   | "tool_request"
   | "pp_bag_damage"
-  | "production_daily";
+  | "production_daily"
+  // Asset management, feeding the monthly finance report.
+  | "base_balance"
+  | "material_issue"
+  // Finance.
+  | "tool_purchase"
+  | "pp_bag_purchase"
+  | "price_list"
+  | "wht_holder";
 
 export interface AssetFlowState {
   kind: AssetFlowKind;
@@ -212,12 +234,254 @@ const PRODUCTION_STEPS: AssetStep[] = [
   ),
 ];
 
+
+/* ─────────────────────── Monthly base balance (asset mgmt) ────────────────── */
+
+/**
+ * The opening balance of the month about to start, counted three days before the
+ * current month ends. Fifteen figures, so a paste template is offered first.
+ */
+const BASE_BALANCE_STEPS: AssetStep[] = [
+  {
+    id: "fill",
+    prompt: "📋 እንዴት ማስገባት ይፈልጋሉ?",
+    type: "choice",
+    choices: [
+      { label: "📋 በአንድ ላይ (ሠንጠረዥ)", value: "paste" },
+      { label: "1️⃣ በደረጃ በደረጃ", value: "steps" },
+    ],
+  },
+  {
+    id: "paste",
+    prompt: "📋 የሚከተለውን ቅጂ ሞልተው ይመልሱት። ያልሞሉት መስመር በጥያቄ ይጠየቃል።",
+    type: "paste",
+    when: (d) => d.fill === "paste",
+  },
+  ...PRODUCT_ORDER.map<AssetStep>((code) => ({
+    id: brandKey(code),
+    prompt: `📦 የመነሻ ሚዛን — የ<b>${productLabel(code)}</b> ብዛት በቶን። ከሌለ 0 ይፃፉ።`,
+    type: "number",
+  })),
+  ...FINANCE_RAW_MATERIALS.map<AssetStep>((m) => ({
+    id: materialKey(m),
+    prompt: `⛏ የመነሻ ሚዛን — የ<b>${m}</b> ብዛት በቶን። ከሌለ 0 ይፃፉ።`,
+    type: "number",
+  })),
+  ...BAG_SIZES.map<AssetStep>((size) => ({
+    id: bagFinanceKey(size),
+    prompt: `🧺 የመነሻ ሚዛን — የ<b>${BAG_SIZE_LABEL[size]} PP</b> ከረጢት ብዛት (ቁጥር)። ከሌለ 0 ይፃፉ።`,
+    type: "number",
+  })),
+];
+
+/* ───────────────────── Daily raw-material issue (asset mgmt) ──────────────── */
+
+/** What production consumed today — the Issue column of the monthly report. */
+const MATERIAL_ISSUE_STEPS: AssetStep[] = [
+  { id: "date", prompt: "📅 የፍጆታውን ቀን ይምረጡ።", type: "date" },
+  ...FINANCE_RAW_MATERIALS.map<AssetStep>((m) => ({
+    id: materialKey(m),
+    prompt: `🔥 ዛሬ ለምርት የዋለው የ<b>${m}</b> ብዛት በቶን። ከሌለ 0 ይፃፉ።`,
+    type: "number",
+  })),
+  ...BAG_SIZES.map<AssetStep>((size) => ({
+    id: bagFinanceKey(size),
+    prompt: `🧺 ዛሬ የዋለው የ<b>${BAG_SIZE_LABEL[size]} PP</b> ከረጢት ብዛት (ቁጥር)። ከሌለ 0 ይፃፉ።`,
+    type: "number",
+  })),
+];
+
+/* ──────────────────────── Tool purchase report (finance) ──────────────────── */
+
+/** Item slots on one purchase batch. */
+export const MAX_PURCHASE_ITEMS = 8;
+
+/** True once item `i` has been reached — item 1 always, the rest on request. */
+function purchaseItemAsked(draft: Record<string, string | number>, i: number): boolean {
+  if (i === 1) return true;
+  return draft[`more${i - 1}`] === "yes";
+}
+
+/**
+ * A batch of tools bought together.
+ *
+ * The engine is a flat step table, so a genuinely unbounded item list is not
+ * expressible. Fixed slots gated on an "add another?" answer behave the same
+ * way: the flow stops at the first "no" and never asks about the next slot.
+ *
+ * Money is asked ONCE, at the end, for the whole batch. A multi-item batch has a
+ * single figure on the receipt, so per-item cost is genuinely unknown — dividing
+ * the total out would invent numbers nobody wrote down.
+ */
+const TOOL_PURCHASE_STEPS: AssetStep[] = [
+  { id: "date", prompt: "📅 የግዢውን ቀን ይምረጡ።", type: "date" },
+  ...Array.from({ length: MAX_PURCHASE_ITEMS }).flatMap<AssetStep>((_, idx) => {
+    const i = idx + 1;
+    const steps: AssetStep[] = [
+      {
+        id: `desc${i}`,
+        prompt: `📝 ዕቃ ${i} — ስሙንና ዝርዝሩን (specification) ይፃፉ።`,
+        type: "text",
+        when: (d) => purchaseItemAsked(d, i),
+      },
+      {
+        id: `uom${i}`,
+        prompt: `📏 ዕቃ ${i} — መለኪያውን ይምረጡ።`,
+        type: "choice",
+        choices: [
+          { label: "🔢 pcs", value: "pcs" },
+          { label: "📦 pak", value: "pak" },
+        ],
+        when: (d) => purchaseItemAsked(d, i),
+      },
+      {
+        id: `qty${i}`,
+        prompt: `🔢 ዕቃ ${i} — ብዛቱን ይፃፉ።`,
+        type: "number",
+        when: (d) => purchaseItemAsked(d, i),
+      },
+    ];
+    // No "add another?" after the last slot — there is nowhere left to go.
+    if (i < MAX_PURCHASE_ITEMS) {
+      steps.push({
+        id: `more${i}`,
+        prompt: "➕ ሌላ ዕቃ አለ?",
+        type: "choice",
+        choices: [
+          { label: "➕ አዎ፣ ሌላ ዕቃ", value: "yes" },
+          { label: "✅ በቃ", value: "no" },
+        ],
+        when: (d) => purchaseItemAsked(d, i),
+      });
+    }
+    return steps;
+  }),
+  { id: "supplier", prompt: "🏢 አቅራቢውን (Supplier) ይፃፉ።", type: "text", skippable: true },
+  { id: "costCenter", prompt: "🏷 ለየትኛው ክፍል እንደተገዛ (Cost Center) ይፃፉ።", type: "text", skippable: true },
+  { id: "purchaser", prompt: "🧑 ገዢውን (Purchaser) ይፃፉ።", type: "text", skippable: true },
+  {
+    id: "currency",
+    prompt: "💱 በየትኛው ገንዘብ ተከፍሏል?",
+    type: "choice",
+    choices: [
+      { label: "🇪🇹 ብር (ETB)", value: "ETB" },
+      { label: "💵 ዶላር (USD)", value: "USD" },
+    ],
+  },
+  { id: "totalAmount", prompt: "💰 የጠቅላላውን ግዢ ዋጋ ይፃፉ።", type: "number" },
+  {
+    id: "photos",
+    prompt: `🧾 የደረሰኙን ፎቶ(ዎች) ይላኩ — እስከ ${MAX_FLOW_PHOTOS} ፎቶ። ከጨረሱ በኋላ "✅ ጨርሻለሁ" ይጫኑ።`,
+    type: "photos",
+  },
+];
+
+/* ───────────────────────── PP bag purchase (finance) ──────────────────────── */
+
+const PP_BAG_PURCHASE_STEPS: AssetStep[] = [
+  { id: "date", prompt: "📅 የግዢውን ቀን ይምረጡ።", type: "date" },
+  ...BAG_SIZES.map<AssetStep>((size) => ({
+    id: bagFinanceKey(size),
+    prompt: `🧺 የተገዛው የ<b>${BAG_SIZE_LABEL[size]} PP</b> ከረጢት ብዛት (ቁጥር)። ከሌለ 0 ይፃፉ።`,
+    type: "number",
+  })),
+  { id: "supplier", prompt: "🏢 አቅራቢውን (Supplier) ይፃፉ።", type: "text", skippable: true },
+  {
+    id: "currency",
+    prompt: "💱 በየትኛው ገንዘብ ተከፍሏል?",
+    type: "choice",
+    choices: [
+      { label: "🇪🇹 ብር (ETB)", value: "ETB" },
+      { label: "💵 ዶላር (USD)", value: "USD" },
+    ],
+  },
+  { id: "totalAmount", prompt: "💰 የጠቅላላውን ግዢ ዋጋ ይፃፉ።", type: "number" },
+  {
+    id: "photos",
+    prompt: `🧾 የደረሰኙን ፎቶ(ዎች) ይላኩ — እስከ ${MAX_FLOW_PHOTOS} ፎቶ። ከጨረሱ በኋላ "✅ ጨርሻለሁ" ይጫኑ።`,
+    type: "photos",
+  },
+];
+
+/* ────────────────────────── Monthly price list (finance) ─────────────────── */
+
+/** Which namespace a price-list item belongs to — brands and raw materials both
+ *  contain "Talc", so the key must record which table it is priced on. */
+function priceKey(key: string): string {
+  if ((BAG_SIZES as readonly string[]).includes(key)) return bagFinanceKey(key as BagSize);
+  if ((PRODUCT_ORDER as readonly string[]).includes(key)) return brandKey(key);
+  return materialKey(key);
+}
+
+const PRICE_LIST_STEPS: AssetStep[] = [
+  {
+    id: "fill",
+    prompt: "📋 እንዴት ማስገባት ይፈልጋሉ?",
+    type: "choice",
+    choices: [
+      { label: "📋 በአንድ ላይ (ሠንጠረዥ)", value: "paste" },
+      { label: "1️⃣ በደረጃ በደረጃ", value: "steps" },
+    ],
+  },
+  {
+    id: "paste",
+    prompt: "📋 የሚከተለውን ቅጂ ሞልተው ይመልሱት። ያልሞሉት መስመር በጥያቄ ይጠየቃል።",
+    type: "paste",
+    when: (d) => d.fill === "paste",
+  },
+  ...priceListItems().map<AssetStep>((item) => ({
+    id: priceKey(item.key),
+    prompt: `💲 የ<b>${item.label}</b> የነጠላ ዋጋ (${item.unit})። ካልታወቀ 0 ይፃፉ።`,
+    type: "number",
+  })),
+  { id: "usdRate", prompt: "💱 የዶላር ምንዛሪ (1 USD ስንት ብር)? ካልታወቀ 0 ይፃፉ።", type: "number" },
+];
+
+/* ──────────────────────── WHT receipt holder (finance) ────────────────────── */
+
+/**
+ * A phone number the SMS gateway can actually dial.
+ *
+ * Accepts the two shapes people write in Ethiopia and normalises both to E.164,
+ * because a number stored as "0912…" and the same number stored as "+251912…"
+ * would otherwise look like two different customers to the chaser.
+ */
+export function validatePhone(raw: string): StepValidation {
+  const cleaned = raw.replace(/[\s\-()]/g, "");
+  if (/^0\d{9}$/.test(cleaned)) return { ok: true, value: `+251${cleaned.slice(1)}` };
+  if (/^\+251\d{9}$/.test(cleaned)) return { ok: true, value: cleaned };
+  if (/^251\d{9}$/.test(cleaned)) return { ok: true, value: `+${cleaned}` };
+  return { ok: false, error: "❌ የስልክ ቁጥሩ ትክክል አይደለም። ለምሳሌ 0912345678 ወይም +251912345678።" };
+}
+
+const WHT_HOLDER_STEPS: AssetStep[] = [
+  { id: "company", prompt: "🏢 የደንበኛውን/ድርጅቱን ስም ይፃፉ።", type: "text" },
+  {
+    id: "phone",
+    prompt: "📞 የስልክ ቁጥሩን ይፃፉ (ለምሳሌ 0912345678 ወይም +251912345678)።",
+    type: "text",
+    validate: validatePhone,
+  },
+  {
+    id: "description",
+    prompt: "📝 የWHT ደረሰኙን መግለጫ ይፃፉ (የደረሰኝ ቁጥር፣ መጠን፣ ወዘተ)።",
+    type: "text",
+    skippable: true,
+  },
+];
+
 const STEPS: Record<AssetFlowKind, AssetStep[]> = {
   raw_material: RAW_MATERIAL_STEPS,
   delivery: DELIVERY_STEPS,
   tool_request: TOOL_REQUEST_STEPS,
   pp_bag_damage: PP_BAG_DAMAGE_STEPS,
   production_daily: PRODUCTION_STEPS,
+  base_balance: BASE_BALANCE_STEPS,
+  material_issue: MATERIAL_ISSUE_STEPS,
+  tool_purchase: TOOL_PURCHASE_STEPS,
+  pp_bag_purchase: PP_BAG_PURCHASE_STEPS,
+  price_list: PRICE_LIST_STEPS,
+  wht_holder: WHT_HOLDER_STEPS,
 };
 
 export const FLOW_TITLE: Record<AssetFlowKind, string> = {
@@ -226,11 +490,20 @@ export const FLOW_TITLE: Record<AssetFlowKind, string> = {
   tool_request: "🔧 የመሣሪያ ግዢ ጥያቄ",
   pp_bag_damage: "💔 የPP ከረጢት ብልሽት ሪፖርት",
   production_daily: "🏭 የቀኑ የምርት ሪፖርት",
+  base_balance: "📊 የወሩ የመነሻ ሚዛን",
+  material_issue: "🔥 የቀኑ ጥሬ ዕቃ ፍጆታ",
+  tool_purchase: "🧾 የመሣሪያ ግዢ ሪፖርት",
+  pp_bag_purchase: "🛍 የPP ከረጢት ግዢ",
+  price_list: "💲 የወሩ የዋጋ ዝርዝር",
+  wht_holder: "📄 WHT ደረሰኝ ያዢ",
 };
 
 /** The template text for a paste step. */
 export function pasteTemplate(kind: AssetFlowKind): string {
-  return kind === "production_daily" ? productionTemplate() : "";
+  if (kind === "production_daily") return productionTemplate();
+  if (kind === "base_balance") return baseBalanceTemplate();
+  if (kind === "price_list") return priceListTemplate();
+  return "";
 }
 
 /**
@@ -404,6 +677,91 @@ export function assetPreview(state: AssetFlowState): string {
     );
   }
 
+  if (state.kind === "base_balance") {
+    const brands = PRODUCT_ORDER.map((c) => `${productLabel(c)}: <b>${qty(Number(d[brandKey(c)]) || 0)}</b> ቶን`);
+    const mats = FINANCE_RAW_MATERIALS.map((m) => `${m}: <b>${qty(Number(d[materialKey(m)]) || 0)}</b> ቶን`);
+    const bags = BAG_SIZES.map((sz) => `${BAG_SIZE_LABEL[sz]} PP: <b>${qty(Number(d[bagFinanceKey(sz)]) || 0)}</b>`);
+    return [
+      `📊 <b>የ${nextMonthOf(d)} የመነሻ ሚዛን</b>`,
+      "",
+      "<b>ምርቶች</b>",
+      ...brands,
+      "",
+      "<b>ጥሬ ዕቃ</b>",
+      ...mats,
+      "",
+      "<b>ከረጢት</b>",
+      ...bags,
+    ].join("\n");
+  }
+
+  if (state.kind === "material_issue") {
+    const mats = FINANCE_RAW_MATERIALS.map((m) => `${m}: <b>${qty(Number(d[materialKey(m)]) || 0)}</b> ቶን`);
+    const bags = BAG_SIZES.map((sz) => `${BAG_SIZE_LABEL[sz]} PP: <b>${qty(Number(d[bagFinanceKey(sz)]) || 0)}</b>`);
+    return [`🔥 <b>የቀኑ ጥሬ ዕቃ ፍጆታ</b>`, `📅 ${esc(d.date)}`, "", ...mats, "", ...bags].join("\n");
+  }
+
+  if (state.kind === "tool_purchase") {
+    const items = purchaseItems(d).map(
+      (it, i) => `${i + 1}. ${esc(it.description)} — ${qty(it.quantity)} ${esc(it.uom)}`
+    );
+    const photos = state.photoFileIds?.length || 0;
+    return [
+      `🧾 <b>የመሣሪያ ግዢ ሪፖርት</b>`,
+      `📅 ${esc(d.date)}`,
+      "",
+      ...items,
+      "",
+      `🏢 አቅራቢ: <b>${esc(d.supplier) || "—"}</b>`,
+      `🏷 ክፍል: <b>${esc(d.costCenter) || "—"}</b>`,
+      `🧑 ገዢ: <b>${esc(d.purchaser) || "—"}</b>`,
+      `💰 ጠቅላላ: <b>${money(Number(d.totalAmount) || 0)} ${esc(d.currency)}</b>`,
+      `🧾 ደረሰኝ: <b>${photos}</b> ፎቶ`,
+      photos > 0 ? "<i>ደረሰኙ ከተመዘገበ በኋላ በAI ይመረመራል።</i>" : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  if (state.kind === "pp_bag_purchase") {
+    const bags = BAG_SIZES.map((sz) => `${BAG_SIZE_LABEL[sz]} PP: <b>${qty(Number(d[bagFinanceKey(sz)]) || 0)}</b>`);
+    const photos = state.photoFileIds?.length || 0;
+    return [
+      `🛍 <b>የPP ከረጢት ግዢ</b>`,
+      `📅 ${esc(d.date)}`,
+      "",
+      ...bags,
+      "",
+      `🏢 አቅራቢ: <b>${esc(d.supplier) || "—"}</b>`,
+      `💰 ጠቅላላ: <b>${money(Number(d.totalAmount) || 0)} ${esc(d.currency)}</b>`,
+      `🧾 ደረሰኝ: <b>${photos}</b> ፎቶ`,
+    ].join("\n");
+  }
+
+  if (state.kind === "price_list") {
+    const rows = priceListItems().map(
+      (it) => `${it.label}: <b>${money(Number(d[priceKey(it.key)]) || 0)}</b>`
+    );
+    return [
+      `💲 <b>የ${monthLabel()} የዋጋ ዝርዝር</b>`,
+      "",
+      ...rows,
+      "",
+      `💱 1 USD = <b>${money(Number(d.usdRate) || 0)}</b> ብር`,
+    ].join("\n");
+  }
+
+  if (state.kind === "wht_holder") {
+    return [
+      `📄 <b>WHT ደረሰኝ ያዢ</b>`,
+      `🏢 ${esc(d.company)}`,
+      `📞 ${esc(d.phone)}`,
+      `📝 ${esc(d.description) || "—"}`,
+      "",
+      "<i>ደረሰኙ እስኪመለስ ድረስ በየቀኑ አንድ SMS ይላካል።</i>",
+    ].join("\n");
+  }
+
   const kindLabel = d.kind === "maintenance" ? "🛠 ጥገና" : "🆕 አዲስ ዕቃ";
   let out =
     head +
@@ -420,6 +778,37 @@ export function assetPreview(state: AssetFlowState): string {
           (c.observations ? `   <i>${esc(c.observations)}</i>\n` : "")
         : "🤖 AI: ማጣራት አልተቻለም — በእጅ ይጣራል\n";
     }
+  }
+  return out;
+}
+
+/** The month a base balance opens — always the one after the month it is filed in. */
+function nextMonthOf(_draft: Record<string, string | number>): string {
+  return nextMonth(monthLabel());
+}
+
+export interface PurchaseItem {
+  description: string;
+  uom: string;
+  quantity: number;
+}
+
+/**
+ * The filled item slots of a purchase batch, in order.
+ *
+ * Stops at the first empty description rather than scanning all eight, so a
+ * slot left behind by an earlier edit can never be resurrected.
+ */
+export function purchaseItems(draft: Record<string, string | number>): PurchaseItem[] {
+  const out: PurchaseItem[] = [];
+  for (let i = 1; i <= MAX_PURCHASE_ITEMS; i++) {
+    const description = String(draft[`desc${i}`] || "").trim();
+    if (!description) break;
+    out.push({
+      description,
+      uom: String(draft[`uom${i}`] || "pcs"),
+      quantity: Number(draft[`qty${i}`]) || 0,
+    });
   }
   return out;
 }
@@ -502,6 +891,119 @@ export async function saveAssetReport(
               ${reportedBy}, 'telegram')
       returning id`;
     return { id: row.id, table: "pp_bag_damage_reports" };
+  }
+
+  if (state.kind === "base_balance") {
+    const month = nextMonthOf(d);
+    // Upserted on the month: a correction re-counts the same opening balance
+    // rather than creating a second one nothing can choose between.
+    const [row] = await sql<{ id: string }[]>`
+      insert into monthly_base_balances (month, products, raw_materials, bags, reported_by, source)
+      values (${month},
+              ${sql.json(jsonMap(d, BRAND_PREFIX, PRODUCT_ORDER))},
+              ${sql.json(jsonMap(d, MATERIAL_PREFIX, FINANCE_RAW_MATERIALS))},
+              ${sql.json(jsonMap(d, BAG_PREFIX, BAG_SIZES))},
+              ${reportedBy}, 'telegram')
+      on conflict (month) do update set
+        products = excluded.products,
+        raw_materials = excluded.raw_materials,
+        bags = excluded.bags,
+        reported_by = excluded.reported_by,
+        updated_at = now()
+      returning id`;
+    return { id: row.id, table: "monthly_base_balances" };
+  }
+
+  if (state.kind === "material_issue") {
+    const date = reportDate(d.date);
+    // One row per day, like daily_ops_reports: two people reporting the same
+    // day must not produce two consumption figures nothing can reconcile.
+    const [row] = await sql<{ id: string }[]>`
+      insert into material_issues (date_label, date, materials, bags, reported_by, source)
+      values (${opsDateLabel(date)}, ${date},
+              ${sql.json(jsonMap(d, MATERIAL_PREFIX, FINANCE_RAW_MATERIALS))},
+              ${sql.json(jsonMap(d, BAG_PREFIX, BAG_SIZES))},
+              ${reportedBy}, 'telegram')
+      on conflict (date_label) do update set
+        materials = excluded.materials,
+        bags = excluded.bags,
+        reported_by = excluded.reported_by,
+        updated_at = now()
+      returning id`;
+    return { id: row.id, table: "material_issues" };
+  }
+
+  if (state.kind === "tool_purchase") {
+    const items = purchaseItems(d);
+    const [batch] = await sql<{ id: string }[]>`
+      insert into finance_purchase_batches
+        (sr_no, date, supplier, cost_center, purchaser, currency, total_amount,
+         reported_by, photo_file_ids, source)
+      values (nextval('finance_purchase_sr_seq'), ${reportDate(d.date)},
+              ${String(d.supplier || "") || null}, ${String(d.costCenter || "") || null},
+              ${String(d.purchaser || "") || reportedBy},
+              ${d.currency === "USD" ? "USD" : "ETB"},
+              ${Number(d.totalAmount) || null}, ${reportedBy},
+              ${state.photoFileIds || []}, 'telegram')
+      returning id`;
+
+    if (items.length > 0) {
+      await sql`
+        insert into finance_purchase_items ${sql(
+          items.map((it, i) => ({
+            batch_id: batch.id,
+            position: i,
+            description: it.description,
+            uom: it.uom,
+            quantity: it.quantity,
+          }))
+        )}`;
+    }
+    return { id: batch.id, table: "finance_purchase_batches" };
+  }
+
+  if (state.kind === "pp_bag_purchase") {
+    const [row] = await sql<{ id: string }[]>`
+      insert into pp_bag_purchases (date, bags, supplier, currency, total_amount,
+                                    reported_by, photo_file_ids, source)
+      values (${reportDate(d.date)}, ${sql.json(jsonMap(d, BAG_PREFIX, BAG_SIZES))},
+              ${String(d.supplier || "") || null},
+              ${d.currency === "USD" ? "USD" : "ETB"},
+              ${Number(d.totalAmount) || null}, ${reportedBy},
+              ${state.photoFileIds || []}, 'telegram')
+      returning id`;
+    return { id: row.id, table: "pp_bag_purchases" };
+  }
+
+  if (state.kind === "price_list") {
+    const month = monthLabel();
+    // One price map, keyed the way the report reads it. Brands and raw materials
+    // are merged here because "Talc" is unambiguous once the flow has already
+    // recorded which table each answer came from.
+    const prices: Record<string, number> = {
+      ...jsonMap(d, BRAND_PREFIX, PRODUCT_ORDER),
+      ...jsonMap(d, MATERIAL_PREFIX, FINANCE_RAW_MATERIALS),
+      ...jsonMap(d, BAG_PREFIX, BAG_SIZES),
+    };
+    const [row] = await sql<{ id: string }[]>`
+      insert into monthly_price_lists (month, prices, usd_rate, reported_by, source)
+      values (${month}, ${sql.json(prices)}, ${Number(d.usdRate) || null}, ${reportedBy}, 'telegram')
+      on conflict (month) do update set
+        prices = excluded.prices,
+        usd_rate = excluded.usd_rate,
+        reported_by = excluded.reported_by,
+        updated_at = now()
+      returning id`;
+    return { id: row.id, table: "monthly_price_lists" };
+  }
+
+  if (state.kind === "wht_holder") {
+    const [row] = await sql<{ id: string }[]>`
+      insert into wht_holders (company, phone, description, registered_by, source)
+      values (${String(d.company || "")}, ${String(d.phone || "")},
+              ${String(d.description || "") || null}, ${reportedBy}, 'telegram')
+      returning id`;
+    return { id: row.id, table: "wht_holders" };
   }
 
   const [row] = await sql<{ id: string }[]>`
