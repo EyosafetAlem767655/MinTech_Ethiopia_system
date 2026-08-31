@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 import { envValue } from "@/lib/env";
+import { BAG_SIZES, BAG_SIZE_LABEL, BAG_STOCK } from "@/lib/products";
 
 /* ─────────────────────────────── AI providers ──────────────────────────────
  * Text (chat, morning brief, report extraction) → NVIDIA Nemotron-3.
@@ -406,6 +407,126 @@ export async function extractReceiptGemini(
     // Transport failures are already handled above; reaching here means the
     // model returned something that is not the JSON we asked for.
     console.error("extractReceiptGemini could not parse the response:", e);
+    return { ok: false, error: "Gemini returned an unreadable response" };
+  }
+}
+
+/* ─────────────────── PP bag purchase extraction (Gemini) ────────────────────
+ * Backs the asset-management PP bag report: photographs of the supplier's
+ * receipt, delivery note or goods-received form, read into the six bag kinds.
+ *
+ * Unlike the sales receipt reader this is a PREFILL, not a verdict. Whatever it
+ * returns is shown to the reporter for correction before anything is saved, so
+ * the cost of a misread field is one edit rather than a wrong row.
+ */
+
+export interface BagPurchaseRead {
+  date: string;
+  supplier: string;
+  dnNo: string;
+  /** { kg25: { Yellow: n, … }, kg40: { … } } — only kinds actually read. */
+  bags: Record<string, Record<string, number>>;
+  currency: "ETB" | "USD" | "";
+  total: number;
+  confidence: number; // 0-100
+  notes: string;
+  /** Bag lines it could not map to a known kind, as printed. */
+  unmatched: string[];
+}
+
+export type BagPurchaseReadResult =
+  | { ok: true; data: BagPurchaseRead }
+  | { ok: false; error: string };
+
+/** "25KG: Yellow, White, Beige" — the kinds spelled out for the prompt. */
+const BAG_KIND_LIST = BAG_SIZES.map(
+  (size) => `${BAG_SIZE_LABEL[size]} (key "${size}"): ${BAG_STOCK[size].join(", ")}`
+).join("; ");
+
+const GEMINI_BAG_SYSTEM =
+  "You read Ethiopian supplier receipts, delivery notes and goods-received forms for PP bags " +
+  "(woven polypropylene sacks) and return STRICT JSON only.\n" +
+  "IMPORTANT: every image you are given is a page or angle of ONE SINGLE purchase. Merge what you can " +
+  "read across them into ONE result. Never return several purchases, and never add quantities across " +
+  "images that show the same page.\n" +
+  `The only bag kinds that exist are: ${BAG_KIND_LIST}.\n` +
+  'Return exactly: { "date": "YYYY-MM-DD", "supplier": string, ' +
+  '"dnNo": string (the delivery note / DN / form number printed on the paper), ' +
+  '"bags": { "kg25": { "Yellow": number, "White": number, "Beige": number }, ' +
+  '"kg40": { "Yellow": number, "Green": number, "Beige": number } } (PIECES, not weight; ' +
+  "include only the kinds you actually read), " +
+  '"currency": "ETB" or "USD", "total": number (the grand total paid), ' +
+  '"confidence": number (0-100 — how clearly legible the document is), ' +
+  '"notes": string (one short sentence), ' +
+  '"unmatched": string[] (bag lines you could NOT map to one of the kinds above, copied as printed) }.\n' +
+  "Map colour words to the nearest listed colour ONLY when it is the same colour (cream/off-white → " +
+  'Beige, ነጭ → White, ቢጫ → Yellow, አረንጓዴ → Green). If a line names a colour or size that is not ' +
+  'listed, put the whole line in "unmatched" — do NOT force it into a kind that is close enough. ' +
+  "Read every number exactly as printed; do not calculate, correct or total anything yourself. " +
+  'Use "" for text and 0 for numbers that are not visible.';
+
+/** Only the six real kinds survive; anything else is dropped, not guessed at. */
+function normaliseBagRead(raw: unknown): Record<string, Record<string, number>> {
+  const out: Record<string, Record<string, number>> = {};
+  const src = (raw || {}) as Record<string, unknown>;
+  for (const size of BAG_SIZES) {
+    const inner = src[size];
+    if (!inner || typeof inner !== "object") continue;
+    const counts: Record<string, number> = {};
+    for (const colour of BAG_STOCK[size]) {
+      const v = Math.round(receiptNum((inner as Record<string, unknown>)[colour]));
+      // Bags are counted, never fractional, and a negative count is a misread.
+      if (v > 0) counts[colour] = v;
+    }
+    if (Object.keys(counts).length > 0) out[size] = counts;
+  }
+  return out;
+}
+
+/**
+ * Read a PP bag purchase off its paperwork.
+ *
+ * Bounded by RECEIPT_BUDGET_MS inside geminiGenerate, because this runs in the
+ * Telegram webhook when the reporter finishes sending photos. A failure here is
+ * not an error the user has to deal with — the flow simply asks every question
+ * by hand instead.
+ */
+export async function extractBagPurchaseGemini(
+  images: { base64: string; contentType: string }[],
+  caption?: string
+): Promise<BagPurchaseReadResult> {
+  if (images.length === 0) return { ok: false, error: "no images to read" };
+
+  const parts: GeminiPart[] = images.slice(0, 3).map((img) => ({
+    inline_data: { mime_type: img.contentType || "image/jpeg", data: img.base64 },
+  }));
+  parts.push({ text: GEMINI_BAG_SYSTEM + (caption ? `\nNote: ${caption}` : "") });
+
+  const res = await geminiGenerate([{ role: "user", parts }], { json: true });
+  if (!res.ok) return { ok: false, error: res.error || "Gemini call failed" };
+  if (!res.text.trim()) return { ok: false, error: "Gemini returned an empty response" };
+
+  try {
+    const p = extractJson(res.text);
+    const currency = String(p.currency || "").toUpperCase();
+    return {
+      ok: true,
+      data: {
+        date: String(p.date || "").trim(),
+        supplier: String(p.supplier || "").trim(),
+        dnNo: String(p.dnNo || "").trim(),
+        bags: normaliseBagRead(p.bags),
+        currency: currency === "USD" ? "USD" : currency === "ETB" ? "ETB" : "",
+        total: receiptNum(p.total),
+        confidence: Math.max(0, Math.min(100, Math.round(Number(p.confidence) || 50))),
+        notes: String(p.notes || "").trim(),
+        unmatched: Array.isArray(p.unmatched)
+          ? p.unmatched.map((u: unknown) => String(u || "").trim()).filter(Boolean).slice(0, 8)
+          : [],
+      },
+    };
+  } catch (e) {
+    console.error("extractBagPurchaseGemini could not parse the response:", e);
     return { ok: false, error: "Gemini returned an unreadable response" };
   }
 }

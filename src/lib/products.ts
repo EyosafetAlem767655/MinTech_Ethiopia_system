@@ -66,6 +66,51 @@ export function bagLabel(size: BagSize, colour: string): string {
   return `${BAG_SIZE_LABEL[size]} ${colour}`;
 }
 
+/** Every bag kind in table order — the six columns, flattened once. */
+export const BAG_KINDS: { size: BagSize; colour: string }[] = BAG_SIZES.flatMap((size) =>
+  BAG_STOCK[size].map((colour) => ({ size, colour }))
+);
+
+/** A bag count map in either shape: totals per size, or a colour breakdown. */
+export type BagCounts = Record<string, number | Record<string, number> | null | undefined>;
+
+/**
+ * Total bags per SIZE, whichever shape the map is in.
+ *
+ * PP bag purchases are recorded two ways. Asset management counts what physically
+ * arrived, by size and colour ({ kg25: { Yellow: 400, … } }); finance files only
+ * the receipt, and rows predating the colour breakdown carry a plain total per
+ * size ({ kg25: 400 }). Both are legitimate readings of the same column, so the
+ * monthly report flattens rather than assuming one shape — a nested map read as a
+ * number silently becomes NaN, and a whole month of purchases disappears.
+ */
+export function bagSizeTotals(bags: BagCounts | null | undefined): Record<BagSize, number> {
+  const out = { kg25: 0, kg40: 0 } as Record<BagSize, number>;
+  for (const [size, value] of Object.entries(bags || {})) {
+    if (!(BAG_SIZES as readonly string[]).includes(size)) continue;
+    const key = size as BagSize;
+    if (value && typeof value === "object") {
+      for (const v of Object.values(value)) out[key] += Number(v) || 0;
+    } else {
+      out[key] += Number(value) || 0;
+    }
+  }
+  return out;
+}
+
+/** One bag kind's count, tolerating the flat shape (which has no colours). */
+export function bagKindCount(bags: BagCounts | null | undefined, size: BagSize, colour: string): number {
+  const value = (bags || {})[size];
+  if (value && typeof value === "object") return Number(value[colour]) || 0;
+  return 0;
+}
+
+/** Every bag in the map, whatever its shape. */
+export function bagGrandTotal(bags: BagCounts | null | undefined): number {
+  const totals = bagSizeTotals(bags);
+  return totals.kg25 + totals.kg40;
+}
+
 /**
  * The raw-material intake columns, in sheet order.
  *

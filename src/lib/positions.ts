@@ -28,6 +28,7 @@ export type CapabilityKey =
   // Asset management feeds the monthly finance report.
   | "base_balance"
   | "material_issue"
+  | "pp_bag_report"
   // Finance.
   | "tool_purchase"
   | "pp_bag_purchase"
@@ -142,6 +143,13 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
     input: "photo",
     question: "💔 የPP ከረጢት ብልሽት ሪፖርት በደረጃ እናስገባለን።",
   },
+  pp_bag_report: {
+    key: "pp_bag_report",
+    button: "🧺 የPP ከረጢት ግዢ ሪፖርት",
+    captureMode: "asset_entry",
+    input: "any",
+    question: "🧺 የገቡትን የPP ከረጢቶች ከደረሰኙ ጋር እናስመዘግባለን።",
+  },
   base_balance: {
     key: "base_balance",
     button: "📊 የወሩ የመነሻ ሚዛን",
@@ -165,10 +173,12 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
   },
   pp_bag_purchase: {
     key: "pp_bag_purchase",
-    button: "🛍 የPP ከረጢት ግዢ",
+    // The receipt half of a bag purchase. The counts belong to pp_bag_report,
+    // filed by whoever took the delivery.
+    button: "🛍 የPP ከረጢት ግዢ ደረሰኝ",
     captureMode: "asset_entry",
     input: "any",
-    question: "🛍 የተገዙትን የPP ከረጢቶች እናስመዘግባለን።",
+    question: "🛍 የPP ከረጢት ግዢ ደረሰኙን እናስመዘግባለን።",
   },
   price_list: {
     key: "price_list",
@@ -342,8 +352,14 @@ export const POSITIONS: Record<PositionKey, Position> = {
       // consumption column, and the base balance opens each month.
       "material_issue",
       "base_balance",
+      // What bags arrived, counted by the people who took the delivery. Finance
+      // files the receipt for the same purchase but never the quantities.
+      "pp_bag_report",
     ],
     dailyRequired: true,
+    // pp_bag_purchases is deliberately absent: bag deliveries are occasional, and
+    // a table nobody files on a given day would mark this role non-compliant for
+    // every day without one.
     submissionTables: [
       "raw_material_receipts",
       "delivery_reports",
@@ -377,7 +393,7 @@ export const POSITIONS: Record<PositionKey, Position> = {
     en: "Finance",
     am: "ፋይናንስ",
     description:
-      "Files tool purchase reports, the monthly price list and PP bag purchases, and registers the customers who still owe a WHT receipt.",
+      "Files tool purchase reports, the monthly price list and PP bag purchase receipts, and registers the customers who still owe a WHT receipt.",
     // Invoicing, payments and receivables went with the old module. These four
     // are the whole of what finance files.
     capabilities: ["tool_purchase", "pp_bag_purchase", "price_list", "wht_holder"],

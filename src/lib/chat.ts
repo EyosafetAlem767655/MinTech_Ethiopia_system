@@ -122,9 +122,10 @@ const tools: OpenAI.Chat.ChatCompletionTool[] = [
     function: {
       name: "get_money_status",
       description:
-        "Finance status: tool purchase batches and what they cost, PP bag purchases, WHT receipt " +
-        "holders still owing a receipt and how long they have been chased, and pending purchase " +
-        "requests awaiting a decision.",
+        "Finance status: tool purchase batches and what they cost, PP bag purchases (the asset copy " +
+        "carries the counts by size and colour in `bags`, the finance copy only the receipt — see " +
+        "filedByDept), WHT receipt holders still owing a receipt and how long they have been chased, " +
+        "and pending purchase requests awaiting a decision.",
       parameters: { type: "object", properties: {} },
     },
   },
@@ -327,7 +328,11 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<unk
                      order by i.position) from finance_purchase_items i where i.batch_id = b.id), '[]'::jsonb) as items
               from finance_purchase_batches b
              order by b.date desc limit 50`.catch(() => []),
-        sql`select date, bags, supplier, currency, total_amount as "totalAmount", reported_by as "reportedBy"
+        // filed_by_dept tells the two copies of one purchase apart: 'asset' rows
+        // carry the counts by size and colour, 'finance' rows only the receipt.
+        sql`select date, bags, supplier, dn_no as "dnNo", currency,
+                   total_amount as "totalAmount", reported_by as "reportedBy",
+                   filed_by_dept as "filedByDept"
               from pp_bag_purchases order by date desc limit 30`.catch(() => []),
         sql`select company, phone, description, status, registered_by as "registeredBy",
                    created_at as "createdAt", resolved_at as "resolvedAt",

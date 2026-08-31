@@ -15,8 +15,7 @@ import {
 import RangeSelector from "@/components/RangeSelector";
 import { RANGES, rangeWindow, type Bucket, type RangeKey } from "@/lib/ranges";
 import {
-  BAG_SIZES,
-  BAG_STOCK,
+  BAG_KINDS,
   PRODUCTION_PRODUCTS,
   bagLabel,
   orderProducts,
@@ -66,6 +65,23 @@ const fmtDate = (d: string) => new Date(d).toLocaleDateString("en-GB", { day: "n
 const num = (n?: number) => (n ? (Math.round(n * 100) / 100).toLocaleString() : "");
 const tons = (n: number) => `${(Math.round(n * 100) / 100).toLocaleString()} t`;
 const sum = (m?: Record<string, number>) => Object.values(m || {}).reduce((a, b) => a + Number(b || 0), 0);
+
+/** Calendar day of a timestamp, used to line a report up with its ops row. */
+const dayKey = (iso: string) => new Date(iso).toISOString().slice(0, 10);
+
+/**
+ * The same day, from the ops row's own "D/M/YYYY" label.
+ *
+ * Both tables are written from one chosen date at UTC midnight, so the timestamps
+ * already agree — but the label is the ops row's primary key and cannot drift,
+ * so it is indexed as well. Two keys for one row costs nothing and means a row
+ * whose timestamp was built some other way still finds its production report.
+ */
+function labelDayKey(label?: string): string | null {
+  const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(label || "");
+  if (!m) return null;
+  return `${m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`;
+}
 
 /** Bucket key for a date, at the granularity the chosen range declares. */
 function bucketKey(iso: string, bucket: Bucket): string {
@@ -119,7 +135,10 @@ export default function ProductionPanels() {
     const to = win.end.getTime();
     return (ops ?? [])
       .filter((r) => {
-        if (!r.stock && !r.bags) return false;
+        // Stock only. A row carrying nothing but a bag count is not a stock
+        // count, and letting one in would both print a blank line and — as the
+        // latest row of its bucket — pull the closing level down to zero.
+        if (!r.stock || Object.keys(r.stock).length === 0) return false;
         const t = new Date(r.date).getTime();
         return t >= from && t < to;
       })
@@ -160,7 +179,30 @@ export default function ProductionPanels() {
   const stockCols = orderProducts(
     Array.from(new Set([...PRODUCTION_PRODUCTS, ...stockRows.flatMap((r) => Object.keys(r.stock || {}))]))
   );
-  const bagCols = BAG_SIZES.flatMap((size) => BAG_STOCK[size].map((colour) => ({ size, colour })));
+
+  /* The day's remaining empty bags, keyed by calendar day.
+
+     The counts are collected by the production flow but stored on the day's ops
+     row, which is where the pasted operations report has always written them.
+     They are joined back on here rather than copied onto production_reports:
+     one number per day per colour, with a single writer, cannot drift out of
+     agreement with itself. Two reports filed on the same day therefore show the
+     same closing count, which is correct — it is a level, not a per-report
+     figure. */
+  const bagsByDay = useMemo(() => {
+    const map = new Map<string, { at: number; bags: OpsRow["bags"] }>();
+    for (const r of ops ?? []) {
+      if (!r.bags) continue;
+      const at = new Date(r.date).getTime();
+      for (const day of [dayKey(r.date), labelDayKey(r.dateLabel)]) {
+        if (!day) continue;
+        const prev = map.get(day);
+        // Latest count for the day wins: a re-count supersedes the earlier one.
+        if (!prev || at > prev.at) map.set(day, { at, bags: r.bags });
+      }
+    }
+    return map;
+  }, [ops]);
 
   const colTotal = (c: string) => prodRows.reduce((a, r) => a + (r.products?.[c] || 0), 0);
   const grand = prodRows.reduce((a, r) => a + sum(r.products), 0);
@@ -201,33 +243,64 @@ export default function ProductionPanels() {
           </BarChart>
         </Chart>
 
-        <ScrollTable minWidth={560} empty={prodRows.length === 0} emptyLabel="No production reports in this period.">
+        <ScrollTable minWidth={900} empty={prodRows.length === 0} emptyLabel="No production reports in this period.">
           <thead className="sticky top-0 z-10 bg-clay-50 text-[10px] uppercase tracking-wide text-stone-500 shadow-[0_1px_0_#f3e3dd]">
             <tr>
-              <th className="p-2 text-left font-bold">Date</th>
-              <th className="p-2 text-left font-bold">FGR No</th>
+              <th className="p-2 text-left font-bold" rowSpan={2}>
+                Date
+              </th>
+              <th className="p-2 text-left font-bold" rowSpan={2}>
+                FGR No
+              </th>
+              <th className="p-2 font-bold" colSpan={prodCols.length + 1}>
+                Produced (tonnes)
+              </th>
+              <th className="border-l border-clay-100 p-2 font-bold" colSpan={BAG_KINDS.length}>
+                Remaining bags (pieces)
+              </th>
+            </tr>
+            <tr>
               {prodCols.map((c) => (
                 <th key={c} className="p-2 font-bold">
                   {productLabel(c)}
                 </th>
               ))}
               <th className="p-2 font-bold">Total</th>
+              {BAG_KINDS.map(({ size, colour }) => (
+                <th key={`${size}-${colour}`} className="border-l border-clay-100 p-2 font-bold">
+                  {bagLabel(size, colour)}
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody>
-            {prodRows.map((r) => (
-              <tr key={r._id} className="border-t border-clay-50">
-                <td className="p-2 text-left font-semibold text-stone-800">{fmtDate(r.date)}</td>
-                <td className="p-2 text-left text-stone-500">{r.fgrNo || "—"}</td>
-                {prodCols.map((c) => (
-                  <td key={c} className="p-2 tabular-nums text-stone-700">
-                    {num(r.products?.[c])}
-                  </td>
-                ))}
-                <td className="p-2 font-bold tabular-nums text-clay-900">{num(sum(r.products))}</td>
-              </tr>
-            ))}
+            {prodRows.map((r) => {
+              const bags = bagsByDay.get(dayKey(r.date))?.bags;
+              return (
+                <tr key={r._id} className="border-t border-clay-50">
+                  <td className="p-2 text-left font-semibold text-stone-800">{fmtDate(r.date)}</td>
+                  <td className="p-2 text-left text-stone-500">{r.fgrNo || "—"}</td>
+                  {prodCols.map((c) => (
+                    <td key={c} className="p-2 tabular-nums text-stone-700">
+                      {num(r.products?.[c])}
+                    </td>
+                  ))}
+                  <td className="p-2 font-bold tabular-nums text-clay-900">{num(sum(r.products))}</td>
+                  {BAG_KINDS.map(({ size, colour }) => (
+                    <td
+                      key={`${size}-${colour}`}
+                      className="border-l border-clay-50 p-2 tabular-nums text-stone-700"
+                    >
+                      {num(bags?.[size]?.[colour])}
+                    </td>
+                  ))}
+                </tr>
+              );
+            })}
           </tbody>
+          {/* Tonnage foots; the bag columns deliberately do not. Each is the
+              count left at the close of that day, so adding a month of them
+              down the page would produce a number that means nothing. */}
           <tfoot className="sticky bottom-0 bg-clay-50 shadow-[0_-1px_0_#f3e3dd]">
             <tr className="font-bold">
               <td className="p-2 text-left" colSpan={2}>
@@ -239,6 +312,9 @@ export default function ProductionPanels() {
                 </td>
               ))}
               <td className="p-2 tabular-nums text-clay-900">{num(grand)}</td>
+              <td colSpan={BAG_KINDS.length} className="border-l border-clay-100 p-2 text-[10px] font-normal text-stone-400">
+                closing count
+              </td>
             </tr>
           </tfoot>
         </ScrollTable>
@@ -272,24 +348,19 @@ export default function ProductionPanels() {
           </LineChart>
         </Chart>
         <p className="px-1 text-[11px] leading-snug text-stone-400">
-          Total finished product on hand. Empty-bag counts are pieces rather than tonnes, so they stay in the
-          table below instead of sharing this axis.
+          Total finished product on hand, in tonnes. The remaining empty-bag counts are pieces rather than
+          tonnes, so they sit with the daily production report above instead of sharing this axis.
         </p>
 
         {/* No column totals here: each row is a closing snapshot, so summing
             them down the page would produce a number that means nothing. */}
-        <ScrollTable minWidth={900} empty={stockRows.length === 0} emptyLabel="No stock counts in this period.">
+        <ScrollTable minWidth={700} empty={stockRows.length === 0} emptyLabel="No stock counts in this period.">
           <thead className="sticky top-0 z-10 bg-clay-50 text-[10px] uppercase tracking-wide text-stone-500 shadow-[0_1px_0_#f3e3dd]">
             <tr>
               <th className="p-2 text-left font-bold">Date</th>
               {stockCols.map((c) => (
                 <th key={c} className="p-2 font-bold">
                   {productLabel(c)}
-                </th>
-              ))}
-              {bagCols.map(({ size, colour }) => (
-                <th key={`${size}-${colour}`} className="border-l border-clay-100 p-2 font-bold">
-                  {bagLabel(size, colour)}
                 </th>
               ))}
             </tr>
@@ -301,14 +372,6 @@ export default function ProductionPanels() {
                 {stockCols.map((c) => (
                   <td key={c} className="p-2 tabular-nums text-stone-700">
                     {num(r.stock?.[c])}
-                  </td>
-                ))}
-                {bagCols.map(({ size, colour }) => (
-                  <td
-                    key={`${size}-${colour}`}
-                    className="border-l border-clay-50 p-2 tabular-nums text-stone-700"
-                  >
-                    {num(r.bags?.[size]?.[colour])}
                   </td>
                 ))}
               </tr>

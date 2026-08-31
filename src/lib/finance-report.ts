@@ -4,8 +4,10 @@ import {
   BAG_SIZE_LABEL,
   FINANCE_RAW_MATERIALS,
   PRODUCT_ORDER,
+  bagSizeTotals,
   productLabel,
   rollUpMaterials,
+  type BagCounts,
 } from "@/lib/products";
 
 /**
@@ -150,7 +152,10 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
     sql<{ m: Record<string, number> }[]>`
       select materials as m from raw_material_receipts where date >= ${start} and date < ${end}
     `.catch(() => []),
-    sql<{ m: Record<string, number> }[]>`
+    // Typed as BagCounts, not Record<string, number>: an asset-filed row nests a
+    // colour map under each size, and pretending otherwise is what would let the
+    // arithmetic below quietly produce NaN.
+    sql<{ m: BagCounts }[]>`
       select bags as m from pp_bag_purchases where date >= ${start} and date < ${end}
     `.catch(() => []),
     sql<{ m: Record<string, number>; b: Record<string, number> }[]>`
@@ -165,7 +170,17 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
   const producedMap = sumMaps(produced);
   const soldMap = sumMaps(delivered);
   const receivedMap = rollUpMaterials(sumMaps(received));
-  const bagsBoughtMap = sumMaps(bagsBought);
+  // Bag purchases arrive in two shapes: asset management counts them by size AND
+  // colour, finance files a receipt with no counts at all, and rows from before
+  // the colour split carry a plain total per size. bagSizeTotals flattens all
+  // three, so a nested map cannot silently read as NaN and lose a month of
+  // deliveries. Colours are summed away here because the report has one line per
+  // size — the breakdown is on the asset tab, where it was counted.
+  const bagsBoughtMap: Record<string, number> = { kg25: 0, kg40: 0 };
+  for (const row of bagsBought) {
+    const totals = bagSizeTotals(row.m as BagCounts);
+    for (const size of BAG_SIZES) bagsBoughtMap[size] += totals[size];
+  }
   const issuedMaterials = rollUpMaterials(sumMaps(issued.map((r) => ({ m: r.m }))));
   const issuedBags = sumMaps(issued.map((r) => ({ m: r.b })));
 

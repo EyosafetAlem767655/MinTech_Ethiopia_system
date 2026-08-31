@@ -378,14 +378,23 @@ export const SUBMISSIONS: Record<SubmissionCollection, SubmissionSpec> = {
     icon: "🛍",
     dateColumn: "date",
     authorColumn: "reported_by",
-    searchColumns: ["supplier", "reported_by"],
+    searchColumns: ["supplier", "dn_no", "reported_by"],
+    // filed_by_dept is shown because the two copies of a purchase are not
+    // interchangeable: the asset one carries the counts the monthly report sums,
+    // the finance one carries only the receipt. Deleting the wrong one loses a
+    // month's bag intake.
     displayFields: [
+      TEXT("filed_by_dept", "Filed by"),
       TEXT("supplier", "Supplier"),
+      TEXT("dn_no", "D.N No."),
       TEXT("currency", "Currency"),
       NUM("total_amount", "Total"),
       TEXT("reported_by", "By"),
     ],
-    editableKeys: ["supplier", "total_amount"],
+    // The bag counts live in the `bags` jsonb and are corrected by re-filing
+    // through the bot, the same rule the base balance follows. filed_by_dept is
+    // not editable either: it says which flow wrote the row, not an opinion.
+    editableKeys: ["supplier", "dn_no", "total_amount"],
     photosColumn: "photo_file_ids",
   },
   base_balance: {

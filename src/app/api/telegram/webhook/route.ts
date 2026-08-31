@@ -7,6 +7,7 @@ import {
   analyseToolPhoto,
   checkReceiptQRCode,
   classifyIngestion,
+  extractBagPurchaseGemini,
   extractReceiptGemini,
   verifyRequestLegitimacy,
   type GeminiReceipt,
@@ -14,6 +15,7 @@ import {
 } from "@/lib/llm";
 import { buildCalendar, parseCalendarCallback, type CalendarSelection } from "@/lib/calendar";
 import {
+  applyBagExtraction,
   assetPreview,
   findStep,
   firstStep,
@@ -28,6 +30,7 @@ import {
   stepsFor,
   type AssetFlowKind,
   type AssetFlowState,
+  type BagExtractionRecord,
 } from "@/lib/asset-flows";
 import { parseProductionPaste } from "@/lib/production-paste";
 import { parseFinancePaste } from "@/lib/finance-paste";
@@ -1016,6 +1019,7 @@ const ASSET_FLOW_BY_CAP: Record<string, AssetFlowKind | undefined> = {
   production_report: "production_daily",
   base_balance: "base_balance",
   material_issue: "material_issue",
+  pp_bag_report: "pp_bag_report",
   tool_purchase: "tool_purchase",
   pp_bag_purchase: "pp_bag_purchase",
   price_list: "price_list",
@@ -1033,6 +1037,9 @@ const PHOTO_KIND_BY_FLOW: Partial<Record<AssetFlowKind, string>> = {
   pp_bag_damage: PP_BAG_PHOTO_KIND,
   tool_purchase: FINANCE_RECEIPT_KIND,
   pp_bag_purchase: FINANCE_RECEIPT_KIND,
+  // The asset copy of a bag purchase carries the same paperwork, and it is the
+  // evidence behind the quantities as well as the money.
+  pp_bag_report: FINANCE_RECEIPT_KIND,
 };
 
 const assetReviewKeyboard = {
@@ -1148,6 +1155,91 @@ async function askAssetStep(chatId: string, state: AssetFlowState): Promise<void
   }
   const hint = step.skippable ? '\n<i>ከሌለ "-" ይላኩ።</i>' : "";
   await sendMessage(chatId, step.prompt + hint, { reply_markup: CHANGE_CANCEL_KEYBOARD });
+}
+
+/**
+ * Read a PP bag purchase off its photos, then resume the flow.
+ *
+ * This is the one place an AI call sits between a message and its reply, so it is
+ * fenced on three sides:
+ *
+ *  - `extractBagPurchaseGemini` is bounded by RECEIPT_BUDGET_MS inside
+ *    `geminiGenerate`, the same ceiling `analyseToolPhoto` runs under a few lines
+ *    above. The webhook still answers well inside the function limit.
+ *  - Every failure — no bytes, a dead provider, unparseable JSON, an exception —
+ *    lands in the same place: the flow carries on and asks every question by
+ *    hand. A slow provider can cost the reporter time, never their report.
+ *  - Nothing is saved here. What the model read becomes a draft the reporter
+ *    corrects on the review card, marked so an invented figure is visible.
+ */
+async function extractBagPurchaseIntoDraft(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  session: any,
+  chatId: string,
+  state: AssetFlowState
+): Promise<void> {
+  const fileIds = (state.photoFileIds || []).slice(0, MAX_FLOW_PHOTOS);
+  await sendMessage(chatId, "🔎 ፎቶዎቹን እያነበብኩ ነው…");
+
+  let record: BagExtractionRecord = {
+    checked: false,
+    confidence: 0,
+    notes: "",
+    unmatched: [],
+    filled: [],
+    error: "no photo could be read back",
+  };
+
+  try {
+    const images: { base64: string; contentType: string }[] = [];
+    for (const id of fileIds) {
+      const bytes = await getPhotoBase64(id).catch(() => null);
+      if (bytes) images.push(bytes);
+    }
+    if (images.length > 0) {
+      const read = await extractBagPurchaseGemini(images);
+      if (read.ok) {
+        const { filled } = applyBagExtraction(state.draft, read.data);
+        record = {
+          checked: true,
+          confidence: read.data.confidence,
+          notes: read.data.notes,
+          unmatched: read.data.unmatched,
+          filled,
+        };
+      } else {
+        record = { ...record, error: read.error };
+      }
+    }
+  } catch (e) {
+    console.error("extractBagPurchaseIntoDraft failed:", e);
+    record = { ...record, error: e instanceof Error ? e.message : String(e) };
+  }
+
+  state.extraction = record;
+  // Resume at the first field the model missed rather than re-asking what it
+  // already answered — the same resume the paste branch performs.
+  state.step = firstUnanswered(state.kind, state.draft);
+  session.assetFlow = { ...state };
+  await persist(session);
+
+  if (record.checked) {
+    await sendMessage(
+      chatId,
+      `✅ ${record.filled.length} መስክ ከፎቶው ተነብቧል (እርግጠኝነት ${record.confidence}%)።` +
+        (record.unmatched.length > 0
+          ? `\n⚠️ እነዚህ መስመሮች አልታወቁም፦\n${record.unmatched
+              .slice(0, 5)
+              .map((u) => `• ${escapeHtml(u)}`)
+              .join("\n")}`
+          : "") +
+        `\n<i>የቀሩት በጥያቄ ይጠየቃሉ። በመጨረሻ ሁሉንም አርመው ያረጋግጣሉ።</i>`
+    );
+  } else {
+    await sendMessage(chatId, "ℹ️ ፎቶውን ማንበብ አልተቻለም። ብዛቱን በእጅ እናስገባለን።");
+  }
+
+  await askAssetStep(chatId, state);
 }
 
 /** Advance past the step just answered and ask the next one. */
@@ -1561,7 +1653,13 @@ export async function POST(req: NextRequest) {
           const ppReason = String(state.draft.reason || "");
           const ppQty = Math.round(Number(state.draft.quantity) || 0);
           // Purchase receipts are read after the reply too, for the same reason.
-          const receiptFlow = state.kind === "tool_purchase" || state.kind === "pp_bag_purchase";
+          // The asset bag report is included: its photos were already read for
+          // the quantities, but the typed total still has to be checked against
+          // the printed one, and that check is not worth blocking a reply on.
+          const receiptFlow =
+            state.kind === "tool_purchase" ||
+            state.kind === "pp_bag_purchase" ||
+            state.kind === "pp_bag_report";
           const receiptPhotos = receiptFlow ? state.photoFileIds || [] : [];
           const receiptTotal = Number(state.draft.totalAmount) || 0;
           const receiptCurrency = String(state.draft.currency || "ETB");
@@ -1676,6 +1774,12 @@ export async function POST(req: NextRequest) {
         if (normText === NORM_PHOTOS_DONE) {
           if (collected.length === 0) {
             await sendMessage(chatId, "📷 ቢያንስ አንድ ፎቶ ያስፈልጋል።", { reply_markup: photosKeyboard });
+            return NextResponse.json({ ok: true });
+          }
+          // The one flow where the paperwork answers the questions: read it now,
+          // then resume at whatever the model could not fill in.
+          if (state.kind === "pp_bag_report") {
+            await extractBagPurchaseIntoDraft(session, chatId, state);
             return NextResponse.json({ ok: true });
           }
           await advanceAsset(session, chatId, state);

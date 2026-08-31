@@ -1,5 +1,6 @@
 import sql from "@/lib/sql";
 import {
+  BAG_KINDS,
   BAG_SIZES,
   BAG_SIZE_LABEL,
   BAG_STOCK,
@@ -25,7 +26,7 @@ import {
   priceListTemplate,
 } from "@/lib/finance-paste";
 import { monthLabel, nextMonth, priceListItems } from "@/lib/finance-report";
-import type { ToolPhotoCheck } from "@/lib/llm";
+import type { BagPurchaseRead, ToolPhotoCheck } from "@/lib/llm";
 
 /**
  * Guided step-by-step data entry for the reports filed from the bot — the three
@@ -52,6 +53,8 @@ export type AssetFlowKind =
   // Asset management, feeding the monthly finance report.
   | "base_balance"
   | "material_issue"
+  // The bags themselves: asset counts what arrived, finance files the receipt.
+  | "pp_bag_report"
   // Finance.
   | "tool_purchase"
   | "pp_bag_purchase"
@@ -69,6 +72,26 @@ export interface AssetFlowState {
   photoFileIds?: string[];
   /** Gemini's verdict on that photo. */
   check?: ToolPhotoCheck;
+  /** What the AI read off a PP bag purchase's paperwork, kept for the audit trail. */
+  extraction?: BagExtractionRecord;
+}
+
+/**
+ * The record of an extraction attempt on a PP bag purchase.
+ *
+ * `checked: false` means the read did not happen — the model was unreachable, or
+ * the photos could not be loaded back. It is never a statement about the
+ * paperwork, the same distinction every other AI check in this system draws.
+ */
+export interface BagExtractionRecord {
+  checked: boolean;
+  confidence: number;
+  notes: string;
+  /** Lines the model could not map to one of the six kinds, as printed. */
+  unmatched: string[];
+  /** Draft keys the model filled — marked on the review card. */
+  filled: string[];
+  error?: string;
 }
 
 /** Max photos a multi-photo step will accept. */
@@ -228,7 +251,7 @@ const PRODUCTION_STEPS: AssetStep[] = [
   ...BAG_SIZES.flatMap((size) =>
     BAG_STOCK[size].map<AssetStep>((colour) => ({
       id: bagKey(size, colour),
-      prompt: `🧺 ክምችት — የ<b>${bagLabel(size, colour)}</b> ከረጢት ብዛት (ቁጥር)። ከሌለ 0 ይፃፉ።`,
+      prompt: `🧺 ቀሪ — የ<b>${bagLabel(size, colour)}</b> ከረጢት ብዛት (ቁጥር)። ከሌለ 0 ይፃፉ።`,
       type: "number",
     }))
   ),
@@ -376,15 +399,61 @@ const TOOL_PURCHASE_STEPS: AssetStep[] = [
   },
 ];
 
-/* ───────────────────────── PP bag purchase (finance) ──────────────────────── */
+/* ─────────────────── PP bag purchase report (asset management) ────────────── */
 
-const PP_BAG_PURCHASE_STEPS: AssetStep[] = [
-  { id: "date", prompt: "📅 የግዢውን ቀን ይምረጡ።", type: "date" },
-  ...BAG_SIZES.map<AssetStep>((size) => ({
-    id: bagFinanceKey(size),
-    prompt: `🧺 የተገዛው የ<b>${BAG_SIZE_LABEL[size]} PP</b> ከረጢት ብዛት (ቁጥር)። ከሌለ 0 ይፃፉ።`,
+/**
+ * What PP bags arrived, counted by the people who took the delivery.
+ *
+ * The photos come SECOND, before any count is asked for, because the whole point
+ * is that the paperwork answers most of the questions. When the reporter presses
+ * "done", the webhook reads the images and fills whatever it can; the flow then
+ * resumes at the first field the model missed, exactly as a half-filled paste
+ * template does.
+ *
+ * Nothing here depends on the extraction succeeding. If the model is unreachable
+ * or the photos are unreadable, every step below is simply asked by hand — a slow
+ * provider must never be able to strand someone mid-report.
+ */
+const PP_BAG_REPORT_STEPS: AssetStep[] = [
+  { id: "date", prompt: "📅 ከረጢቱ የገባበትን ቀን ይምረጡ።", type: "date" },
+  {
+    id: "photos",
+    prompt:
+      `🧾 የደረሰኙን/የቅጹን ፎቶ(ዎች) ይላኩ — እስከ ${MAX_FLOW_PHOTOS} ፎቶ። ከጨረሱ በኋላ "✅ ጨርሻለሁ" ይጫኑ።\n` +
+      `<i>ፎቶዎቹ ተነብበው ብዛቱን በራሱ ይሞላል — እርስዎ አርመው ያረጋግጣሉ።</i>`,
+    type: "photos",
+  },
+  ...BAG_KINDS.map<AssetStep>(({ size, colour }) => ({
+    id: bagKey(size, colour),
+    prompt: `🧺 የገባው የ<b>${bagLabel(size, colour)}</b> ከረጢት ብዛት (ቁጥር)። ከሌለ 0 ይፃፉ።`,
     type: "number",
   })),
+  { id: "supplier", prompt: "🏢 አቅራቢውን (Supplier) ይፃፉ።", type: "text", skippable: true },
+  { id: "dnNo", prompt: "📄 የመላኪያ ደረሰኝ/ቅጽ ቁጥር (D.N No.) ይፃፉ።", type: "text", skippable: true },
+  {
+    id: "currency",
+    prompt: "💱 በየትኛው ገንዘብ ተከፍሏል?",
+    type: "choice",
+    choices: [
+      { label: "🇪🇹 ብር (ETB)", value: "ETB" },
+      { label: "💵 ዶላር (USD)", value: "USD" },
+    ],
+  },
+  { id: "totalAmount", prompt: "💰 የጠቅላላውን ግዢ ዋጋ ይፃፉ። ካልታወቀ 0 ይፃፉ።", type: "number" },
+];
+
+/* ───────────────────────── PP bag purchase (finance) ──────────────────────── */
+
+/**
+ * Finance files the receipt, not the count.
+ *
+ * The quantities come from asset management, who physically take the delivery and
+ * report it through `pp_bag_report`. Asking finance for them as well would put two
+ * numbers for one delivery into the column the monthly report sums, with nothing
+ * to say which of them is the real one.
+ */
+const PP_BAG_PURCHASE_STEPS: AssetStep[] = [
+  { id: "date", prompt: "📅 የግዢውን ቀን ይምረጡ።", type: "date" },
   { id: "supplier", prompt: "🏢 አቅራቢውን (Supplier) ይፃፉ።", type: "text", skippable: true },
   {
     id: "currency",
@@ -478,6 +547,7 @@ const STEPS: Record<AssetFlowKind, AssetStep[]> = {
   production_daily: PRODUCTION_STEPS,
   base_balance: BASE_BALANCE_STEPS,
   material_issue: MATERIAL_ISSUE_STEPS,
+  pp_bag_report: PP_BAG_REPORT_STEPS,
   tool_purchase: TOOL_PURCHASE_STEPS,
   pp_bag_purchase: PP_BAG_PURCHASE_STEPS,
   price_list: PRICE_LIST_STEPS,
@@ -492,8 +562,9 @@ export const FLOW_TITLE: Record<AssetFlowKind, string> = {
   production_daily: "🏭 የቀኑ የምርት ሪፖርት",
   base_balance: "📊 የወሩ የመነሻ ሚዛን",
   material_issue: "🔥 የቀኑ ጥሬ ዕቃ ፍጆታ",
+  pp_bag_report: "🧺 የPP ከረጢት ግዢ ሪፖርት",
   tool_purchase: "🧾 የመሣሪያ ግዢ ሪፖርት",
-  pp_bag_purchase: "🛍 የPP ከረጢት ግዢ",
+  pp_bag_purchase: "🛍 የPP ከረጢት ግዢ ደረሰኝ",
   price_list: "💲 የወሩ የዋጋ ዝርዝር",
   wht_holder: "📄 WHT ደረሰኝ ያዢ",
 };
@@ -509,12 +580,19 @@ export function pasteTemplate(kind: AssetFlowKind): string {
 /**
  * The first step still unanswered, or "review".
  *
- * Used after a paste to resume at whatever was left blank instead of marching
- * back through questions the template already answered.
+ * Used after a paste, or after the photos of a bag purchase have been read, to
+ * resume at whatever was left blank instead of marching back through questions
+ * already answered.
+ *
+ * Photo steps are skipped because they are not answered in the draft at all —
+ * their result lives in `photoFileIds`, so looking for a draft key would send the
+ * flow back to the camera it just came from, forever. Choice steps ARE included:
+ * an unanswered currency has to be asked, not quietly defaulted to birr because
+ * the model failed to read it off the paper.
  */
 export function firstUnanswered(kind: AssetFlowKind, draft: Record<string, string | number>): string {
   for (const s of stepsFor(kind, draft)) {
-    if (s.type === "paste" || s.type === "choice") continue;
+    if (s.type === "paste" || s.type === "photo" || s.type === "photos") continue;
     const v = draft[s.id];
     if (v === undefined || v === "") return s.id;
   }
@@ -605,6 +683,43 @@ function jsonMap(draft: Record<string, string | number>, prefix: string, keys: r
   return out;
 }
 
+/* ─────────────────────── PP bag extraction → draft ────────────────────────── */
+
+/**
+ * Merge what the model read off the paperwork into the draft.
+ *
+ * Only fields the reporter has not already answered are touched, and only values
+ * actually present: a colour the model returned nothing for stays unanswered so
+ * the flow asks about it, rather than being recorded as a confident zero. That
+ * distinction is the safety property here — a bag kind that arrived but was
+ * misread has to become a question, never a 0 nobody looked at.
+ *
+ * Pure, so the merge is testable without a webhook or a provider.
+ */
+export function applyBagExtraction(
+  draft: Record<string, string | number>,
+  read: BagPurchaseRead
+): { filled: string[] } {
+  const filled: string[] = [];
+  const put = (key: string, value: string | number) => {
+    const existing = draft[key];
+    if (existing !== undefined && existing !== "") return;
+    draft[key] = value;
+    filled.push(key);
+  };
+
+  for (const { size, colour } of BAG_KINDS) {
+    const n = Number(read.bags?.[size]?.[colour]) || 0;
+    if (n > 0) put(bagKey(size, colour), Math.round(n));
+  }
+  if (read.supplier) put("supplier", read.supplier);
+  if (read.dnNo) put("dnNo", read.dnNo);
+  if (read.currency) put("currency", read.currency);
+  if (read.total > 0) put("totalAmount", read.total);
+
+  return { filled };
+}
+
 /* ──────────────────────────────── Previews ────────────────────────────────── */
 
 const esc = (s: unknown) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -661,7 +776,7 @@ export function assetPreview(state: AssetFlowState): string {
       `🏭 <b>የቀኑ ምርት (ቶን)</b>\n${prod}\n` +
       `  ─────────\n  <b>Total: ${qty(productionTotal(d))}</b>\n\n` +
       `📦 <b>ክምችት (ቶን)</b>\n${stock}\n\n` +
-      `🧺 <b>የከረጢት ክምችት (ብዛት)</b>\n${bags}\n`
+      `🧺 <b>ቀሪ ከረጢት (ብዛት)</b>\n${bags}\n`
     );
   }
 
@@ -723,18 +838,50 @@ export function assetPreview(state: AssetFlowState): string {
       .join("\n");
   }
 
-  if (state.kind === "pp_bag_purchase") {
-    const bags = BAG_SIZES.map((sz) => `${BAG_SIZE_LABEL[sz]} PP: <b>${qty(Number(d[bagFinanceKey(sz)]) || 0)}</b>`);
+  if (state.kind === "pp_bag_report") {
+    const ex = state.extraction;
+    const read = new Set(ex?.filled || []);
+    // Values the model supplied carry a marker. Everything on this card is about
+    // to be saved, and a figure nobody typed has to be visibly distinguishable
+    // from one somebody did — that is the whole reason the card exists.
+    const bags = BAG_KINDS.map(
+      ({ size, colour }) =>
+        `${bagLabel(size, colour)}: <b>${qty(Number(d[bagKey(size, colour)]) || 0)}</b>` +
+        (read.has(bagKey(size, colour)) ? " 🤖" : "")
+    );
+    const total = BAG_KINDS.reduce((a, { size, colour }) => a + (Number(d[bagKey(size, colour)]) || 0), 0);
     const photos = state.photoFileIds?.length || 0;
+    const mark = (key: string) => (read.has(key) ? " 🤖" : "");
     return [
-      `🛍 <b>የPP ከረጢት ግዢ</b>`,
+      `🧺 <b>የPP ከረጢት ግዢ ሪፖርት</b>`,
       `📅 ${esc(d.date)}`,
       "",
       ...bags,
+      `  ─────────`,
+      `  <b>ጠቅላላ: ${qty(total)} ከረጢት</b>`,
+      "",
+      `🏢 አቅራቢ: <b>${esc(d.supplier) || "—"}</b>${mark("supplier")}`,
+      `📄 D.N No.: <b>${esc(d.dnNo) || "—"}</b>${mark("dnNo")}`,
+      `💰 ጠቅላላ ዋጋ: <b>${money(Number(d.totalAmount) || 0)} ${esc(d.currency) || "ETB"}</b>${mark("totalAmount")}`,
+      `🧾 ደረሰኝ: <b>${photos}</b> ፎቶ`,
+      ex?.checked ? `<i>🤖 ምልክት ያለው ከፎቶው የተነበበ ነው (እርግጠኝነት ${ex.confidence}%)። ስህተት ካለ ያስተካክሉ።</i>` : "",
+      ex && !ex.checked ? "<i>ፎቶውን ማንበብ አልተቻለም — ሁሉንም በእጅ አስገብተዋል።</i>" : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  if (state.kind === "pp_bag_purchase") {
+    const photos = state.photoFileIds?.length || 0;
+    return [
+      `🛍 <b>የPP ከረጢት ግዢ ደረሰኝ</b>`,
+      `📅 ${esc(d.date)}`,
       "",
       `🏢 አቅራቢ: <b>${esc(d.supplier) || "—"}</b>`,
       `💰 ጠቅላላ: <b>${money(Number(d.totalAmount) || 0)} ${esc(d.currency)}</b>`,
       `🧾 ደረሰኝ: <b>${photos}</b> ፎቶ`,
+      "",
+      `<i>ብዛቱ የሚመዘገበው በንብረት ክፍል (Asset Management) ሪፖርት ነው።</i>`,
     ].join("\n");
   }
 
@@ -962,15 +1109,36 @@ export async function saveAssetReport(
     return { id: batch.id, table: "finance_purchase_batches" };
   }
 
+  if (state.kind === "pp_bag_report") {
+    // The asset copy: the counts, by size and colour, in the same nested shape
+    // daily_ops_reports.bags uses. This is the row the monthly finance report
+    // reads for its bag "Received" line.
+    const [row] = await sql<{ id: string }[]>`
+      insert into pp_bag_purchases (date, bags, supplier, dn_no, currency, total_amount,
+                                    reported_by, photo_file_ids, extraction, filed_by_dept, source)
+      values (${reportDate(d.date)}, ${sql.json(bagMap(d))},
+              ${String(d.supplier || "") || null}, ${String(d.dnNo || "") || null},
+              ${d.currency === "USD" ? "USD" : "ETB"},
+              ${Number(d.totalAmount) || null}, ${reportedBy},
+              ${state.photoFileIds || []},
+              ${state.extraction ? sql.json({ ...state.extraction }) : null},
+              'asset', 'telegram')
+      returning id`;
+    return { id: row.id, table: "pp_bag_purchases" };
+  }
+
   if (state.kind === "pp_bag_purchase") {
+    // The finance copy: the receipt and the money, no counts. An empty bags map
+    // contributes nothing to the month's received quantity, so the same delivery
+    // filed by both departments cannot double it.
     const [row] = await sql<{ id: string }[]>`
       insert into pp_bag_purchases (date, bags, supplier, currency, total_amount,
-                                    reported_by, photo_file_ids, source)
-      values (${reportDate(d.date)}, ${sql.json(jsonMap(d, BAG_PREFIX, BAG_SIZES))},
+                                    reported_by, photo_file_ids, filed_by_dept, source)
+      values (${reportDate(d.date)}, ${sql.json({})},
               ${String(d.supplier || "") || null},
               ${d.currency === "USD" ? "USD" : "ETB"},
               ${Number(d.totalAmount) || null}, ${reportedBy},
-              ${state.photoFileIds || []}, 'telegram')
+              ${state.photoFileIds || []}, 'finance', 'telegram')
       returning id`;
     return { id: row.id, table: "pp_bag_purchases" };
   }

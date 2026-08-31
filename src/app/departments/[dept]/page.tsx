@@ -13,6 +13,7 @@ import ProductionPanels from "@/components/panels/ProductionPanels";
 import FinancePanels from "@/components/panels/FinancePanels";
 import ToolRequestsPanel from "@/components/panels/ToolRequestsPanel";
 import PpBagDamagePanel from "@/components/panels/PpBagDamagePanel";
+import PpBagPurchasePanel from "@/components/panels/PpBagPurchasePanel";
 import SalesReceiptsPanel from "@/components/panels/SalesReceiptsPanel";
 
 /**
@@ -32,6 +33,9 @@ const PANELS: Record<DepartmentKey, ComponentType[]> = {
   asset_management: [
     RawMaterialReceivedPanel,
     DeliveryReportPanel,
+    // What bags came in, then what was spoiled — the two halves of the same
+    // stock, kept adjacent so one is read in the light of the other.
+    PpBagPurchasePanel,
     PpBagDamagePanel,
     ToolRequestsPanel,
     BagControlPanel,
