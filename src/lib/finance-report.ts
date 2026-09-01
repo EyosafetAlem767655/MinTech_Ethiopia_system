@@ -44,9 +44,12 @@ export function nextMonth(month: string): string {
   return m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, "0")}`;
 }
 
+/** How many days before month end the base-balance reminder starts. */
+export const BASE_BALANCE_LEAD_DAYS = 3;
+
 /**
- * True when `now` is the day the base-balance reminder goes out: three days
- * before the month ends.
+ * True on the FIRST day the base-balance reminder goes out: three days before
+ * the month ends.
  *
  * A literal 29th was the original request, but February does not have one in
  * most years, and in a leap year the 29th is the last day — no lead time at all.
@@ -57,7 +60,31 @@ export function isBaseBalanceReminderDay(now: Date = new Date()): boolean {
   const y = eat.getUTCFullYear();
   const m = eat.getUTCMonth();
   const daysInMonth = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
-  return eat.getUTCDate() === daysInMonth - 3;
+  return eat.getUTCDate() === daysInMonth - BASE_BALANCE_LEAD_DAYS;
+}
+
+/**
+ * True on every day of the closing window: from three days before month end
+ * through the last day of the month.
+ *
+ * This is what the cron asks, not `isBaseBalanceReminderDay`. A single-day
+ * reminder has exactly one chance to land, and the count it asks for is only
+ * collected once a month — so a cron that was skipped, a Telegram call that
+ * failed, or a phone that was off that afternoon meant the month simply opened
+ * with no opening balance and no one told. Repeating through the window costs
+ * three messages at most, and the caller stops the moment the balance is filed.
+ */
+export function isBaseBalanceReminderWindow(now: Date = new Date()): boolean {
+  const eat = new Date(now.getTime() + 3 * 3600_000);
+  const y = eat.getUTCFullYear();
+  const m = eat.getUTCMonth();
+  const daysInMonth = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+  return eat.getUTCDate() >= daysInMonth - BASE_BALANCE_LEAD_DAYS;
+}
+
+/** Day of the month in EAT — the escalation window is counted in these. */
+export function eatDayOfMonth(now: Date = new Date()): number {
+  return new Date(now.getTime() + 3 * 3600_000).getUTCDate();
 }
 
 /* ───────────────────────────────── row shapes ─────────────────────────────── */

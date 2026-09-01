@@ -1,22 +1,37 @@
 import { NextRequest, NextResponse } from "next/server";
-import { archiveRecipients, buildArchive, purgeOlderThan, RETENTION_DAYS } from "@/lib/archive";
+import {
+  archiveRecipients,
+  buildArchive,
+  purgeOlderThan,
+  RETENTION_DAYS,
+  type ArchiveMode,
+} from "@/lib/archive";
 import { sendDocument, sendMessage } from "@/lib/telegram";
 import { logActivity } from "@/lib/bot-auth";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+// Exporting every table into one workbook is the longest-running job in the
+// system, and it runs once a year. A timeout here is not a lost minute — it is a
+// year's data left unarchived, so it gets the longest budget available.
+export const maxDuration = 300;
 
 /**
- * Yearly retention: export everything older than a year, Telegram it to the
- * administrators, then delete it.
+ * The yearly reset: export the whole database to one workbook, Telegram it to
+ * the administrators, then empty it and start the new year clean.
  *
  * The ordering is the entire safety property. The workbook becomes the only
  * surviving copy of these records, so NOTHING is deleted unless at least one
  * administrator has confirmably received the file. Every early return below is
  * a refusal to delete.
  *
- *   ?dryRun=1  builds and sends the archive but skips the delete — use this to
- *              check the file is complete before trusting the real run.
+ * Employees, their logins and the registered push devices are never touched —
+ * wiping those would lock everyone out of the bot on the 1st of September.
+ *
+ *   ?mode=retention  archive only what is older than a year, the rolling window
+ *                    this job originally implemented. The scheduled run is
+ *                    `full`.
+ *   ?dryRun=1        builds and sends the archive but skips the delete — use
+ *                    this to check the file is complete before trusting a run.
  */
 export async function GET(req: NextRequest) {
   const secret = process.env.CRON_SECRET;
@@ -25,15 +40,16 @@ export async function GET(req: NextRequest) {
   }
 
   const dryRun = req.nextUrl.searchParams.get("dryRun") === "1";
+  const mode: ArchiveMode = req.nextUrl.searchParams.get("mode") === "retention" ? "retention" : "full";
 
   try {
-    const archive = await buildArchive();
+    const archive = await buildArchive(new Date(), mode);
 
     if (archive.totalRows === 0 || !archive.workbook) {
       return NextResponse.json({
         ok: true,
         purged: false,
-        reason: "nothing older than the retention window",
+        reason: mode === "full" ? "the database is already empty" : "nothing older than the retention window",
         cutoff: archive.cutoff,
         retentionDays: RETENTION_DAYS,
       });
@@ -71,13 +87,19 @@ export async function GET(req: NextRequest) {
       );
     }
 
+    const scope =
+      archive.cutoff === null
+        ? `Every record in the database, up to ${new Date().toISOString().slice(0, 10)}.`
+        : `Records older than ${RETENTION_DAYS} days (before ${archive.cutoff.toISOString().slice(0, 10)}).`;
+
     const caption =
-      `🗄️ <b>MinTech data archive</b>\n` +
-      `Records older than ${RETENTION_DAYS} days (before ${archive.cutoff.toISOString().slice(0, 10)}).\n` +
+      (mode === "full" ? `🗄️ <b>MinTech yearly archive</b>\n` : `🗄️ <b>MinTech data archive</b>\n`) +
+      `${scope}\n` +
       `<b>${archive.totalRows}</b> rows across ${Object.values(archive.counts).filter(Boolean).length} tables.\n\n` +
       (dryRun
         ? `<i>Dry run — nothing has been deleted.</i>`
-        : `⚠️ <b>This is the only copy. These records are now deleted from the database.</b>`);
+        : `⚠️ <b>This is the only copy. These records are now deleted from the database.</b>` +
+          (mode === "full" ? `\n<i>Employees and logins are unaffected — the bot keeps working.</i>` : ""));
 
     const delivered: string[] = [];
     const failed: { label: string; error: string }[] = [];

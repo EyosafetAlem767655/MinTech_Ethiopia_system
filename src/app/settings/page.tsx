@@ -15,7 +15,10 @@ import {
 import {
   SUBMISSIONS,
   SUBMISSION_COLLECTIONS,
+  SUBMISSION_RANGES,
   type SubmissionCollection,
+  type SubmissionRange,
+  type SubmissionSpec,
 } from "@/lib/submissions";
 import { InstallButton } from "@/components/InstallPrompt";
 
@@ -142,16 +145,58 @@ export default function SettingsPage() {
 
 /* ──────────────────────────────── Submissions ─────────────────────────────── */
 
+/** "all" plus every registered report type. */
+type CollectionFilter = "all" | SubmissionCollection;
+
+/**
+ * A submission row as the API returns it.
+ *
+ * `_collection` is present only in the merged view, which is why every lookup
+ * falls back to the selected collection: in a single-type view the server has no
+ * reason to repeat the type on all 200 rows.
+ */
+type SubmissionRow = Record<string, unknown> & { _collection?: string };
+
+type SubmissionSpecLite = SubmissionSpec;
+
+interface BinRow {
+  id: string;
+  collection: string;
+  label: string;
+  icon: string;
+  summary: string | null;
+  photoIds: string[];
+  deletedBy: string;
+  deletedAt: string;
+}
+
 /**
  * View, correct and remove anything filed through the Telegram bot.
  *
  * Columns are driven entirely by the registry in lib/submissions.ts, so a new
  * report type appears here without touching this component.
  */
+/**
+ * View, correct and remove anything filed through the Telegram bot.
+ *
+ * Columns are driven entirely by the registry in lib/submissions.ts, so a new
+ * report type appears here without touching this component.
+ *
+ * It opens on ALL types rather than one. The old default was the free-text daily
+ * report, which almost nobody files now that every role reports through a guided
+ * flow — so a report filed minutes earlier sat two dropdown selections away and
+ * the screen said "no submissions found", which reads as the bot being broken.
+ *
+ * Deleting is two-stage. A delete moves the report to the recycle bin below,
+ * where it can be restored or removed for good; nothing is destroyed by a single
+ * click any more.
+ */
 function SubmissionsTab() {
-  const [collection, setCollection] = useState<SubmissionCollection>("daily");
-  const [rows, setRows] = useState<Record<string, unknown>[] | null>(null);
-  const [unavailable, setUnavailable] = useState(false);
+  const [collection, setCollection] = useState<CollectionFilter>("all");
+  const [range, setRange] = useState<SubmissionRange>("7d");
+  const [rows, setRows] = useState<SubmissionRow[] | null>(null);
+  const [counts, setCounts] = useState<Record<string, number>>({});
+  const [unavailable, setUnavailable] = useState<string[]>([]);
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [q, setQ] = useState("");
@@ -159,16 +204,40 @@ function SubmissionsTab() {
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [bin, setBin] = useState<BinRow[] | null>(null);
+  const [showBin, setShowBin] = useState(false);
 
-  const spec = SUBMISSIONS[collection];
+  /**
+   * The registry entry for one row.
+   *
+   * In the merged view each row names its own type; in a single-type view the
+   * server has no reason to repeat it 200 times, so the selected one stands in.
+   * The fallback to `daily` never fires in practice — it exists because looking
+   * up SUBMISSIONS["all"] would return undefined and take the whole screen down
+   * with it on the first field render.
+   */
+  const collectionOf = (row: SubmissionRow): SubmissionCollection => {
+    const own = row._collection;
+    if (own && own in SUBMISSIONS) return own as SubmissionCollection;
+    return collection === "all" ? "daily" : collection;
+  };
+  const specOf = (row: SubmissionRow): SubmissionSpecLite => SUBMISSIONS[collectionOf(row)];
 
   const load = useCallback(async () => {
     setRows(null);
     setError("");
     const p = new URLSearchParams({ collection });
-    if (from) p.set("from", from);
-    if (to) p.set("to", to);
+    // An explicit date range wins over the quick one — otherwise picking dates
+    // would silently keep filtering by "last 7 days" as well.
+    if (from || to) {
+      if (from) p.set("from", from);
+      if (to) p.set("to", to);
+    } else if (range !== "all") {
+      p.set("range", range);
+    }
     if (q.trim()) p.set("q", q.trim());
+    p.set("limit", "200");
+
     const res = await fetch(`/api/submissions?${p}`);
     if (!res.ok) {
       setError((await res.json().catch(() => ({}))).error || "Could not load submissions.");
@@ -176,25 +245,40 @@ function SubmissionsTab() {
       return;
     }
     const json = await res.json();
-    setUnavailable(Boolean(json.unavailable));
+    setCounts(json.counts || {});
+    setUnavailable(json.unavailableCollections || (json.unavailable ? [collection] : []));
     setRows(Array.isArray(json.rows) ? json.rows : []);
-  }, [collection, from, to, q]);
+  }, [collection, range, from, to, q]);
+
+  const loadBin = useCallback(async () => {
+    const res = await fetch("/api/submissions/bin");
+    if (!res.ok) {
+      setBin([]);
+      return;
+    }
+    const json = await res.json();
+    setBin(Array.isArray(json.rows) ? json.rows : []);
+  }, []);
 
   useEffect(() => {
     load();
   }, [load]);
+  useEffect(() => {
+    loadBin();
+  }, [loadBin]);
 
-  const startEdit = (row: Record<string, unknown>) => {
+  const startEdit = (row: SubmissionRow) => {
+    const spec = specOf(row);
     const d: Record<string, string> = {};
     for (const key of spec.editableKeys) d[key] = row[key] == null ? "" : String(row[key]);
     setDraft(d);
     setEditing(String(row.id));
   };
 
-  const save = async (id: string) => {
+  const save = async (row: SubmissionRow) => {
     setBusy(true);
     setError("");
-    const res = await fetch(`/api/submissions/${collection}/${id}`, {
+    const res = await fetch(`/api/submissions/${collectionOf(row)}/${row.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(draft),
@@ -208,30 +292,76 @@ function SubmissionsTab() {
     await load();
   };
 
-  const remove = async (row: Record<string, unknown>) => {
+  /**
+   * Delete → recycle bin.
+   *
+   * A plain confirm is right here, unlike the typed DELETE this used to demand:
+   * the report leaves every total immediately but is recoverable from the bin,
+   * so the expensive confirmation now belongs on the permanent removal instead.
+   */
+  const remove = async (row: SubmissionRow) => {
+    const spec = specOf(row);
     const who = spec.authorColumn ? String(row[spec.authorColumn] ?? "unknown") : "unknown";
-    // A typed confirmation, not a plain OK: this is an unrecoverable delete of
-    // someone's filed report, and the row is gone from the reports and the
-    // totals along with it.
+    if (
+      !confirm(
+        `Delete this ${spec.label.toLowerCase()} filed by ${who}?\n\n` +
+          `It moves to the recycle bin below — out of every report and total, but restorable.`
+      )
+    ) {
+      return;
+    }
+
+    setBusy(true);
+    setError("");
+    const res = await fetch(`/api/submissions/${collectionOf(row)}/${row.id}`, { method: "DELETE" });
+    setBusy(false);
+    if (!res.ok) {
+      setError((await res.json().catch(() => ({}))).error || "Delete failed.");
+      return;
+    }
+    await Promise.all([load(), loadBin()]);
+    setShowBin(true);
+  };
+
+  const restore = async (entry: BinRow) => {
+    setBusy(true);
+    setError("");
+    const res = await fetch("/api/submissions/bin", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: entry.id }),
+    });
+    setBusy(false);
+    if (!res.ok) {
+      setError((await res.json().catch(() => ({}))).error || "Restore failed.");
+      return;
+    }
+    await Promise.all([load(), loadBin()]);
+  };
+
+  /** The only irreversible action on this screen, so it keeps the typed confirm. */
+  const purge = async (entry: BinRow) => {
     const answer = prompt(
-      `Permanently DELETE this ${spec.label.toLowerCase()} filed by ${who}?\n\n` +
-        `This cannot be undone, and any attached photos are removed too.\n\n` +
+      `Permanently remove this ${entry.label.toLowerCase()} from the database?\n\n` +
+        `${entry.summary || ""}\n\n` +
+        `This cannot be undone, and any attached photos are deleted too.\n\n` +
         `Type DELETE to confirm.`
     );
     if (answer !== "DELETE") return;
 
     setBusy(true);
     setError("");
-    const res = await fetch(`/api/submissions/${collection}/${row.id}`, { method: "DELETE" });
+    const res = await fetch(`/api/submissions/bin?id=${entry.id}`, { method: "DELETE" });
     setBusy(false);
     if (!res.ok) {
       setError((await res.json().catch(() => ({}))).error || "Delete failed.");
       return;
     }
-    await load();
+    await loadBin();
   };
 
-  const photoIds = (row: Record<string, unknown>): string[] => {
+  const photoIds = (row: SubmissionRow): string[] => {
+    const spec = specOf(row);
     const out: string[] = [];
     if (spec.photosColumn && Array.isArray(row[spec.photosColumn])) {
       out.push(...(row[spec.photosColumn] as unknown[]).map(String));
@@ -242,6 +372,8 @@ function SubmissionsTab() {
     return out;
   };
 
+  const usingDates = Boolean(from || to);
+
   return (
     <div className="space-y-4 pb-10">
       <div className="card space-y-3 p-4">
@@ -249,16 +381,39 @@ function SubmissionsTab() {
           value={collection}
           onChange={(e) => {
             setEditing(null);
-            setCollection(e.target.value as SubmissionCollection);
+            setCollection(e.target.value as CollectionFilter);
           }}
           className="w-full rounded-lg border border-clay-100 bg-white px-3 py-2 text-sm font-bold"
         >
+          <option value="all">📋 All submissions</option>
           {SUBMISSION_COLLECTIONS.map((c) => (
             <option key={c} value={c}>
               {SUBMISSIONS[c].icon} {SUBMISSIONS[c].label}
+              {counts[c] ? ` (${counts[c]})` : ""}
             </option>
           ))}
         </select>
+
+        {/* Quick ranges. Disabled while explicit dates are set, so the screen
+            never shows one filter while obeying another. */}
+        <div className="flex flex-wrap gap-1">
+          {(Object.keys(SUBMISSION_RANGES) as SubmissionRange[]).map((k) => (
+            <button
+              key={k}
+              disabled={usingDates}
+              onClick={() => setRange(k)}
+              className={`rounded-full px-3 py-1 text-[11px] font-bold transition ${
+                usingDates
+                  ? "bg-clay-50 text-stone-300"
+                  : range === k
+                    ? "bg-clay-700 text-white"
+                    : "bg-clay-50 text-clay-700"
+              }`}
+            >
+              {SUBMISSION_RANGES[k].label}
+            </button>
+          ))}
+        </div>
 
         <div className="flex flex-wrap gap-2">
           <label className="flex-1 text-[11px] font-bold text-stone-500">
@@ -302,26 +457,36 @@ function SubmissionsTab() {
 
       {error && <p className="card border-l-4 border-l-red-500 p-3 text-xs font-bold text-red-700">{error}</p>}
 
-      {unavailable && (
+      {unavailable.length > 0 && (
         <p className="card p-3 text-xs text-amber-700">
-          This table isn&apos;t in the database yet — apply the outstanding migrations.
+          {unavailable.length === 1
+            ? `The ${SUBMISSIONS[unavailable[0] as SubmissionCollection]?.label ?? unavailable[0]} table isn't in the database yet`
+            : `${unavailable.length} report types aren't in the database yet`}{" "}
+          — apply the outstanding migrations.
         </p>
       )}
 
       {rows === null ? (
         <div className="card h-32 animate-pulse bg-clay-50" />
       ) : rows.length === 0 ? (
-        <p className="card p-4 text-sm text-stone-400">No {spec.label.toLowerCase()} submissions found.</p>
+        <p className="card p-4 text-sm text-stone-400">
+          Nothing filed in this period. Widen the range above — it is set to{" "}
+          {usingDates ? "the dates you picked" : SUBMISSION_RANGES[range].label.toLowerCase()}.
+        </p>
       ) : (
         <div className="space-y-2">
           <p className="px-1 text-[11px] font-bold text-stone-400">{rows.length} submission(s)</p>
           {rows.map((row) => {
+            const spec = specOf(row);
             const id = String(row.id);
             const isEditing = editing === id;
             return (
-              <div key={id} className="card space-y-2 p-3">
+              <div key={`${collectionOf(row)}-${id}`} className="card space-y-2 p-3">
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0 flex-1 space-y-1">
+                    <p className="text-[10px] font-bold uppercase tracking-wide text-clay-600">
+                      {spec.icon} {spec.label}
+                    </p>
                     {spec.displayFields.map((f) => {
                       const value = row[f.column];
                       if (value == null || value === "") return null;
@@ -376,7 +541,7 @@ function SubmissionsTab() {
                       );
                     })}
                     <div className="flex gap-1.5">
-                      <SmallBtn label={busy ? "Saving…" : "Save"} tone="green" disabled={busy} onClick={() => save(id)} />
+                      <SmallBtn label={busy ? "Saving…" : "Save"} tone="green" disabled={busy} onClick={() => save(row)} />
                       <SmallBtn label="Cancel" onClick={() => setEditing(null)} />
                     </div>
                   </div>
@@ -393,6 +558,51 @@ function SubmissionsTab() {
           })}
         </div>
       )}
+
+      {/* ───────────────────────────── Recycle bin ──────────────────────────── */}
+      <div className="space-y-2 border-t border-clay-100 pt-4">
+        <button
+          onClick={() => setShowBin((v) => !v)}
+          className="flex w-full items-center justify-between rounded-lg bg-clay-50 px-3 py-2 text-left"
+        >
+          <span className="text-sm font-bold text-clay-800">
+            🗑 Recycle bin {bin ? `(${bin.length})` : ""}
+          </span>
+          <span className="text-xs text-stone-500">{showBin ? "Hide" : "Show"}</span>
+        </button>
+
+        {showBin &&
+          (bin === null ? (
+            <div className="card h-20 animate-pulse bg-clay-50" />
+          ) : bin.length === 0 ? (
+            <p className="card p-4 text-sm text-stone-400">
+              Nothing deleted. Deleted submissions wait here until you restore them or remove them for good.
+            </p>
+          ) : (
+            <>
+              <p className="px-1 text-[11px] leading-snug text-stone-400">
+                These are out of every report and total already. Restoring puts one back exactly as it was,
+                photos included; removing it is permanent.
+              </p>
+              {bin.map((entry) => (
+                <div key={entry.id} className="card space-y-2 p-3">
+                  <p className="text-[10px] font-bold uppercase tracking-wide text-stone-500">
+                    {entry.icon} {entry.label}
+                  </p>
+                  <p className="text-xs text-stone-700">{entry.summary || "—"}</p>
+                  <p className="text-[10px] text-stone-400">
+                    Deleted {fmtTime(entry.deletedAt)} by {entry.deletedBy}
+                    {entry.photoIds.length > 0 ? ` · ${entry.photoIds.length} photo(s) kept` : ""}
+                  </p>
+                  <div className="flex gap-1.5 border-t border-clay-50 pt-2">
+                    <SmallBtn label="↩️ Restore" tone="green" disabled={busy} onClick={() => restore(entry)} />
+                    <SmallBtn label="🗑 Remove for good" tone="red" disabled={busy} onClick={() => purge(entry)} />
+                  </div>
+                </div>
+              ))}
+            </>
+          ))}
+      </div>
     </div>
   );
 }

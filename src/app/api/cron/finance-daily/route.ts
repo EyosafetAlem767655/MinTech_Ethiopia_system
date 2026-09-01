@@ -4,7 +4,22 @@ import { logActivity } from "@/lib/bot-auth";
 import { hasPosition, resolveCapabilities } from "@/lib/positions";
 import { sendSms, smsGatewayConfigured } from "@/lib/sms";
 import { sendMessage } from "@/lib/telegram";
-import { isBaseBalanceReminderDay, monthLabel, nextMonth } from "@/lib/finance-report";
+import {
+  eatDayOfMonth,
+  isBaseBalanceReminderWindow,
+  monthLabel,
+  nextMonth,
+} from "@/lib/finance-report";
+
+/** How many days into a month HR and Admin keep hearing that it opened unfiled. */
+const ESCALATION_DAYS = 3;
+
+/** Days remaining in the current EAT month, 0 on the last day. */
+function daysLeftInMonth(now: Date): number {
+  const eat = new Date(now.getTime() + 3 * 3600_000);
+  const daysInMonth = new Date(Date.UTC(eat.getUTCFullYear(), eat.getUTCMonth() + 1, 0)).getUTCDate();
+  return daysInMonth - eat.getUTCDate();
+}
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -109,30 +124,58 @@ export async function GET(req: NextRequest) {
     select month from monthly_base_balances where month = ${upcoming}
   `.catch(() => []);
 
-  if (isBaseBalanceReminderDay(now) && !existing) {
+  // Every day of the closing window until it is filed, not just the first.
+  // The count is taken once a month, so one missed message used to mean the
+  // month opened with no opening balance at all.
+  const inWindow = isBaseBalanceReminderWindow(now);
+  const daysLeft = daysLeftInMonth(now);
+
+  if (inWindow && !existing) {
+    const urgency =
+      daysLeft === 0
+        ? `⚠️ <b>ዛሬ የወሩ የመጨረሻ ቀን ነው።</b>`
+        : `⏳ ${daysLeft} ቀን ቀርቷል።`;
     const text =
       `📊 <b>የ${upcoming} የመነሻ ሚዛን</b>\n\n` +
-      `ወሩ ከመጀመሩ በፊት የሁሉንም ምርቶች፣ የጥሬ ዕቃና የPP ከረጢት የመነሻ ሚዛን ያስገቡ።\n\n` +
+      `ወሩ ከመጀመሩ በፊት የሁሉንም ምርቶች፣ የጥሬ ዕቃና የPP ከረጢት የመነሻ ሚዛን (ቀሪ ብዛት) ያስገቡ።\n` +
+      `${urgency}\n\n` +
       `📊 "የወሩ የመነሻ ሚዛን" የሚለውን ይጫኑ።`;
+
+    // Sent to every asset reporter with a known chat, signed in or not. Being
+    // logged out is a reason to be told the count is due — the reminder is what
+    // prompts signing back in — and silently skipping them is how the month
+    // opened empty with nobody aware.
     await Promise.all(
-      assetStaff
-        .filter((u) => u.logged_in)
-        .map(async (u) => {
-          const res = await sendMessage(String(u.chat_id), text).catch(() => null);
-          if (res?.ok) {
-            baseBalanceReminders += 1;
-            await logActivity({
-              chatId: String(u.chat_id),
-              actor: u.full_name,
-              userId: u.id,
-              positions: u.positions,
-              audience: "internal",
-              action: "reminder_sent",
-              detail: `base balance ${upcoming}`,
-            }).catch(() => {});
-          }
-        })
+      assetStaff.map(async (u) => {
+        const res = await sendMessage(String(u.chat_id), text).catch(() => null);
+        if (res?.ok) {
+          baseBalanceReminders += 1;
+          await logActivity({
+            chatId: String(u.chat_id),
+            actor: u.full_name,
+            userId: u.id,
+            positions: u.positions,
+            audience: "internal",
+            action: "reminder_sent",
+            detail: `base balance ${upcoming} · ${daysLeft} day(s) left`,
+          }).catch(() => {});
+        }
+      })
     );
+
+    // Nobody to ask. HR and Admin have to hear this DURING the window, while
+    // there is still time to act — not on the 1st when the month is already
+    // open and the report is already blocked.
+    if (assetStaff.length === 0) {
+      const noone =
+        `⚠️ <b>የ${upcoming} የመነሻ ሚዛን ማን እንደሚያስገባ የለም</b>\n\n` +
+        `የመነሻ ሚዛን የሚያስገባ ሠራተኛ አልተመደበም። እባክዎ በዳሽቦርዱ ላይ ይመድቡ።`;
+      await Promise.all(
+        employees
+          .filter((u) => hasPosition(u.positions, "hr") || hasPosition(u.positions, "admin"))
+          .map((u) => sendMessage(String(u.chat_id), noone).catch(() => {}))
+      );
+    }
   }
 
   // The month has already opened and still nobody has filed it. HR and Admin
@@ -142,15 +185,34 @@ export async function GET(req: NextRequest) {
     select month from monthly_base_balances where month = ${current}
   `.catch(() => []);
 
-  if (!openMonth) {
+  // Bounded to the first days of the month. Without the bound this fired every
+  // single day a month went unfiled — an alert that arrives daily for four weeks
+  // stops being read long before the person who could act on it sees it, and by
+  // then it is also drowning out the reminder that still matters.
+  const dayOfMonth = eatDayOfMonth(now);
+  const escalationWindow = dayOfMonth <= ESCALATION_DAYS;
+
+  if (!openMonth && escalationWindow) {
     const alert =
       `⚠️ <b>የ${current} የመነሻ ሚዛን አልገባም</b>\n\n` +
-      `ወሩ ተጀምሯል፤ ነገር ግን የመነሻ ሚዛን አልተመዘገበም። የወሩ የፋይናንስ ሪፖርት እስኪገባ ድረስ አይሰላም።`;
+      `ወሩ ተጀምሯል፤ ነገር ግን የመነሻ ሚዛን አልተመዘገበም። የወሩ የፋይናንስ ሪፖርት እስኪገባ ድረስ አይሰላም።\n\n` +
+      `የንብረት ክፍል "የወሩ የመነሻ ሚዛን" የሚለውን እንዲጫኑ ያስታውሱ።`;
     const recipients = employees.filter(
       (u) => hasPosition(u.positions, "hr") || hasPosition(u.positions, "admin")
     );
     await Promise.all(recipients.map((u) => sendMessage(String(u.chat_id), alert).catch(() => {})));
     escalated = recipients.length > 0;
+
+    // The asset team is asked again too. The window has passed, but the count is
+    // still the thing standing between them and a monthly report.
+    await Promise.all(
+      assetStaff.map((u) =>
+        sendMessage(
+          String(u.chat_id),
+          `📊 <b>የ${current} የመነሻ ሚዛን ገና አልገባም</b>\n\nእባክዎ ዛሬ ያስገቡ — የወሩ ሪፖርት በዚህ ይጠብቃል።`
+        ).catch(() => {})
+      )
+    );
   }
 
   return NextResponse.json({
@@ -165,7 +227,9 @@ export async function GET(req: NextRequest) {
     },
     baseBalance: {
       month: upcoming,
-      reminderDay: isBaseBalanceReminderDay(now),
+      inReminderWindow: inWindow,
+      daysLeftInMonth: daysLeft,
+      assetReportersReachable: assetStaff.length,
       alreadyFiled: Boolean(existing),
       reminded: baseBalanceReminders,
       currentMonthMissing: !openMonth,

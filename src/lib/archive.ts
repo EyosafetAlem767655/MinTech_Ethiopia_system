@@ -1,5 +1,6 @@
 import ExcelJS from "exceljs";
 import sql from "@/lib/sql";
+import { SUBMISSIONS, SUBMISSION_COLLECTIONS } from "@/lib/submissions";
 
 /**
  * Yearly data archive.
@@ -35,56 +36,132 @@ export interface ArchiveTable {
   parent?: { table: string; fk: string; dateColumn: string };
 }
 
-export const ARCHIVE_TABLES: ArchiveTable[] = [
-  // Children first (exported, then removed by cascade when the parent goes).
+/**
+ * Child tables, exported before their parent and removed by its cascade.
+ *
+ * They have no date of their own, so they are resolved through the parent's.
+ */
+const CHILD_TABLES: ArchiveTable[] = [
   { table: "claim_photos", dateColumn: "created_at", sheet: "claim_photos",
     parent: { table: "damage_claims", fk: "claim_id", dateColumn: "created_at" } },
-  { table: "payments", dateColumn: "date", sheet: "payments",
-    parent: { table: "invoices", fk: "invoice_id", dateColumn: "invoiced_at" } },
-  { table: "invoice_reminders", dateColumn: "sent_at", sheet: "invoice_reminders",
-    parent: { table: "invoices", fk: "invoice_id", dateColumn: "invoiced_at" } },
+  { table: "pp_bag_damage_photos", dateColumn: "created_at", sheet: "pp_bag_damage_photos",
+    parent: { table: "pp_bag_damage_reports", fk: "report_id", dateColumn: "date" } },
+  { table: "finance_purchase_items", dateColumn: "created_at", sheet: "finance_purchase_items",
+    parent: { table: "finance_purchase_batches", fk: "batch_id", dateColumn: "date" } },
+  { table: "wht_sms_log", dateColumn: "created_at", sheet: "wht_sms_log",
+    parent: { table: "wht_holders", fk: "holder_id", dateColumn: "created_at" } },
   { table: "bag_events", dateColumn: "date", sheet: "bag_events",
     parent: { table: "bag_lots", fk: "lot_id", dateColumn: "received_at" } },
+];
 
-  // Parents / standalone.
-  { table: "damage_claims", dateColumn: "created_at", sheet: "damage_claims" },
-  { table: "invoices", dateColumn: "invoiced_at", sheet: "invoices" },
+/**
+ * Operational tables that are not submissions.
+ *
+ * Deliberately excluded, because they are identity or configuration rather than
+ * records — wiping them would lock every employee out of the bot and drop the
+ * browsers registered for push:
+ *   • telegram_users
+ *   • push_subscriptions
+ *   • web_sessions
+ */
+const EXTRA_TABLES: ArchiveTable[] = [
   { table: "bag_lots", dateColumn: "received_at", sheet: "bag_lots" },
-  { table: "receipts", dateColumn: "created_at", sheet: "receipts" },
-  { table: "purchase_requests", dateColumn: "created_at", sheet: "purchase_requests" },
-  { table: "stone_deliveries", dateColumn: "date", sheet: "stone_deliveries" },
-  { table: "shift_reports", dateColumn: "date", sheet: "shift_reports" },
-  { table: "daily_ops_reports", dateColumn: "date", sheet: "daily_ops_reports" },
-  { table: "daily_reports", dateColumn: "created_at", sheet: "daily_reports" },
-  { table: "hr_reports", dateColumn: "created_at", sheet: "hr_reports" },
-  { table: "material_counts", dateColumn: "created_at", sheet: "material_counts" },
   { table: "briefs", dateColumn: "created_at", sheet: "briefs" },
   { table: "bot_activity", dateColumn: "created_at", sheet: "bot_activity" },
   { table: "telegram_sessions", dateColumn: "updated_at", sheet: "telegram_sessions" },
+  { table: "telegram_updates", dateColumn: "created_at", sheet: "telegram_updates" },
+  { table: "ai_chat_usage", dateColumn: "updated_at", sheet: "ai_chat_usage" },
   { table: "stored_files", dateColumn: "created_at", sheet: "stored_files" },
+  // The recycle bin is data too: emptied by the reset like everything else, and
+  // exported first so a deleted-but-not-yet-purged report is still in the file.
+  { table: "deleted_submissions", dateColumn: "deleted_at", sheet: "deleted_submissions" },
 ];
+
+/**
+ * Every table the archive covers.
+ *
+ * The submission tables are DERIVED from the registry rather than listed again.
+ * This list had silently gone stale once already: it still named invoices and
+ * payments months after that module was deleted, and knew nothing about
+ * production reports, deliveries, sales receipts, PP bag reports or any of the
+ * finance tables — so the yearly export would have shipped a workbook missing
+ * most of the company's data, and the purge would have left those tables
+ * untouched. Deriving it means adding a report type cannot forget the archive.
+ */
+export const ARCHIVE_TABLES: ArchiveTable[] = (() => {
+  const seen = new Set(CHILD_TABLES.map((t) => t.table));
+  const submissionTables: ArchiveTable[] = [];
+  for (const key of SUBMISSION_COLLECTIONS) {
+    const spec = SUBMISSIONS[key];
+    if (seen.has(spec.table)) continue;
+    seen.add(spec.table);
+    submissionTables.push({
+      table: spec.table,
+      // A text "YYYY-MM-DD" column cannot be compared against a timestamp, and
+      // created_at exists on every one of these tables.
+      dateColumn: spec.dateIsText ? "created_at" : spec.dateColumn,
+      sheet: spec.table.slice(0, 31),
+    });
+  }
+  const extras = EXTRA_TABLES.filter((t) => !seen.has(t.table));
+  // Children first: they are exported before the cascade takes them.
+  return [...CHILD_TABLES, ...submissionTables, ...extras];
+})();
 
 export function cutoffDate(now = new Date(), days = RETENTION_DAYS): Date {
   return new Date(now.getTime() - days * 86400000);
 }
 
-/** Rows older than `cutoff`, resolving child tables through their parent's date. */
-async function selectExpiring(t: ArchiveTable, cutoff: Date): Promise<Record<string, unknown>[]> {
-  if (t.parent) {
-    return sql<Record<string, unknown>[]>`
-      select c.* from ${sql(t.table)} c
-       where c.${sql(t.parent.fk)} in (
-         select p.id from ${sql(t.parent.table)} p where p.${sql(t.parent.dateColumn)} < ${cutoff}
-       )
-    ` as unknown as Promise<Record<string, unknown>[]>;
+/**
+ * Rows to archive, resolving child tables through their parent's date.
+ *
+ * A null cutoff means EVERYTHING — the yearly reset, which starts the new year
+ * empty rather than trimming a rolling window off the back.
+ *
+ * A table this database does not have is not an error. The list spans several
+ * years of schema, and a deployment that never ran an old migration (or has
+ * already dropped a retired module) must still produce a complete archive of
+ * what it does hold.
+ */
+async function selectExpiring(t: ArchiveTable, cutoff: Date | null): Promise<Record<string, unknown>[]> {
+  const query = async () => {
+    if (t.parent) {
+      return cutoff
+        ? await sql<Record<string, unknown>[]>`
+            select c.* from ${sql(t.table)} c
+             where c.${sql(t.parent.fk)} in (
+               select p.id from ${sql(t.parent.table)} p where p.${sql(t.parent.dateColumn)} < ${cutoff}
+             )`
+        : await sql<Record<string, unknown>[]>`select * from ${sql(t.table)}`;
+    }
+    return cutoff
+      ? await sql<Record<string, unknown>[]>`
+          select * from ${sql(t.table)} where ${sql(t.dateColumn)} < ${cutoff}`
+      : await sql<Record<string, unknown>[]>`select * from ${sql(t.table)}`;
+  };
+
+  try {
+    return await query();
+  } catch (e) {
+    const code = (e as { code?: string })?.code;
+    if (code === "42P01" || code === "42703") {
+      console.warn(`archive: skipping ${t.table} (${code})`);
+      return [];
+    }
+    throw e;
   }
-  return sql<Record<string, unknown>[]>`
-    select * from ${sql(t.table)} where ${sql(t.dateColumn)} < ${cutoff}
-  ` as unknown as Promise<Record<string, unknown>[]>;
 }
 
+/**
+ * "retention" keeps the last year and archives what falls off the back.
+ * "full" archives everything, for the yearly reset that starts September clean.
+ */
+export type ArchiveMode = "retention" | "full";
+
 export interface ArchiveResult {
-  cutoff: Date;
+  mode: ArchiveMode;
+  /** null in full mode — there is no cutoff, the whole table goes. */
+  cutoff: Date | null;
   counts: Record<string, number>;
   totalRows: number;
   workbook: Buffer | null;
@@ -106,8 +183,11 @@ function cellValue(v: unknown): string | number | boolean | Date | null {
  * Builds the workbook of everything older than the cutoff.
  * Returns `workbook: null` when there is nothing to archive.
  */
-export async function buildArchive(now = new Date()): Promise<ArchiveResult> {
-  const cutoff = cutoffDate(now);
+export async function buildArchive(
+  now = new Date(),
+  mode: ArchiveMode = "retention"
+): Promise<ArchiveResult> {
+  const cutoff = mode === "full" ? null : cutoffDate(now);
   const counts: Record<string, number> = {};
   const datasets: { sheet: string; rows: Record<string, unknown>[] }[] = [];
   let totalRows = 0;
@@ -120,9 +200,10 @@ export async function buildArchive(now = new Date()): Promise<ArchiveResult> {
   }
 
   const stamp = now.toISOString().slice(0, 10);
-  const filename = `mintech-archive-${stamp}.xlsx`;
+  const filename =
+    mode === "full" ? `mintech-full-archive-${stamp}.xlsx` : `mintech-archive-${stamp}.xlsx`;
 
-  if (totalRows === 0) return { cutoff, counts, totalRows, workbook: null, filename };
+  if (totalRows === 0) return { mode, cutoff, counts, totalRows, workbook: null, filename };
 
   const wb = new ExcelJS.Workbook();
   wb.creator = "MinTech Ethiopia";
@@ -130,10 +211,15 @@ export async function buildArchive(now = new Date()): Promise<ArchiveResult> {
 
   // Summary sheet first, so the recipient can see at a glance what this covers.
   const summary = wb.addWorksheet("summary");
-  summary.addRow(["MinTech Ethiopia — data archive"]);
+  summary.addRow([
+    mode === "full" ? "MinTech Ethiopia — full data archive (yearly reset)" : "MinTech Ethiopia — data archive",
+  ]);
   summary.addRow([`Generated`, now.toISOString()]);
-  summary.addRow([`Covers records older than`, cutoff.toISOString()]);
-  summary.addRow([`Retention window (days)`, RETENTION_DAYS]);
+  summary.addRow([
+    `Covers`,
+    cutoff ? `records older than ${cutoff.toISOString()}` : "EVERY record in the database",
+  ]);
+  summary.addRow([`Retention window (days)`, cutoff ? RETENTION_DAYS : "n/a — full reset"]);
   summary.addRow([]);
   summary.addRow(["Table", "Rows archived"]);
   for (const t of ARCHIVE_TABLES) summary.addRow([t.table, counts[t.table] ?? 0]);
@@ -155,7 +241,7 @@ export async function buildArchive(now = new Date()): Promise<ArchiveResult> {
   }
 
   const workbook = Buffer.from(await wb.xlsx.writeBuffer());
-  return { cutoff, counts, totalRows, workbook, filename };
+  return { mode, cutoff, counts, totalRows, workbook, filename };
 }
 
 /**
@@ -165,14 +251,28 @@ export async function buildArchive(now = new Date()): Promise<ArchiveResult> {
  * are removed by `on delete cascade`, so only the parents/standalone tables
  * need explicit deletes.
  */
-export async function purgeOlderThan(cutoff: Date): Promise<Record<string, number>> {
+export async function purgeOlderThan(cutoff: Date | null): Promise<Record<string, number>> {
   const deleted: Record<string, number> = {};
   for (const t of ARCHIVE_TABLES) {
     if (t.parent) continue; // cascades with its parent
-    const rows = await sql`
-      delete from ${sql(t.table)} where ${sql(t.dateColumn)} < ${cutoff} returning 1
-    `;
-    deleted[t.table] = rows.length;
+    try {
+      // A null cutoff empties the table — the yearly reset. Written as an
+      // unqualified DELETE rather than TRUNCATE so the cascades behave exactly
+      // as they do on a single-row delete, and so a table that is missing from
+      // this database fails the same harmless way as it does in the export.
+      const rows = cutoff
+        ? await sql`delete from ${sql(t.table)} where ${sql(t.dateColumn)} < ${cutoff} returning 1`
+        : await sql`delete from ${sql(t.table)} returning 1`;
+      deleted[t.table] = rows.length;
+    } catch (e) {
+      const code = (e as { code?: string })?.code;
+      if (code === "42P01" || code === "42703") {
+        console.warn(`purge: skipping ${t.table} (${code})`);
+        deleted[t.table] = 0;
+        continue;
+      }
+      throw e;
+    }
   }
   return deleted;
 }

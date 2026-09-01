@@ -81,6 +81,27 @@ export interface SubmissionSpec {
    * UI treats them exactly like a `uuid[]` column.
    */
   photoJoin?: { table: string; foreignKey: string; fileColumn: string };
+  /**
+   * Rows in other tables that belong to this one and die with it.
+   *
+   * `on delete cascade` already removes them, which is exactly why they are
+   * listed: the recycle bin has to capture them BEFORE the parent goes, or a
+   * restored purchase would come back with no line items and a restored damage
+   * report with no photos. A `photoJoin` table is a child too and is folded in
+   * by `childTablesOf` below rather than being written twice.
+   */
+  extraChildren?: { table: string; foreignKey: string }[];
+}
+
+/** Every child table of a collection, from both declarations. */
+export function childTablesOf(spec: SubmissionSpec): { table: string; foreignKey: string }[] {
+  const out = spec.photoJoin
+    ? [{ table: spec.photoJoin.table, foreignKey: spec.photoJoin.foreignKey }]
+    : [];
+  for (const c of spec.extraChildren || []) {
+    if (!out.some((x) => x.table === c.table)) out.push(c);
+  }
+  return out;
 }
 
 const TEXT = (column: string, label: string): SubmissionField => ({
@@ -371,6 +392,9 @@ export const SUBMISSIONS: Record<SubmissionCollection, SubmissionSpec> = {
     // sequence; editing it here would let two batches claim the same one.
     editableKeys: ["supplier", "cost_center", "purchaser", "total_amount"],
     photosColumn: "photo_file_ids",
+    // The items ARE the purchase. Without them a restored batch is a total with
+    // nothing to say what was bought.
+    extraChildren: [{ table: "finance_purchase_items", foreignKey: "batch_id" }],
   },
   pp_bag_purchase: {
     table: "pp_bag_purchases",
@@ -446,6 +470,10 @@ export const SUBMISSIONS: Record<SubmissionCollection, SubmissionSpec> = {
     // status is driven by the "receipt received" button, which is what stops the
     // daily SMS; editing it as free text here would bypass that.
     editableKeys: ["company", "phone", "description"],
+    // The send log has to travel with the holder. It carries the once-a-day
+    // claim rows, so a holder restored without it could be texted a second time
+    // on a day the customer has already heard from us.
+    extraChildren: [{ table: "wht_sms_log", foreignKey: "holder_id" }],
   },
   invoice: {
     table: "invoices",
@@ -477,6 +505,42 @@ export const SUBMISSIONS: Record<SubmissionCollection, SubmissionSpec> = {
     editableKeys: ["amount", "method"],
   },
 };
+
+/**
+ * The quick range filter on the submissions screen.
+ *
+ * Kept here rather than in the component so the API and the UI cannot disagree
+ * about what "1 month" means. Months are counted as calendar months, not 30-day
+ * blocks: someone asking for the last month means since this date last month.
+ */
+export const SUBMISSION_RANGES = {
+  "24h": { label: "24 hours", hours: 24 },
+  "7d": { label: "7 days", days: 7 },
+  "1m": { label: "1 month", months: 1 },
+  "3m": { label: "3 months", months: 3 },
+  "6m": { label: "6 months", months: 6 },
+  "1y": { label: "1 year", months: 12 },
+  all: { label: "All time" },
+} as const;
+
+export type SubmissionRange = keyof typeof SUBMISSION_RANGES;
+
+export function isSubmissionRange(v: unknown): v is SubmissionRange {
+  return typeof v === "string" && Object.prototype.hasOwnProperty.call(SUBMISSION_RANGES, v);
+}
+
+/** The instant a range starts, or null for "all time". */
+export function rangeStart(range: SubmissionRange, now = new Date()): Date | null {
+  const spec = SUBMISSION_RANGES[range] as { hours?: number; days?: number; months?: number };
+  if (spec.hours) return new Date(now.getTime() - spec.hours * 3600_000);
+  if (spec.days) return new Date(now.getTime() - spec.days * 86_400_000);
+  if (spec.months) {
+    const d = new Date(now);
+    d.setUTCMonth(d.getUTCMonth() - spec.months);
+    return d;
+  }
+  return null;
+}
 
 export function isSubmissionCollection(v: unknown): v is SubmissionCollection {
   return typeof v === "string" && (SUBMISSION_COLLECTIONS as readonly string[]).includes(v);

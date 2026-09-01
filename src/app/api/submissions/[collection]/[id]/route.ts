@@ -1,8 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import sql, { first, isUuid } from "@/lib/sql";
-import { deleteFile } from "@/lib/storage";
 import { logActivity } from "@/lib/bot-auth";
-import { isSubmissionCollection, SUBMISSIONS, type SubmissionSpec } from "@/lib/submissions";
+import { binSubmission } from "@/lib/recycle-bin";
+import {
+  isSubmissionCollection,
+  SUBMISSIONS,
+  type SubmissionCollection,
+  type SubmissionSpec,
+} from "@/lib/submissions";
 
 export const dynamic = "force-dynamic";
 
@@ -27,22 +32,6 @@ async function loadRow(spec: SubmissionSpec, id: string) {
   return first(await sql<Record<string, unknown>[]>`
     select ${sql(Array.from(new Set(cols)))} from ${sql(spec.table)} where id = ${id}
   `);
-}
-
-/**
- * File ids held in a child table. Read separately from the row because the
- * cascade delete takes those rows with the parent — after the delete there is
- * nothing left to ask.
- */
-async function joinedPhotoIds(spec: SubmissionSpec, id: string): Promise<string[]> {
-  const join = spec.photoJoin;
-  if (!join) return [];
-  const rows = await sql<{ file_id: string | null }[]>`
-    select ${sql(join.fileColumn)} as file_id
-      from ${sql(join.table)}
-     where ${sql(join.foreignKey)} = ${id}
-  `;
-  return rows.map((r) => r.file_id).filter((v): v is string => Boolean(v));
 }
 
 export async function PATCH(req: NextRequest, { params }: { params: { collection: string; id: string } }) {
@@ -95,6 +84,15 @@ export async function PATCH(req: NextRequest, { params }: { params: { collection
   return NextResponse.json({ ok: true, updated: Object.keys(patch) });
 }
 
+/**
+ * DELETE — move the submission to the recycle bin.
+ *
+ * The row leaves its own table immediately, so it stops counting toward every
+ * report and total the moment it is deleted. It is not destroyed: it sits in
+ * `deleted_submissions`, restorable, until someone empties it from the bin.
+ * Photos stay in the bucket for the same reason — a restore that came back
+ * without its evidence would not be one.
+ */
 export async function DELETE(_req: NextRequest, { params }: { params: { collection: string; id: string } }) {
   const spec = resolve(params.collection, params.id);
   if (!spec) return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -102,32 +100,22 @@ export async function DELETE(_req: NextRequest, { params }: { params: { collecti
   const row = await loadRow(spec, params.id);
   if (!row) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  // Collect the photo ids BEFORE the row goes, or the link to them is lost.
-  const photoIds: string[] = [];
-  if (spec.photosColumn) {
-    const arr = row[spec.photosColumn];
-    if (Array.isArray(arr)) photoIds.push(...arr.map(String));
-  }
-  if (spec.photoColumn && row[spec.photoColumn]) photoIds.push(String(row[spec.photoColumn]));
-  photoIds.push(...(await joinedPhotoIds(spec, params.id)));
-
-  await sql`delete from ${sql(spec.table)} where id = ${params.id}`;
-
-  // Release the images too. Without this they sat in the bucket until the 72h
-  // purge cron happened to reach them. deleteFile no-ops if it already has.
-  const photoResults = await Promise.allSettled(photoIds.map((id) => deleteFile(id)));
-  const photosFailed = photoResults.filter((r) => r.status === "rejected").length;
-  if (photosFailed > 0) console.error(`submission delete: ${photosFailed} photo(s) could not be removed`);
+  const moved = await binSubmission({
+    collection: params.collection as SubmissionCollection,
+    id: params.id,
+    deletedBy: WEB_ACTOR.actor,
+  });
+  if (!moved.ok) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
   await logActivity({
     ...WEB_ACTOR,
     action: "report_deleted",
     detail: `${spec.label} ${params.id} by ${
       spec.authorColumn ? String(row[spec.authorColumn] ?? "unknown") : "unknown"
-    }`,
+    } → recycle bin`,
     ok: true,
-    meta: { collection: params.collection, table: spec.table, photos: photoIds.length },
+    meta: { collection: params.collection, table: spec.table, photos: moved.photoIds.length },
   });
 
-  return NextResponse.json({ ok: true, deleted: true, photosRemoved: photoIds.length - photosFailed });
+  return NextResponse.json({ ok: true, deleted: true, binned: true, photos: moved.photoIds.length });
 }

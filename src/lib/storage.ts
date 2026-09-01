@@ -161,13 +161,32 @@ export async function deleteFile(id: string): Promise<void> {
 const LONG_RETENTION_KINDS = ["pp_bag_damage", "finance_receipt"];
 
 export async function purgeOldPhotos(hours = 72, batch = 500): Promise<{ deleted: number }> {
+  // Photos of a report sitting in the recycle bin are spared. The report is
+  // still restorable, and one that came back without its evidence would not be a
+  // restore. They become sweepable again the moment the bin entry is emptied,
+  // which deletes them outright anyway.
+  //
+  // The fallback is not decoration: `deleted_submissions` arrives in 0018, and a
+  // subquery against a missing table fails at PARSE time, so the exclusion
+  // cannot be written as a runtime condition. Without the fallback this whole
+  // sweep would stop running on any database that is one migration behind.
+  const expired = sql`created_at < now() - (${hours} || ' hours')::interval
+       and (kind is null or kind <> all(${LONG_RETENTION_KINDS}))`;
+
   const rows = await sql<{ id: string; storage_path: string }[]>`
-    select id, storage_path
-      from stored_files
-     where created_at < now() - (${hours} || ' hours')::interval
-       and (kind is null or kind <> all(${LONG_RETENTION_KINDS}))
+    select id, storage_path from stored_files
+     where ${expired}
+       and not exists (
+         select 1 from deleted_submissions d where stored_files.id = any(d.photo_ids)
+       )
      limit ${batch}
-  `;
+  `.catch(async (e) => {
+    if ((e as { code?: string })?.code !== "42P01") throw e;
+    console.warn("purgeOldPhotos: deleted_submissions not present yet; sweeping without the bin exclusion");
+    return await sql<{ id: string; storage_path: string }[]>`
+      select id, storage_path from stored_files where ${expired} limit ${batch}
+    `;
+  });
   if (rows.length === 0) return { deleted: 0 };
 
   await storage()
