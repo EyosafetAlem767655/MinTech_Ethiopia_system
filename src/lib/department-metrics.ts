@@ -8,14 +8,13 @@
  * being archived or deleted: the rows keep their names, so history stays whole.
  *
  * Reuses the metrics layer: getDayNumbers (windowed KPIs), getBucketedSeries
- * (windowed trend), receivablesAging and getLotGaps (current-state money/stock).
+ * (windowed trend) and the per-department queries below.
  */
 
 import sql from "@/lib/sql";
 import {
   getBucketedSeries,
   getDayNumbers,
-  getLotGaps,
   type TrendPoint,
 } from "@/lib/metrics";
 import { DEPARTMENTS, DEPARTMENT_KEYS, type DepartmentKey } from "@/lib/departments";
@@ -122,22 +121,36 @@ async function departmentKpis(
     }
 
     case "asset_management": {
-      const [[r], gaps] = await Promise.all([
-        sql<{ materials: string; pr_count: string; pr_amount: string }[]>`
+      // What this role actually files. It used to count `material_counts` — a
+      // table nothing has written since that capability was retired — so the
+      // card showed two figures, one of them permanently zero, while the raw
+      // material, delivery, voucher and bag-damage reports it files every day
+      // were nowhere on it.
+      //
+      // The voucher counts are guarded separately: they arrive in 0019, and a
+      // database one migration behind must still show the other four.
+      const [[r], vouchers] = await Promise.all([
+        sql<{ raw: string; deliveries: string; damage: string; pr_count: string }[]>`
           select
-            (select count(*) from material_counts   where created_at >= ${start} and created_at < ${end}) as materials,
-            (select count(*) from purchase_requests where created_at >= ${start} and created_at < ${end}) as pr_count,
-            (select coalesce(sum(amount),0) from purchase_requests where created_at >= ${start} and created_at < ${end}) as pr_amount
+            (select count(*) from raw_material_receipts where date >= ${start} and date < ${end})       as raw,
+            (select count(*) from delivery_reports      where date >= ${start} and date < ${end})       as deliveries,
+            (select count(*) from pp_bag_damage_reports where date >= ${start} and date < ${end})       as damage,
+            (select count(*) from purchase_requests     where created_at >= ${start} and created_at < ${end}) as pr_count
         `,
-        getLotGaps(),
+        sql<{ grv: string; siv: string }[]>`
+          select
+            (select count(*) from goods_receiving_vouchers where date >= ${start} and date < ${end}) as grv,
+            (select count(*) from store_issue_vouchers     where date >= ${start} and date < ${end}) as siv
+        `.catch(() => [{ grv: "0", siv: "0" }]),
       ]);
-      const unaccounted = gaps.reduce((a, l) => a + l.gap, 0);
+      const v = vouchers[0] ?? { grv: "0", siv: "0" };
       return [
-        { icon: "📦", label: "Material counts", value: Number(r.materials) || 0 },
+        { icon: "🚚", label: "Raw material in", value: base.rawMaterialTons, suffix: " t", decimals: 2 },
+        { icon: "🚛", label: "Deliveries out", value: Number(r.deliveries) || 0 },
+        { icon: "📥", label: "Goods received", value: Number(v.grv) || 0 },
+        { icon: "📤", label: "Store issues", value: Number(v.siv) || 0 },
+        { icon: "💔", label: "PP bag damage", value: Number(r.damage) || 0 },
         { icon: "🛒", label: "Purchase requests", value: Number(r.pr_count) || 0 },
-        { icon: "💰", label: "Purchases value", value: Number(r.pr_amount) || 0, prefix: "ETB " },
-        { icon: "🛡", label: "Damaged claimed / verified", value: base.damagedClaimed, suffix: ` / ${base.damagedVerified}` },
-        { icon: "🔴", label: "Unaccounted bags", value: unaccounted },
       ];
     }
 

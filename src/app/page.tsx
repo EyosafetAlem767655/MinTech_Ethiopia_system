@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import CountUp from "@/components/CountUp";
 import RangeSelector from "@/components/RangeSelector";
@@ -8,6 +8,7 @@ import DailyReportsPanel from "@/components/panels/DailyReportsPanel";
 import { enablePushNotifications } from "@/components/PwaSetup";
 import { DEPARTMENTS } from "@/lib/departments";
 import { type RangeKey } from "@/lib/ranges";
+import { FLOW_TITLE } from "@/lib/flow-titles";
 import type { DepartmentSummary, Kpi } from "@/lib/department-metrics";
 
 interface SalesToday {
@@ -24,7 +25,7 @@ interface BriefData {
 }
 
 export default function OwnerDashboard() {
-  const [range, setRange] = useState<RangeKey>("weekly");
+  const [range, setRange] = useState<RangeKey>("daily");
   const [brief, setBrief] = useState<BriefData | null>(null);
   const [summaries, setSummaries] = useState<DepartmentSummary[] | null>(null);
   const [pushState, setPushState] = useState<string>("");
@@ -263,57 +264,159 @@ interface ActivityItem {
   createdAt: string;
 }
 
+/**
+ * Labels for the OLD LLM doc types, kept for rows filed before the guided flows.
+ *
+ * Everything filed since logs its detail as `"<flow kind> <uuid>"`, which is
+ * resolved through FLOW_TITLE instead. Without that branch every voucher,
+ * production report and base balance on this list rendered as a raw string with
+ * a uuid in it — the map below simply had no key that could ever match.
+ */
 const SUBMISSION_LABELS: Record<string, { icon: string; label: string }> = {
   daily_report: { icon: "📝", label: "Daily report" },
   materials: { icon: "📦", label: "Material count" },
   receipt: { icon: "🧾", label: "Receipt" },
   purchase_request: { icon: "🛒", label: "Purchase request" },
   damage_claim: { icon: "🛡", label: "Damage claim" },
-  stone_delivery: { icon: "🚚", label: "Stone delivery" },
-  shift_report: { icon: "👷", label: "Shift report" },
-  invoice: { icon: "📄", label: "Invoice" },
-  payment: { icon: "💵", label: "Payment" },
   ops: { icon: "📊", label: "Operations report" },
-  withholding_receipt: { icon: "📄", label: "Withholding receipt" },
+  sales_receipt: { icon: "🧾", label: "Sales receipt" },
 };
+
+/**
+ * "grv 0f3c…" → the flow's own title.
+ *
+ * FLOW_TITLE already carries an emoji and a name for every guided flow, so the
+ * two are split out of it rather than duplicated into a second table here that
+ * could drift from the bot menu.
+ */
+function fromFlowTitle(kind: string): { icon: string; label: string } | null {
+  const title = (FLOW_TITLE as Record<string, string>)[kind];
+  if (!title) return null;
+  const [icon, ...rest] = title.split(" ");
+  return rest.length > 0 ? { icon, label: rest.join(" ") } : { icon: "📄", label: title };
+}
 
 function humanizeDetail(detail?: string): { icon: string; label: string } {
   if (!detail) return { icon: "📄", label: "Submission" };
   if (detail.startsWith("hr:")) return { icon: "👥", label: "HR report" };
-  return SUBMISSION_LABELS[detail] || { icon: "📄", label: detail.replace(/_/g, " ") };
+  // Guided flows log "<kind> <uuid>"; the older LLM path logged a bare doc type.
+  const [head] = detail.split(" ");
+  return (
+    fromFlowTitle(head) ||
+    SUBMISSION_LABELS[head] ||
+    SUBMISSION_LABELS[detail] || { icon: "📄", label: head.replace(/_/g, " ") }
+  );
 }
 
 const fmtTime = (d: string) =>
   new Date(d).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 
+/** The three windows the submissions feed can be read over. */
+const FEED_WINDOWS = {
+  day: { label: "Today", days: 1 },
+  week: { label: "This week", days: 7 },
+  month: { label: "This month", days: 30 },
+} as const;
+type FeedWindow = keyof typeof FEED_WINDOWS;
+
+/** EAT calendar day for a timestamp — the heading rows are grouped on this. */
+const eatDayKey = (iso: string) => new Date(new Date(iso).getTime() + 3 * 3600_000).toISOString().slice(0, 10);
+
+const dayHeading = (key: string) => {
+  const today = eatDayKey(new Date().toISOString());
+  if (key === today) return "Today";
+  const yesterday = eatDayKey(new Date(Date.now() - 86_400_000).toISOString());
+  if (key === yesterday) return "Yesterday";
+  return new Date(`${key}T00:00:00Z`).toLocaleDateString("en-GB", {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+  });
+};
+
+/**
+ * Who filed what, grouped by day within the chosen window.
+ *
+ * It was one flat list of the last 30 rows, which on a busy week is a scroll
+ * with no shape to it — you could not tell whether a run of entries was this
+ * morning or last Tuesday. Day headings and a window selector answer both.
+ */
 function RecentSubmissions() {
   const [items, setItems] = useState<ActivityItem[] | null>(null);
+  const [window, setWindow] = useState<FeedWindow>("day");
 
   useEffect(() => {
-    fetch("/api/bot-activity?action=submission&limit=30")
+    // One fetch covering the widest window; switching between them is instant
+    // and costs no round trip, the same approach the department panels take.
+    fetch("/api/bot-activity?action=submission&limit=300")
       .then((r) => (r.ok ? r.json() : null))
-      .then((d) => {
-        if (d?.items) setItems(d.items);
-      })
-      .catch(() => {});
+      .then((d) => setItems(Array.isArray(d?.items) ? d.items : []))
+      .catch(() => setItems([]));
   }, []);
 
-  if (!items) return <div className="card h-24 animate-pulse bg-clay-50" />;
-  if (items.length === 0) return <p className="card p-4 text-sm text-stone-400">No submissions yet.</p>;
+  const groups = useMemo(() => {
+    if (!items) return [];
+    const cutoff = Date.now() - FEED_WINDOWS[window].days * 86_400_000;
+    const byDay = new Map<string, ActivityItem[]>();
+    for (const a of items) {
+      const at = new Date(a.createdAt).getTime();
+      if (!isFinite(at) || at < cutoff) continue;
+      const key = eatDayKey(a.createdAt);
+      const list = byDay.get(key) ?? [];
+      list.push(a);
+      byDay.set(key, list);
+    }
+    return [...byDay.entries()].sort(([a], [b]) => b.localeCompare(a));
+  }, [items, window]);
+
+  const total = groups.reduce((a, [, rows]) => a + rows.length, 0);
 
   return (
-    <div className="card divide-y divide-clay-50 p-0">
-      {items.map((a) => {
-        const h = humanizeDetail(a.detail);
-        return (
-          <div key={a._id} className="flex items-center gap-2 p-3 text-xs">
-            <span className="text-base leading-none">{h.icon}</span>
-            <span className="font-bold text-stone-800">{a.actor}</span>
-            <span className="text-stone-500">{h.label}</span>
-            <span className="ml-auto shrink-0 text-[10px] text-stone-400">{fmtTime(a.createdAt)}</span>
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-1 px-1">
+        {(Object.keys(FEED_WINDOWS) as FeedWindow[]).map((k) => (
+          <button
+            key={k}
+            onClick={() => setWindow(k)}
+            className={`rounded-full px-3 py-1 text-[11px] font-bold transition ${
+              window === k ? "bg-clay-700 text-white" : "bg-clay-50 text-clay-700"
+            }`}
+          >
+            {FEED_WINDOWS[k].label}
+          </button>
+        ))}
+        {items && <span className="ml-auto text-[11px] text-stone-400">{total} submission(s)</span>}
+      </div>
+
+      {!items ? (
+        <div className="card h-24 animate-pulse bg-clay-50" />
+      ) : groups.length === 0 ? (
+        <p className="card p-4 text-sm text-stone-400">
+          Nothing filed {FEED_WINDOWS[window].label.toLowerCase()}.
+        </p>
+      ) : (
+        groups.map(([day, rows]) => (
+          <div key={day} className="space-y-1">
+            <p className="flex items-baseline justify-between px-1 text-[11px] font-bold text-stone-500">
+              <span>{dayHeading(day)}</span>
+              <span className="text-stone-400">{rows.length}</span>
+            </p>
+            <div className="card divide-y divide-clay-50 p-0">
+              {rows.map((a) => {
+                const h = humanizeDetail(a.detail);
+                return (
+                  <div key={a._id} className="flex items-center gap-2 p-3 text-xs">
+                    <span className="text-base leading-none">{h.icon}</span>
+                    <span className="font-bold text-stone-800">{a.actor}</span>
+                    <span className="truncate text-stone-500">{h.label}</span>
+                    <span className="ml-auto shrink-0 text-[10px] text-stone-400">{fmtTime(a.createdAt)}</span>
+                  </div>
+                );
+              })}
+            </div>
           </div>
-        );
-      })}
+        ))
+      )}
     </div>
   );
 }

@@ -32,7 +32,7 @@ const fmtTime = (d: string) =>
 
 export default function DepartmentReport({ dept }: { dept: DepartmentKey }) {
   const meta = DEPARTMENTS[dept];
-  const [range, setRange] = useState<RangeKey>("weekly");
+  const [range, setRange] = useState<RangeKey>("daily");
   const [report, setReport] = useState<Report | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");

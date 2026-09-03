@@ -1,9 +1,10 @@
 import sql from "@/lib/sql";
 import {
-  BAG_SIZES,
-  BAG_SIZE_LABEL,
-  bagSizeTotals,
-  parseBagLedgerKey,
+  BAG_KINDS,
+  BAG_KIND_KEYS,
+  bagKindCount,
+  bagLabel,
+  bagLedgerKey,
   type BagCounts,
   type BagSize,
 } from "@/lib/products";
@@ -30,16 +31,18 @@ import { monthBounds, monthLabel } from "@/lib/finance-report";
  */
 
 /**
- * Reconciled per SIZE, not per colour.
+ * Reconciled per bag KIND — all six, colour included.
  *
- * The monthly base balance is filed by size, so a per-colour expectation has no
- * opening figure to start from — it would be a number computed from a blank and
- * would flag a "gap" on day one of every month. Colour-level movement is real
- * and is shown alongside, it simply is not checked against a balance that does
- * not exist.
+ * The colours carry different unit prices and are packed separately, so a gap
+ * that names only the size cannot say what it is worth or which pallet to go and
+ * look at. The opening balance, both voucher ledgers and production's daily
+ * count are all keyed on the same `bagLedgerKey` string, which is what lets the
+ * four line up at all.
  */
 export interface BagReconciliation {
+  key: string;
   size: BagSize;
+  colour: string;
   label: string;
   baseBalance: number;
   received: number;
@@ -57,8 +60,6 @@ export interface ReconciliationResult {
   /** The day the counted figures come from. */
   countedOn: string | null;
   rows: BagReconciliation[];
-  /** Movement by bag kind, for context. Not checked against a balance. */
-  byKind: { key: string; received: number; issued: number }[];
   /** Rows whose gap is worth raising. */
   discrepancies: BagReconciliation[];
 }
@@ -119,36 +120,36 @@ export async function reconcileBags(month = monthLabel()): Promise<Reconciliatio
     `.catch(() => []),
   ]);
 
-  const baseBags = bagSizeTotals((base[0]?.bags || {}) as BagCounts);
+  // All four sources key on the same string, which is the only reason they can
+  // be lined up: the opening balance writes `bag:kg25:Yellow` into its jsonb,
+  // both voucher ledgers write `kg25:Yellow`, and production's count nests the
+  // colour under the size. `bagLedgerKey` is the single spelling they share.
+  const baseMap = (base[0]?.bags || {}) as Record<string, number>;
+  const received: Record<string, number> = Object.fromEntries(BAG_KIND_KEYS.map((k) => [k, 0]));
+  const issued: Record<string, number> = Object.fromEntries(BAG_KIND_KEYS.map((k) => [k, 0]));
 
-  const received: Record<BagSize, number> = { kg25: 0, kg40: 0 };
-  const issued: Record<BagSize, number> = { kg25: 0, kg40: 0 };
-  const kindMap = new Map<string, { received: number; issued: number }>();
-
-  const add = (key: string, qty: number, into: Record<BagSize, number>, field: "received" | "issued") => {
-    const parsed = parseBagLedgerKey(key);
-    if (!parsed) return;
-    into[parsed.size] += qty;
-    const entry = kindMap.get(key) || { received: 0, issued: 0 };
-    entry[field] += qty;
-    kindMap.set(key, entry);
-  };
-
-  for (const row of grvLines) add(row.ledger_key, n(row.qty), received, "received");
-  for (const row of sivLines) add(row.ledger_key, n(row.qty), issued, "issued");
+  for (const row of grvLines) {
+    if (row.ledger_key in received) received[row.ledger_key] += n(row.qty);
+  }
+  for (const row of sivLines) {
+    if (row.ledger_key in issued) issued[row.ledger_key] += n(row.qty);
+  }
 
   const countRow = latestCount[0];
-  const countedTotals = countRow ? bagSizeTotals(countRow.bags) : null;
 
-  const rows: BagReconciliation[] = BAG_SIZES.map((size) => {
-    const expected = baseBags[size] + received[size] - issued[size];
-    const counted = countedTotals ? countedTotals[size] : null;
+  const rows: BagReconciliation[] = BAG_KINDS.map(({ size, colour }) => {
+    const key = bagLedgerKey(size, colour);
+    const baseBalance = n(baseMap[key]);
+    const expected = baseBalance + received[key] - issued[key];
+    const counted = countRow ? bagKindCount(countRow.bags, size, colour) : null;
     return {
+      key,
       size,
-      label: `${BAG_SIZE_LABEL[size]} PP`,
-      baseBalance: baseBags[size],
-      received: received[size],
-      issued: issued[size],
+      colour,
+      label: `${bagLabel(size, colour)} PP`,
+      baseBalance,
+      received: received[key],
+      issued: issued[key],
       expected,
       counted,
       gap: counted === null ? null : counted - expected,
@@ -159,7 +160,6 @@ export async function reconcileBags(month = monthLabel()): Promise<Reconciliatio
     month,
     countedOn: countRow?.date_label ?? null,
     rows,
-    byKind: [...kindMap.entries()].map(([key, v]) => ({ key, ...v })),
     // A null gap is "nobody counted", not "no discrepancy" — it must never
     // present as a clean reconciliation.
     discrepancies: rows.filter((r) => r.gap !== null && Math.abs(r.gap) > BAG_GAP_TOLERANCE),

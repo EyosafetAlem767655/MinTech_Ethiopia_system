@@ -24,6 +24,7 @@ import {
   isSkip as isAssetSkip,
   MAX_FLOW_PHOTOS,
   nextStep,
+  voucherItems,
   parseQty,
   pasteTemplate,
   saveAssetReport,
@@ -35,6 +36,7 @@ import {
 import { parseProductionPaste } from "@/lib/production-paste";
 import { parseFinancePaste } from "@/lib/finance-paste";
 import { FINANCE_RECEIPT_KIND, backgroundPurchaseReceiptCheck } from "@/lib/finance-receipts";
+import { backgroundVoucherVerify } from "@/lib/voucher-verify";
 import { PP_BAG_PHOTO_KIND, processPpDamageReport, ppVerdictMessage } from "@/lib/pp-bag-damage";
 import {
   answerCallbackQuery,
@@ -1657,6 +1659,12 @@ export async function POST(req: NextRequest) {
           const receiptPhotos = receiptFlow ? state.photoFileIds || [] : [];
           const receiptTotal = Number(state.draft.totalAmount) || 0;
           const receiptCurrency = String(state.draft.currency || "ETB");
+          // The store issue voucher is typed first and photographed last, so its
+          // photo is evidence to check the entry against — the reverse of the GRV,
+          // where the photo is the source the entry comes from.
+          const verifyPhotos = state.kind === "store_issue" ? state.photoFileIds || [] : [];
+          const verifyItems = state.kind === "store_issue" ? voucherItems(state.draft) : [];
+          const verifyNo = String(state.draft.sivNo || "") || null;
 
           session.state = "idle";
           session.assetFlow = undefined;
@@ -1694,6 +1702,17 @@ export async function POST(req: NextRequest) {
             });
             // Silence means the receipt agreed with what was typed. Only a
             // disagreement, or a check that could not run, is worth a message.
+            if (note) await sendMessage(chatId, note).catch(() => {});
+          }
+          if (verifyPhotos.length > 0) {
+            const note = await backgroundVoucherVerify({
+              id: saved.id,
+              fileIds: verifyPhotos,
+              typedItems: verifyItems,
+              voucherNo: verifyNo,
+            });
+            // Silence means the photo agreed with the entry. Only a
+            // disagreement, or a read that could not run, is worth a message.
             if (note) await sendMessage(chatId, note).catch(() => {});
           }
           await sendReportMenu(chatId, userCapabilities(user).map((c) => c.button));
@@ -1776,10 +1795,11 @@ export async function POST(req: NextRequest) {
             });
             return NextResponse.json({ ok: true });
           }
-          // The voucher flows: the paperwork answers most of the questions, so
-          // read it now and resume at whatever the model could not fill in. With
-          // no photo there is nothing to read and the flow simply carries on.
-          if ((state.kind === "grv" || state.kind === "store_issue") && collected.length > 0) {
+          // The GRV only: a supplier's voucher IS the source, so reading it saves
+          // transcribing someone else's document. The store issue voucher is
+          // typed first and its photo checked afterwards — the person filling it
+          // in is standing at the shelf and already knows what they took.
+          if (state.kind === "grv" && collected.length > 0) {
             await extractVoucherIntoDraft(session, chatId, state);
             return NextResponse.json({ ok: true });
           }

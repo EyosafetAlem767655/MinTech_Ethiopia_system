@@ -1,6 +1,7 @@
 import sql from "@/lib/sql";
 import {
   BAG_KINDS,
+  BAG_KIND_KEYS,
   BAG_SIZES,
   BAG_SIZE_LABEL,
   BAG_STOCK,
@@ -32,6 +33,10 @@ import {
 } from "@/lib/finance-paste";
 import { monthLabel, nextMonth, priceListItems } from "@/lib/finance-report";
 import type { ToolPhotoCheck, VoucherRead } from "@/lib/llm";
+// Names and the kind union live in a client-safe module — see flow-titles.ts.
+import { FLOW_TITLE, type AssetFlowKind } from "@/lib/flow-titles";
+export { FLOW_TITLE };
+export type { AssetFlowKind };
 
 /**
  * Guided step-by-step data entry for the reports filed from the bot — the three
@@ -48,22 +53,6 @@ import type { ToolPhotoCheck, VoucherRead } from "@/lib/llm";
  * renaming the state, the session column and every call site would be pure
  * churn; read it as "guided flows".
  */
-
-export type AssetFlowKind =
-  | "raw_material"
-  | "delivery"
-  | "tool_request"
-  | "pp_bag_damage"
-  | "production_daily"
-  // Asset management, feeding the monthly finance report.
-  | "base_balance"
-  // The two paper vouchers. They replaced four buttons that each captured a
-  // slice of the same events; the retired tables stay readable in Settings.
-  | "store_issue"
-  | "grv"
-  // Finance.
-  | "price_list"
-  | "wht_holder";
 
 export interface AssetFlowState {
   kind: AssetFlowKind;
@@ -302,9 +291,12 @@ const BASE_BALANCE_STEPS: AssetStep[] = [
     prompt: `⛏ የመነሻ ሚዛን — የ<b>${m}</b> ብዛት በቶን። ከሌለ 0 ይፃፉ።`,
     type: "number",
   })),
-  ...BAG_SIZES.map<AssetStep>((size) => ({
-    id: bagFinanceKey(size),
-    prompt: `🧺 የመነሻ ሚዛን — የ<b>${BAG_SIZE_LABEL[size]} PP</b> ከረጢት ብዛት (ቁጥር)። ከሌለ 0 ይፃፉ።`,
+  // Six kinds, not two sizes: they carry different unit prices and are packed
+  // separately, so an opening balance per size would value three products at one
+  // number and make the stock check unable to name which colour went missing.
+  ...BAG_KINDS.map<AssetStep>(({ size, colour }) => ({
+    id: bagFinanceKey(size, colour),
+    prompt: `🧺 የመነሻ ሚዛን — የ<b>${bagLabel(size, colour)} PP</b> ከረጢት ብዛት (ቁጥር)። ከሌለ 0 ይፃፉ።`,
     type: "number",
   })),
 ];
@@ -536,25 +528,26 @@ const GRV_STEPS: AssetStep[] = [
 /**
  * Everything taken out of the warehouse.
  *
+ * TYPED FIRST, then photographed — the opposite order to the GRV, deliberately.
+ *
+ * On a goods receiving voucher the supplier's paper IS the source, and reading
+ * it saves the reporter transcribing someone else's document. Here the person is
+ * standing in the store with the items in front of them: they know what they
+ * issued, and asking them to check an AI's reading of their own handwriting is
+ * both slower to correct and far easier to wave through. So the questions come
+ * first and the photo comes last, as evidence.
+ *
+ * The photo is then compared against what was typed and any disagreement is
+ * flagged — see backgroundVoucherVerify. It never rewrites a figure: what the
+ * person at the store typed is the record.
+ *
  * Both bag kinds and raw materials are offered, because this replaced the daily
  * raw-material issue and has to keep filling the Issue column of the monthly
- * report.
- *
- * The photo step is optional here, unlike the GRV: the voucher is often filled
- * at a bench with no camera to hand, and the user asked for "image or one-by-one
- * input". Unit costs are optional for the same reason — the store issues goods,
- * finance prices them, and the monthly report values issues from its own price
- * list regardless.
+ * report. Unit costs are optional — the store issues goods, finance prices them,
+ * and the monthly report values issues from its own price list regardless.
  */
 const STORE_ISSUE_STEPS: AssetStep[] = [
   { id: "date", prompt: "📅 ዕቃው የወጣበትን ቀን ይምረጡ።", type: "date" },
-  {
-    id: "photos",
-    prompt:
-      `📷 የStore Issue Voucher ፎቶ ይላኩ — እስከ ${MAX_FLOW_PHOTOS} ፎቶ። ከጨረሱ በኋላ "✅ ጨርሻለሁ" ይጫኑ።\n` +
-      `<i>ፎቶ ከሌለ "✅ ጨርሻለሁ" ብለው በደረጃ በደረጃ ማስገባት ይችላሉ።</i>`,
-    type: "photos",
-  },
   { id: "sivNo", prompt: "🔢 የቫውቸሩን ቁጥር (No.) ይፃፉ — ለምሳሌ 8610።", type: "text", skippable: true },
   { id: "issuingStore", prompt: "🏬 የሚያወጣው መጋዘን (Issuing Store) የትኛው ነው?", type: "text", skippable: true },
   { id: "issuedTo", prompt: "🧑 ለማን ተሰጠ (Issued To)?", type: "text" },
@@ -575,6 +568,16 @@ const STORE_ISSUE_STEPS: AssetStep[] = [
   { id: "issuedBy", prompt: "🧑 ያወጣው (Issued by) ማን ነው?", type: "text", skippable: true },
   { id: "approvedBy", prompt: "🧑 ያፀደቀው (Approved by) ማን ነው?", type: "text", skippable: true },
   { id: "receivedBy", prompt: "🧑 የተረከበው (Received by) ማን ነው?", type: "text", skippable: true },
+  // Last, and as evidence rather than input. Optional, because the voucher is
+  // often filled at a bench with no camera to hand — but when a photo is sent it
+  // is read and compared against everything typed above.
+  {
+    id: "photos",
+    prompt:
+      `📷 የቫውቸሩን ፎቶ ይላኩ — እስከ ${MAX_FLOW_PHOTOS} ፎቶ። ከጨረሱ በኋላ "✅ ጨርሻለሁ" ይጫኑ።\n` +
+      `<i>ፎቶው ካስገቡት ጋር ይነጻጸራል። ልዩነት ካለ እንነግርዎታለን። ፎቶ ከሌለ "✅ ጨርሻለሁ" ይጫኑ።</i>`,
+    type: "photos",
+  },
 ];
 
 /* ────────────────────────── Monthly price list (finance) ─────────────────── */
@@ -582,7 +585,11 @@ const STORE_ISSUE_STEPS: AssetStep[] = [
 /** Which namespace a price-list item belongs to — brands and raw materials both
  *  contain "Talc", so the key must record which table it is priced on. */
 function priceKey(key: string): string {
-  if ((BAG_SIZES as readonly string[]).includes(key)) return bagFinanceKey(key as BagSize);
+  // A bag kind arrives as "kg25:Yellow" from priceListItems().
+  const bag = key.includes(":") ? key.split(":") : null;
+  if (bag && (BAG_SIZES as readonly string[]).includes(bag[0])) {
+    return bagFinanceKey(bag[0] as BagSize, bag[1]);
+  }
   if ((PRODUCT_ORDER as readonly string[]).includes(key)) return brandKey(key);
   return materialKey(key);
 }
@@ -657,18 +664,6 @@ const STEPS: Record<AssetFlowKind, AssetStep[]> = {
   wht_holder: WHT_HOLDER_STEPS,
 };
 
-export const FLOW_TITLE: Record<AssetFlowKind, string> = {
-  raw_material: "🚚 የጥሬ ዕቃ ገቢ ሪፖርት",
-  delivery: "🚛 የማድረሻ ሪፖርት",
-  tool_request: "🔧 የመሣሪያ ግዢ ጥያቄ",
-  pp_bag_damage: "💔 የPP ከረጢት ብልሽት ሪፖርት",
-  production_daily: "🏭 የቀኑ የምርት ሪፖርት",
-  base_balance: "📊 የወሩ የመነሻ ሚዛን",
-  store_issue: "📤 የመጋዘን ወጪ ቫውቸር (SIV)",
-  grv: "📥 የዕቃ ገቢ ቫውቸር (GRV)",
-  price_list: "💲 የወሩ የዋጋ ዝርዝር",
-  wht_holder: "📄 WHT ደረሰኝ ያዢ",
-};
 
 /** The template text for a paste step. */
 export function pasteTemplate(kind: AssetFlowKind): string {
@@ -923,7 +918,10 @@ export function assetPreview(state: AssetFlowState): string {
   if (state.kind === "base_balance") {
     const brands = PRODUCT_ORDER.map((c) => `${productLabel(c)}: <b>${qty(Number(d[brandKey(c)]) || 0)}</b> ቶን`);
     const mats = FINANCE_RAW_MATERIALS.map((m) => `${m}: <b>${qty(Number(d[materialKey(m)]) || 0)}</b> ቶን`);
-    const bags = BAG_SIZES.map((sz) => `${BAG_SIZE_LABEL[sz]} PP: <b>${qty(Number(d[bagFinanceKey(sz)]) || 0)}</b>`);
+    const bags = BAG_KINDS.map(
+      ({ size, colour }) =>
+        `${bagLabel(size, colour)} PP: <b>${qty(Number(d[bagFinanceKey(size, colour)]) || 0)}</b>`
+    );
     return [
       `📊 <b>የ${nextMonthOf(d)} የመነሻ ሚዛን</b>`,
       "",
@@ -1202,7 +1200,7 @@ export async function saveAssetReport(
       values (${month},
               ${sql.json(jsonMap(d, BRAND_PREFIX, PRODUCT_ORDER))},
               ${sql.json(jsonMap(d, MATERIAL_PREFIX, FINANCE_RAW_MATERIALS))},
-              ${sql.json(jsonMap(d, BAG_PREFIX, BAG_SIZES))},
+              ${sql.json(jsonMap(d, BAG_PREFIX, BAG_KIND_KEYS))},
               ${reportedBy}, 'telegram')
       on conflict (month) do update set
         products = excluded.products,
@@ -1284,7 +1282,7 @@ export async function saveAssetReport(
     const prices: Record<string, number> = {
       ...jsonMap(d, BRAND_PREFIX, PRODUCT_ORDER),
       ...jsonMap(d, MATERIAL_PREFIX, FINANCE_RAW_MATERIALS),
-      ...jsonMap(d, BAG_PREFIX, BAG_SIZES),
+      ...jsonMap(d, BAG_PREFIX, BAG_KIND_KEYS),
     };
     const [row] = await sql<{ id: string }[]>`
       insert into monthly_price_lists (month, prices, usd_rate, reported_by, source)

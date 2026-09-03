@@ -101,7 +101,7 @@ const bucketLabel = (key: string, bucket: Bucket) =>
     : fmtDate(key);
 
 export default function ProductionPanels() {
-  const [range, setRange] = useState<RangeKey>("monthly");
+  const [range, setRange] = useState<RangeKey>("daily");
   const [production, setProduction] = useState<ProductionRow[] | null>(null);
   const [ops, setOps] = useState<OpsRow[] | null>(null);
 

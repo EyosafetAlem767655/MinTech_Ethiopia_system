@@ -193,7 +193,7 @@ interface BinRow {
  */
 function SubmissionsTab() {
   const [collection, setCollection] = useState<CollectionFilter>("all");
-  const [range, setRange] = useState<SubmissionRange>("7d");
+  const [range, setRange] = useState<SubmissionRange>("24h");
   const [rows, setRows] = useState<SubmissionRow[] | null>(null);
   const [counts, setCounts] = useState<Record<string, number>>({});
   const [unavailable, setUnavailable] = useState<string[]>([]);

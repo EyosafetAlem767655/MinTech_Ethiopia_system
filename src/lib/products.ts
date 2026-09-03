@@ -129,6 +129,17 @@ export function bagLedgerKey(size: BagSize, colour: string): string {
   return `${size}:${colour}`;
 }
 
+/**
+ * The six kinds as ledger keys, in table order.
+ *
+ * ONE vocabulary, deliberately. The monthly opening balance, the monthly price
+ * list, a goods-receiving line and a store-issue line all key on these exact
+ * strings — if any of them invented its own spelling, the stock check could not
+ * join opening + received − issued at all, and the mismatch would look like
+ * missing stock rather than a naming bug.
+ */
+export const BAG_KIND_KEYS: string[] = BAG_KINDS.map(({ size, colour }) => bagLedgerKey(size, colour));
+
 /** The reverse, returning null for anything that is not one of the six kinds. */
 export function parseBagLedgerKey(key: string): { size: BagSize; colour: string } | null {
   const [size, colour] = String(key || "").split(":");

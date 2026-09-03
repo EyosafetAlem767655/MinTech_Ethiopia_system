@@ -102,9 +102,19 @@ export async function GET(req: NextRequest) {
     // turns into a flood of duplicate messages to a customer.
     await sql`
       update wht_sms_log
-         set ok = ${res.ok}, status = ${res.status ?? null}, error = ${res.error ?? null}
+         set ok = ${res.ok}, status = ${res.status ?? null}, error = ${res.error ?? null},
+             route = ${res.route ?? null}
        where holder_id = ${h.id} and sent_on = ${today}::date
-    `.catch(() => {});
+    `.catch(async () => {
+      // `route` arrives in 0020. Losing which endpoint delivered is a nuisance;
+      // losing the record that we sent at all would let tomorrow's run text the
+      // customer twice, so the rest of the update still has to land.
+      await sql`
+        update wht_sms_log
+           set ok = ${res.ok}, status = ${res.status ?? null}, error = ${res.error ?? null}
+         where holder_id = ${h.id} and sent_on = ${today}::date
+      `.catch(() => {});
+    });
 
     if (res.ok) smsSent += 1;
     else smsFailed += 1;

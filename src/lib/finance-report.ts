@@ -1,9 +1,13 @@
 import sql from "@/lib/sql";
 import {
+  BAG_KINDS,
+  BAG_KIND_KEYS,
   BAG_SIZES,
   BAG_SIZE_LABEL,
   FINANCE_RAW_MATERIALS,
   PRODUCT_ORDER,
+  bagLabel,
+  bagLedgerKey,
   bagSizeTotals,
   parseBagLedgerKey,
   productLabel,
@@ -229,32 +233,42 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
   const soldMap = sumMaps(delivered);
   const receivedMap = rollUpMaterials(sumMaps(received));
   // Bag purchases arrive in two shapes: asset management counts them by size AND
-  // colour, finance files a receipt with no counts at all, and rows from before
-  // the colour split carry a plain total per size. bagSizeTotals flattens all
-  // three, so a nested map cannot silently read as NaN and lose a month of
-  // deliveries. Colours are summed away here because the report has one line per
-  // size — the breakdown is on the asset tab, where it was counted.
-  const bagsBoughtMap: Record<string, number> = { kg25: 0, kg40: 0 };
+  // colour, and the retired finance rows carry a plain total per size with no
+  // colour at all. Everything is keyed by KIND ("kg25:Yellow") from here on,
+  // because that is what the report prices: the six colours cost different
+  // amounts and are packed separately, so summing them to a size would value
+  // three products at one number.
+  //
+  // A retired size-level row therefore has nowhere to land, and is deliberately
+  // NOT split across the colours — inventing a breakdown nobody counted would be
+  // worse than the row being visibly absent. bagSizeTotals is still used to
+  // surface the figure so it is not silently swallowed.
+  const bagsBoughtMap: Record<string, number> = Object.fromEntries(BAG_KIND_KEYS.map((k) => [k, 0]));
+  const legacyBagsWithoutColour: Record<string, number> = { kg25: 0, kg40: 0 };
   for (const row of bagsBoughtLegacy) {
-    const totals = bagSizeTotals(row.m as BagCounts);
-    for (const size of BAG_SIZES) bagsBoughtMap[size] += totals[size];
+    const m = (row.m || {}) as BagCounts;
+    for (const [size, value] of Object.entries(m)) {
+      if (value && typeof value === "object") {
+        // Already per colour — key it straight through.
+        for (const [colour, qtyBought] of Object.entries(value)) {
+          const key = bagLedgerKey(size as (typeof BAG_SIZES)[number], colour);
+          if (key in bagsBoughtMap) bagsBoughtMap[key] += n(qtyBought);
+        }
+      } else if (size in legacyBagsWithoutColour) {
+        legacyBagsWithoutColour[size] += n(value);
+      }
+    }
   }
-  // GRV lines are keyed by bag KIND ("kg25:Yellow"); the report has one row per
-  // size, so the colours are summed away here. The breakdown is not lost — it is
-  // on the voucher, where somebody confirmed it.
   for (const row of bagsFromGrv) {
-    const parsed = parseBagLedgerKey(row.ledger_key);
-    if (!parsed) continue;
-    bagsBoughtMap[parsed.size] += n(row.qty);
+    if (row.ledger_key in bagsBoughtMap) bagsBoughtMap[row.ledger_key] += n(row.qty);
   }
 
   const issuedMaterials = rollUpMaterials(sumMaps(issuedLegacy.map((r) => ({ m: r.m }))));
-  const issuedBags = sumMaps(issuedLegacy.map((r) => ({ m: r.b })));
+  const issuedBags: Record<string, number> = Object.fromEntries(BAG_KIND_KEYS.map((k) => [k, 0]));
   for (const row of issuedFromSiv) {
     const qtyIssued = n(row.qty);
     if (row.ledger_kind === "bag") {
-      const parsed = parseBagLedgerKey(row.ledger_key);
-      if (parsed) issuedBags[parsed.size] = (issuedBags[parsed.size] || 0) + qtyIssued;
+      if (row.ledger_key in issuedBags) issuedBags[row.ledger_key] += qtyIssued;
     } else {
       // Already a finance material name — the voucher offers those three keys
       // directly, so there is no Kuni/Chips/Guji roll-up to do here.
@@ -311,18 +325,19 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
     };
   });
 
-  for (const size of BAG_SIZES) {
-    // Bags are counted, not weighed, so they carry their own unit and never
-    // contribute to a tonnage total.
-    const baseBalance = Math.round(n(baseRow?.bags?.[size]));
-    const rec = Math.round(n(bagsBoughtMap[size]));
+  // One row per bag KIND. Bags are counted, not weighed, so they carry their own
+  // unit and never contribute to a tonnage total.
+  for (const { size, colour } of BAG_KINDS) {
+    const key = bagLedgerKey(size, colour);
+    const baseBalance = Math.round(n(baseRow?.bags?.[key]));
+    const rec = Math.round(n(bagsBoughtMap[key]));
     const total = baseBalance + rec;
-    const issue = Math.round(n(issuedBags[size]));
-    const unitPrice = round2(n(prices[size]));
+    const issue = Math.round(n(issuedBags[key]));
+    const unitPrice = round2(n(prices[key]));
     const stock = total - issue;
     rawMaterials.push({
-      code: size,
-      label: `${BAG_SIZE_LABEL[size]} PP bag`,
+      code: key,
+      label: `${bagLabel(size, colour)} PP bag`,
       unit: "pcs",
       baseBalance,
       received: rec,
@@ -331,6 +346,26 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
       stock,
       unitPrice,
       netWorth: round2(stock * unitPrice),
+    });
+  }
+
+  // A retired size-level purchase row has no colour and so no price. It is shown
+  // as its own line rather than dropped, because a quantity that quietly
+  // disappears from a report is worse than one that is visibly unpriced.
+  for (const size of BAG_SIZES) {
+    const rec = Math.round(legacyBagsWithoutColour[size]);
+    if (rec === 0) continue;
+    rawMaterials.push({
+      code: `${size}:legacy`,
+      label: `${BAG_SIZE_LABEL[size]} PP bag (no colour recorded)`,
+      unit: "pcs",
+      baseBalance: 0,
+      received: rec,
+      total: rec,
+      issue: 0,
+      stock: rec,
+      unitPrice: 0,
+      netWorth: 0,
     });
   }
 
@@ -365,9 +400,11 @@ export function priceListItems(): { key: string; label: string; unit: string }[]
   return [
     ...PRODUCT_ORDER.map((code) => ({ key: code, label: productLabel(code), unit: "ETB/ton" })),
     ...FINANCE_RAW_MATERIALS.map((code) => ({ key: code, label: code, unit: "ETB/ton" })),
-    ...BAG_SIZES.map((size) => ({
-      key: size,
-      label: `${BAG_SIZE_LABEL[size]} PP bag`,
+    // One price per KIND. The colours cost different amounts and are packed
+    // separately, so a single price per size would value three products alike.
+    ...BAG_KINDS.map(({ size, colour }) => ({
+      key: bagLedgerKey(size, colour),
+      label: `${bagLabel(size, colour)} PP bag`,
       unit: "ETB/piece",
     })),
   ];

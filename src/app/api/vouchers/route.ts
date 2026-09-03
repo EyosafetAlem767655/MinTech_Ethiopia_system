@@ -15,8 +15,6 @@ export const dynamic = "force-dynamic";
  * migration behind must show an empty panel rather than a 500.
  */
 export async function GET() {
-  const empty = { rows: [], unavailable: true };
-
   const [grv, grvItems, siv, sivItems] = await Promise.all([
     sql<Record<string, unknown>[]>`
       select id as "_id", grv_no as "voucherNo", date, supplier,
@@ -61,9 +59,13 @@ export async function GET() {
     `.catch(() => null),
   ]);
 
-  if (grv === null && siv === null) return NextResponse.json({ ...empty, siv: [], reconciliation: null });
-
-  const reconciliation = await reconcileBags().catch(() => null);
+  // Every branch returns the SAME shape, including the one where both tables are
+  // missing. It previously returned `{ rows: [], unavailable: true }` there, and
+  // the panel read `data.grv.length` while rendering its tab label — so on any
+  // database without migration 0019 the whole section threw and rendered blank,
+  // which is exactly what "the bag counts don't show at all" looked like.
+  const unavailable = grv === null || siv === null;
+  const reconciliation = unavailable ? null : await reconcileBags().catch(() => null);
 
   return NextResponse.json({
     grv: grv ?? [],
@@ -71,6 +73,6 @@ export async function GET() {
     siv: siv ?? [],
     sivItems: sivItems ?? [],
     reconciliation,
-    unavailable: grv === null || siv === null,
+    unavailable,
   });
 }

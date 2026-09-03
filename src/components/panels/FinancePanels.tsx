@@ -540,8 +540,8 @@ function WhtTab() {
 
       {!smsConfigured && (
         <p className="card border-l-4 border-l-amber-500 p-3 text-xs font-bold text-amber-800">
-          The SMS gateway is not configured, so nobody is being chased. Set SMS_GATEWAY_USER and
-          SMS_GATEWAY_PASSWORD on Vercel.
+          The SMS gateway is not configured, so nobody is being chased. Set LONG_TOKEN on Vercel
+          (and optionally LOCAL_URL + SHORT_TOKEN for the office Wi-Fi route).
         </p>
       )}
       {error && <p className="card border-l-4 border-l-red-500 p-3 text-xs font-bold text-red-700">{error}</p>}

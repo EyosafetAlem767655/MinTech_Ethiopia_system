@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { ledgerLabel } from "@/lib/products";
+import { ledgerLabel, parseBagLedgerKey } from "@/lib/products";
 
 /**
  * The two paper vouchers, and whether they agree with the floor.
@@ -53,7 +53,9 @@ interface Voucher {
 }
 
 interface ReconRow {
+  key: string;
   size: string;
+  colour: string;
   label: string;
   baseBalance: number;
   received: number;
@@ -93,8 +95,22 @@ export default function VoucherPanels() {
   useEffect(() => {
     fetch("/api/vouchers")
       .then((r) => (r.ok ? r.json() : null))
-      .then((d) => setData(d ?? { grv: [], grvItems: [], siv: [], sivItems: [], reconciliation: null }))
-      .catch(() => setData({ grv: [], grvItems: [], siv: [], sivItems: [], reconciliation: null }));
+      .then((d) =>
+        setData({
+          // Normalised on arrival. The panel reads `.length` while rendering its
+          // tab labels, so a payload missing an array would throw before any of
+          // this could be shown — a blank section instead of an empty one.
+          grv: Array.isArray(d?.grv) ? d.grv : [],
+          grvItems: Array.isArray(d?.grvItems) ? d.grvItems : [],
+          siv: Array.isArray(d?.siv) ? d.siv : [],
+          sivItems: Array.isArray(d?.sivItems) ? d.sivItems : [],
+          reconciliation: d?.reconciliation ?? null,
+          unavailable: Boolean(d?.unavailable),
+        })
+      )
+      .catch(() =>
+        setData({ grv: [], grvItems: [], siv: [], sivItems: [], reconciliation: null, unavailable: true })
+      );
   }, []);
 
   const itemsByVoucher = useMemo(() => {
@@ -192,7 +208,7 @@ function Reconciliation({ recon }: { recon: Reconciliation | null }) {
           </thead>
           <tbody>
             {recon.rows.map((r) => (
-              <tr key={r.size} className="border-t border-clay-50">
+              <tr key={r.key} className="border-t border-clay-50">
                 <td className="p-1.5 text-left font-semibold text-stone-800">{r.label}</td>
                 <td className="p-1.5 tabular-nums text-stone-500">{fmt(r.baseBalance, 0)}</td>
                 <td className="p-1.5 tabular-nums text-stone-700">{fmt(r.received, 0)}</td>
@@ -220,8 +236,8 @@ function Reconciliation({ recon }: { recon: Reconciliation | null }) {
           : hasGaps
             ? "A gap means bags moved without a voucher, a voucher was filed twice, or the count is off. The counted figure is recorded as reported — nothing here changes it."
             : "The floor agrees with the vouchers."}{" "}
-        Checked per size: the opening balance is filed by size, so a per-colour expectation would have
-        no opening figure to start from.
+        Checked per colour, because the six kinds carry different unit prices and are packed
+        separately — a gap that named only the size could not say what it is worth.
       </p>
     </section>
   );
@@ -231,6 +247,26 @@ function Reconciliation({ recon }: { recon: Reconciliation | null }) {
 
 function VoucherCard({ v, items, isGrv }: { v: Voucher; items: Item[]; isGrv: boolean }) {
   const ledgerLines = items.filter((i) => i.ledgerKey);
+
+  /**
+   * What this voucher actually moved, per bag kind.
+   *
+   * Read off the confirmed ledger lines rather than the descriptions: a line
+   * only counts once somebody said which kind it was, so this summary and the
+   * stock check above can never disagree about the same voucher.
+   *
+   * Several lines can name the same kind — two pallets of 25KG Yellow on one
+   * delivery is ordinary — so they are summed, not listed twice.
+   */
+  const bagTotals = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const it of items) {
+      if (it.ledgerKind !== "bag" || !it.ledgerKey) continue;
+      if (!parseBagLedgerKey(it.ledgerKey)) continue;
+      map.set(it.ledgerKey, (map.get(it.ledgerKey) ?? 0) + Number(it.ledgerQty ?? 0));
+    }
+    return [...map.entries()].filter(([, qty]) => qty !== 0);
+  }, [items]);
 
   return (
     <div className="card space-y-2 p-3">
@@ -255,6 +291,34 @@ function VoucherCard({ v, items, isGrv }: { v: Voucher; items: Item[]; isGrv: bo
           </div>
         )}
       </div>
+
+      {/* PP bags this voucher moved, up front. The item table below carries the
+          same figures spread across its rows, but "how many bags came in on
+          5516" is the question this panel is opened to answer. */}
+      {bagTotals.length > 0 && (
+        <div className="rounded-lg bg-clay-50/70 px-2.5 py-2">
+          <p className="text-[10px] font-bold uppercase tracking-wide text-stone-500">
+            🧺 PP bags {isGrv ? "received" : "issued"}
+          </p>
+          <div className="mt-1 flex flex-wrap gap-1.5">
+            {bagTotals.map(([key, qty]) => (
+              <span
+                key={key}
+                className="rounded-full bg-white px-2 py-0.5 text-[11px] font-bold text-clay-800 ring-1 ring-clay-100"
+              >
+                {ledgerLabel("bag", key)} · {fmt(qty, 0)}
+              </span>
+            ))}
+            <span className="ml-auto text-[11px] font-bold tabular-nums text-clay-900">
+              {fmt(
+                bagTotals.reduce((a, [, qty]) => a + qty, 0),
+                0
+              )}{" "}
+              total
+            </span>
+          </div>
+        </div>
+      )}
 
       {items.length > 0 && (
         <div className="-mx-1 overflow-x-auto">

@@ -1,8 +1,8 @@
 import {
-  BAG_SIZES,
-  BAG_SIZE_LABEL,
+  BAG_KINDS,
   FINANCE_RAW_MATERIALS,
   PRODUCT_ORDER,
+  bagLabel,
   productLabel,
   type BagSize,
 } from "@/lib/products";
@@ -11,9 +11,9 @@ import {
  * Fill-in templates and parsers for the two long monthly lists: the opening
  * base balance and the price list.
  *
- * Both cover the same fifteen items — ten finished brands, three raw materials,
- * two bag sizes — which is fifteen questions a month if asked one at a time. The
- * bot offers a template instead: one message out, one message back.
+ * Both cover the same nineteen items — ten finished brands, three raw materials
+ * and six bag kinds — which is nineteen questions a month if asked one at a
+ * time. The bot offers a template instead: one message out, one message back.
  *
  * Sections are load-bearing rather than decorative. **"Talc" names two different
  * things**: the finished brand Micro Talc (product code `Talk`, produced and
@@ -46,8 +46,15 @@ export function brandKey(code: string): string {
 export function materialKey(name: string): string {
   return `${MATERIAL_PREFIX}${name}`;
 }
-export function bagFinanceKey(size: BagSize): string {
-  return `${BAG_PREFIX}${size}`;
+/**
+ * Draft key for one bag KIND, e.g. "bag:kg25:Yellow".
+ *
+ * Colour is part of the key, not decoration: the six kinds carry different unit
+ * prices and are packed separately, so a balance or a price recorded per size
+ * would value three different products at one number.
+ */
+export function bagFinanceKey(size: BagSize, colour: string): string {
+  return `${BAG_PREFIX}${size}:${colour}`;
 }
 
 /* ────────────────────────────────── templates ─────────────────────────────── */
@@ -55,7 +62,10 @@ export function bagFinanceKey(size: BagSize): string {
 function block(headers: [string, string, string]): string {
   const brands = PRODUCT_ORDER.map((c) => `${productLabel(c)}=`).join("\n");
   const materials = FINANCE_RAW_MATERIALS.map((m) => `${m}=`).join("\n");
-  const bags = BAG_SIZES.map((s) => `${BAG_SIZE_LABEL[s]} PP bag=`).join("\n");
+  // Six lines, one per kind. Two size lines would ask for a figure the parser
+  // deliberately refuses to read, because a bare "25KG" does not say which of
+  // its three colours it is.
+  const bags = BAG_KINDS.map(({ size, colour }) => `${bagLabel(size, colour)} PP bag=`).join("\n");
   return [headers[0], brands, headers[1], materials, headers[2], bags].join("\n");
 }
 
@@ -91,12 +101,17 @@ function buildLookup() {
   const materials = new Map<string, string>();
   for (const m of FINANCE_RAW_MATERIALS) materials.set(norm(m), m);
 
-  const bags = new Map<string, BagSize>();
-  for (const size of BAG_SIZES) {
-    bags.set(norm(`${BAG_SIZE_LABEL[size]} PP bag`), size);
-    bags.set(norm(`${BAG_SIZE_LABEL[size]} bag`), size);
-    bags.set(norm(BAG_SIZE_LABEL[size]), size);
-    bags.set(norm(size), size);
+  // Every spelling of a bag kind maps to { size, colour }. The bare size is
+  // deliberately NOT accepted: "25KG=4000" does not say which of the three
+  // colours it is, and splitting or guessing would put a price on the wrong one.
+  const bags = new Map<string, { size: BagSize; colour: string }>();
+  for (const { size, colour } of BAG_KINDS) {
+    const entry = { size, colour };
+    bags.set(norm(`${bagLabel(size, colour)} PP bag`), entry);
+    bags.set(norm(`${bagLabel(size, colour)} bag`), entry);
+    bags.set(norm(bagLabel(size, colour)), entry);
+    bags.set(norm(`${size} ${colour}`), entry);
+    bags.set(norm(`${size}:${colour}`), entry);
   }
   return { brands, materials, bags };
 }
@@ -179,14 +194,14 @@ export function parseFinancePaste(text: string, opts: { usdRate?: boolean } = {}
     }
 
     if (section === "bags") {
-      const size = LOOKUP.bags.get(nk);
-      if (!size) {
+      const bag = LOOKUP.bags.get(nk);
+      if (!bag) {
         unknown.push(line);
         continue;
       }
       const n = parseNumber(value);
       if (n === null) invalid.push(line);
-      else values[bagFinanceKey(size)] = n;
+      else values[bagFinanceKey(bag.size, bag.colour)] = n;
       continue;
     }
 
