@@ -5,6 +5,7 @@ import {
   FINANCE_RAW_MATERIALS,
   PRODUCT_ORDER,
   bagSizeTotals,
+  parseBagLedgerKey,
   productLabel,
   rollUpMaterials,
   type BagCounts,
@@ -160,7 +161,8 @@ function sumMaps(rows: { m: Record<string, number> | null }[]): Record<string, n
 export async function buildFinanceReport(month: string): Promise<FinanceReport> {
   const { start, end } = monthBounds(month);
 
-  const [base, priceList, produced, delivered, received, bagsBought, issued] = await Promise.all([
+  const [base, priceList, produced, delivered, received, bagsBoughtLegacy, issuedLegacy, bagsFromGrv, issuedFromSiv] =
+    await Promise.all([
     sql<{ products: Record<string, number>; raw_materials: Record<string, number>; bags: Record<string, number> }[]>`
       select products, raw_materials, bags from monthly_base_balances where month = ${month}
     `.catch(() => []),
@@ -182,11 +184,40 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
     // Typed as BagCounts, not Record<string, number>: an asset-filed row nests a
     // colour map under each size, and pretending otherwise is what would let the
     // arithmetic below quietly produce NaN.
+    //
+    // This is the RETIRED source. `pp_bag_purchases` has had no writer since the
+    // Goods Receiving Voucher replaced it, but a closed month must still
+    // reproduce the figures it was signed off with, so it is unioned in rather
+    // than dropped. Nothing can double-count: no flow writes both.
     sql<{ m: BagCounts }[]>`
       select bags as m from pp_bag_purchases where date >= ${start} and date < ${end}
     `.catch(() => []),
+    // Retired alongside it — the daily raw-material issue, replaced by the Store
+    // Issue Voucher for the same reason.
     sql<{ m: Record<string, number>; b: Record<string, number> }[]>`
       select materials as m, bags as b from material_issues where date >= ${start} and date < ${end}
+    `.catch(() => []),
+    // Bags received on a Goods Receiving Voucher. Only lines a PERSON confirmed
+    // as a bag kind count: `ledger_key` is null until someone answered "which
+    // stock item is this?", and a quantity nobody agreed to must not move a
+    // balance. `ledger_qty` rather than `quantity` because the line may be
+    // priced in packs.
+    sql<{ ledger_key: string; qty: string }[]>`
+      select i.ledger_key, sum(i.ledger_qty) as qty
+        from goods_receiving_items i
+        join goods_receiving_vouchers v on v.id = i.grv_id
+       where v.date >= ${start} and v.date < ${end}
+         and i.ledger_kind = 'bag' and i.ledger_key is not null
+       group by i.ledger_key
+    `.catch(() => []),
+    // Everything issued on a Store Issue Voucher, bags and raw materials alike.
+    sql<{ ledger_kind: string; ledger_key: string; qty: string }[]>`
+      select i.ledger_kind, i.ledger_key, sum(i.ledger_qty) as qty
+        from store_issue_items i
+        join store_issue_vouchers v on v.id = i.siv_id
+       where v.date >= ${start} and v.date < ${end}
+         and i.ledger_kind is not null and i.ledger_key is not null
+       group by i.ledger_kind, i.ledger_key
     `.catch(() => []),
   ]);
 
@@ -204,12 +235,32 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
   // deliveries. Colours are summed away here because the report has one line per
   // size — the breakdown is on the asset tab, where it was counted.
   const bagsBoughtMap: Record<string, number> = { kg25: 0, kg40: 0 };
-  for (const row of bagsBought) {
+  for (const row of bagsBoughtLegacy) {
     const totals = bagSizeTotals(row.m as BagCounts);
     for (const size of BAG_SIZES) bagsBoughtMap[size] += totals[size];
   }
-  const issuedMaterials = rollUpMaterials(sumMaps(issued.map((r) => ({ m: r.m }))));
-  const issuedBags = sumMaps(issued.map((r) => ({ m: r.b })));
+  // GRV lines are keyed by bag KIND ("kg25:Yellow"); the report has one row per
+  // size, so the colours are summed away here. The breakdown is not lost — it is
+  // on the voucher, where somebody confirmed it.
+  for (const row of bagsFromGrv) {
+    const parsed = parseBagLedgerKey(row.ledger_key);
+    if (!parsed) continue;
+    bagsBoughtMap[parsed.size] += n(row.qty);
+  }
+
+  const issuedMaterials = rollUpMaterials(sumMaps(issuedLegacy.map((r) => ({ m: r.m }))));
+  const issuedBags = sumMaps(issuedLegacy.map((r) => ({ m: r.b })));
+  for (const row of issuedFromSiv) {
+    const qtyIssued = n(row.qty);
+    if (row.ledger_kind === "bag") {
+      const parsed = parseBagLedgerKey(row.ledger_key);
+      if (parsed) issuedBags[parsed.size] = (issuedBags[parsed.size] || 0) + qtyIssued;
+    } else {
+      // Already a finance material name — the voucher offers those three keys
+      // directly, so there is no Kuni/Chips/Guji roll-up to do here.
+      issuedMaterials[row.ledger_key] = (issuedMaterials[row.ledger_key] || 0) + qtyIssued;
+    }
+  }
 
   const totalProduced = Object.values(producedMap).reduce((a, b) => a + n(b), 0);
   const totalSold = Object.values(soldMap).reduce((a, b) => a + n(b), 0);

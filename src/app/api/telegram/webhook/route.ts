@@ -7,7 +7,7 @@ import {
   analyseToolPhoto,
   checkReceiptQRCode,
   classifyIngestion,
-  extractBagPurchaseGemini,
+  extractVoucherGemini,
   extractReceiptGemini,
   verifyRequestLegitimacy,
   type GeminiReceipt,
@@ -15,7 +15,7 @@ import {
 } from "@/lib/llm";
 import { buildCalendar, parseCalendarCallback, type CalendarSelection } from "@/lib/calendar";
 import {
-  applyBagExtraction,
+  applyVoucherExtraction,
   assetPreview,
   findStep,
   firstStep,
@@ -30,7 +30,7 @@ import {
   stepsFor,
   type AssetFlowKind,
   type AssetFlowState,
-  type BagExtractionRecord,
+  type VoucherExtractionRecord,
 } from "@/lib/asset-flows";
 import { parseProductionPaste } from "@/lib/production-paste";
 import { parseFinancePaste } from "@/lib/finance-paste";
@@ -1018,10 +1018,8 @@ const ASSET_FLOW_BY_CAP: Record<string, AssetFlowKind | undefined> = {
   pp_bag_damage: "pp_bag_damage",
   production_report: "production_daily",
   base_balance: "base_balance",
-  material_issue: "material_issue",
-  pp_bag_report: "pp_bag_report",
-  tool_purchase: "tool_purchase",
-  pp_bag_purchase: "pp_bag_purchase",
+  store_issue: "store_issue",
+  grv: "grv",
   price_list: "price_list",
   wht_holder: "wht_holder",
 };
@@ -1035,11 +1033,10 @@ const ASSET_FLOW_BY_CAP: Record<string, AssetFlowKind | undefined> = {
  */
 const PHOTO_KIND_BY_FLOW: Partial<Record<AssetFlowKind, string>> = {
   pp_bag_damage: PP_BAG_PHOTO_KIND,
-  tool_purchase: FINANCE_RECEIPT_KIND,
-  pp_bag_purchase: FINANCE_RECEIPT_KIND,
-  // The asset copy of a bag purchase carries the same paperwork, and it is the
-  // evidence behind the quantities as well as the money.
-  pp_bag_report: FINANCE_RECEIPT_KIND,
+  // Both vouchers are the evidence behind a stock movement as well as a money
+  // figure, so both outlive the short sweep.
+  grv: FINANCE_RECEIPT_KIND,
+  store_issue: FINANCE_RECEIPT_KIND,
 };
 
 const assetReviewKeyboard = {
@@ -1158,12 +1155,12 @@ async function askAssetStep(chatId: string, state: AssetFlowState): Promise<void
 }
 
 /**
- * Read a PP bag purchase off its photos, then resume the flow.
+ * Read a voucher off its photos, then resume the flow.
  *
  * This is the one place an AI call sits between a message and its reply, so it is
  * fenced on three sides:
  *
- *  - `extractBagPurchaseGemini` is bounded by RECEIPT_BUDGET_MS inside
+ *  - `extractVoucherGemini` is bounded by RECEIPT_BUDGET_MS inside
  *    `geminiGenerate`, the same ceiling `analyseToolPhoto` runs under a few lines
  *    above. The webhook still answers well inside the function limit.
  *  - Every failure — no bytes, a dead provider, unparseable JSON, an exception —
@@ -1172,7 +1169,7 @@ async function askAssetStep(chatId: string, state: AssetFlowState): Promise<void
  *  - Nothing is saved here. What the model read becomes a draft the reporter
  *    corrects on the review card, marked so an invented figure is visible.
  */
-async function extractBagPurchaseIntoDraft(
+async function extractVoucherIntoDraft(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   session: any,
   chatId: string,
@@ -1181,7 +1178,7 @@ async function extractBagPurchaseIntoDraft(
   const fileIds = (state.photoFileIds || []).slice(0, MAX_FLOW_PHOTOS);
   await sendMessage(chatId, "🔎 ፎቶዎቹን እያነበብኩ ነው…");
 
-  let record: BagExtractionRecord = {
+  let record: VoucherExtractionRecord = {
     checked: false,
     confidence: 0,
     notes: "",
@@ -1197,9 +1194,9 @@ async function extractBagPurchaseIntoDraft(
       if (bytes) images.push(bytes);
     }
     if (images.length > 0) {
-      const read = await extractBagPurchaseGemini(images);
+      const read = await extractVoucherGemini(state.kind === "grv" ? "grv" : "siv", images);
       if (read.ok) {
-        const { filled } = applyBagExtraction(state.draft, read.data);
+        const { filled } = applyVoucherExtraction(state.draft, read.data);
         record = {
           checked: true,
           confidence: read.data.confidence,
@@ -1212,7 +1209,7 @@ async function extractBagPurchaseIntoDraft(
       }
     }
   } catch (e) {
-    console.error("extractBagPurchaseIntoDraft failed:", e);
+    console.error("extractVoucherIntoDraft failed:", e);
     record = { ...record, error: e instanceof Error ? e.message : String(e) };
   }
 
@@ -1236,7 +1233,7 @@ async function extractBagPurchaseIntoDraft(
         `\n<i>የቀሩት በጥያቄ ይጠየቃሉ። በመጨረሻ ሁሉንም አርመው ያረጋግጣሉ።</i>`
     );
   } else {
-    await sendMessage(chatId, "ℹ️ ፎቶውን ማንበብ አልተቻለም። ብዛቱን በእጅ እናስገባለን።");
+    await sendMessage(chatId, "ℹ️ ፎቶውን ማንበብ አልተቻለም። በደረጃ በደረጃ እናስገባለን።");
   }
 
   await askAssetStep(chatId, state);
@@ -1652,14 +1649,11 @@ export async function POST(req: NextRequest) {
           const ppPhotos = state.kind === "pp_bag_damage" ? state.photoFileIds || [] : [];
           const ppReason = String(state.draft.reason || "");
           const ppQty = Math.round(Number(state.draft.quantity) || 0);
-          // Purchase receipts are read after the reply too, for the same reason.
-          // The asset bag report is included: its photos were already read for
-          // the quantities, but the typed total still has to be checked against
-          // the printed one, and that check is not worth blocking a reply on.
-          const receiptFlow =
-            state.kind === "tool_purchase" ||
-            state.kind === "pp_bag_purchase" ||
-            state.kind === "pp_bag_report";
+          // The GRV's receipt is read after the reply too, for the same reason.
+          // Its photos were already read for the line items, but the typed total
+          // still has to be checked against the printed one, and that check is
+          // not worth blocking a reply on.
+          const receiptFlow = state.kind === "grv";
           const receiptPhotos = receiptFlow ? state.photoFileIds || [] : [];
           const receiptTotal = Number(state.draft.totalAmount) || 0;
           const receiptCurrency = String(state.draft.currency || "ETB");
@@ -1692,7 +1686,7 @@ export async function POST(req: NextRequest) {
           }
           if (receiptPhotos.length > 0) {
             const note = await backgroundPurchaseReceiptCheck({
-              table: saved.table === "pp_bag_purchases" ? "pp_bag_purchases" : "finance_purchase_batches",
+              table: "goods_receiving_vouchers",
               id: saved.id,
               fileIds: receiptPhotos,
               enteredTotal: receiptTotal,
@@ -1772,14 +1766,21 @@ export async function POST(req: NextRequest) {
         }
 
         if (normText === NORM_PHOTOS_DONE) {
-          if (collected.length === 0) {
-            await sendMessage(chatId, "📷 ቢያንስ አንድ ፎቶ ያስፈልጋል።", { reply_markup: photosKeyboard });
+          // Only a step marked `required` insists on a photo. The GRV does,
+          // because the receipt is the evidence behind every figure on it; the
+          // store issue voucher does not, because it is often filled at a bench
+          // with no camera and the user asked for "image OR one-by-one input".
+          if (collected.length === 0 && step.required) {
+            await sendMessage(chatId, "🧾 የቫውቸሩን/ደረሰኙን ፎቶ ቢያንስ አንድ ያስፈልጋል።", {
+              reply_markup: photosKeyboard,
+            });
             return NextResponse.json({ ok: true });
           }
-          // The one flow where the paperwork answers the questions: read it now,
-          // then resume at whatever the model could not fill in.
-          if (state.kind === "pp_bag_report") {
-            await extractBagPurchaseIntoDraft(session, chatId, state);
+          // The voucher flows: the paperwork answers most of the questions, so
+          // read it now and resume at whatever the model could not fill in. With
+          // no photo there is nothing to read and the flow simply carries on.
+          if ((state.kind === "grv" || state.kind === "store_issue") && collected.length > 0) {
+            await extractVoucherIntoDraft(session, chatId, state);
             return NextResponse.json({ ok: true });
           }
           await advanceAsset(session, chatId, state);

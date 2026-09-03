@@ -103,7 +103,7 @@ async function saveCheck(table: string, id: string, check: PurchaseReceiptCheck)
  * saying — a clean check is not worth a notification.
  */
 export async function backgroundPurchaseReceiptCheck(opts: {
-  table: "finance_purchase_batches" | "pp_bag_purchases";
+  table: "goods_receiving_vouchers" | "finance_purchase_batches" | "pp_bag_purchases";
   id: string;
   fileIds: string[];
   enteredTotal: number;

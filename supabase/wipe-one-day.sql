@@ -67,8 +67,13 @@ declare
     'Finance:monthly_price_lists',
     'Finance:wht_holders',
     'Finance:receipts',
+    'Asset:store_issue_vouchers',
+    'Finance:goods_receiving_vouchers',
     'Other:daily_reports',
-    'Other:hr_reports'
+    'Other:hr_reports',
+    -- The landing page reads a cached brief row, which is why the dashboard
+    -- still showed yesterday's figures after the tables behind it were emptied.
+    'Other:briefs'
   ];
   sec text;
   name text;
@@ -119,7 +124,12 @@ declare
     'material_counts', 'stone_deliveries',
     'sales_receipts',
     'finance_purchase_batches', 'monthly_price_lists', 'wht_holders', 'receipts',
-    'daily_reports', 'hr_reports'
+    -- The two paper vouchers. Their line items cascade with them.
+    'goods_receiving_vouchers', 'store_issue_vouchers',
+    'daily_reports', 'hr_reports',
+    -- The cached morning brief the landing page renders. Without this the
+    -- dashboard keeps showing figures for tables that are already empty.
+    'briefs'
   ];
 begin
   raise notice 'Wiping submissions filed between % and %', d_start, d_end;

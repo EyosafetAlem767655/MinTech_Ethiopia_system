@@ -27,11 +27,10 @@ export type CapabilityKey =
   | "pp_bag_damage"
   // Asset management feeds the monthly finance report.
   | "base_balance"
-  | "material_issue"
-  | "pp_bag_report"
+  // The two paper vouchers, one per department.
+  | "store_issue"
+  | "grv"
   // Finance.
-  | "tool_purchase"
-  | "pp_bag_purchase"
   | "price_list"
   | "wht_holder";
 
@@ -143,13 +142,6 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
     input: "photo",
     question: "💔 የPP ከረጢት ብልሽት ሪፖርት በደረጃ እናስገባለን።",
   },
-  pp_bag_report: {
-    key: "pp_bag_report",
-    button: "🧺 የPP ከረጢት ግዢ ሪፖርት",
-    captureMode: "asset_entry",
-    input: "any",
-    question: "🧺 የገቡትን የPP ከረጢቶች ከደረሰኙ ጋር እናስመዘግባለን።",
-  },
   base_balance: {
     key: "base_balance",
     button: "📊 የወሩ የመነሻ ሚዛን",
@@ -157,28 +149,25 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
     input: "any",
     question: "📊 የሚቀጥለውን ወር የመነሻ ሚዛን በደረጃ እናስገባለን።",
   },
-  material_issue: {
-    key: "material_issue",
-    button: "🔥 የቀኑ ጥሬ ዕቃ ፍጆታ",
+  store_issue: {
+    key: "store_issue",
+    // The Store Issue Voucher, as printed. It replaced the daily raw-material
+    // issue: the paper covers everything leaving the warehouse, not just the
+    // three materials that feed the monthly report.
+    button: "📤 የመጋዘን ወጪ ቫውቸር",
     captureMode: "asset_entry",
     input: "any",
-    question: "🔥 ዛሬ ለምርት የዋለውን ጥሬ ዕቃና ከረጢት እናስመዘግባለን።",
+    question: "📤 ከመጋዘን የወጣውን ዕቃ በቫውቸሩ እናስመዘግባለን።",
   },
-  tool_purchase: {
-    key: "tool_purchase",
-    button: "🧾 የመሣሪያ ግዢ ሪፖርት",
+  grv: {
+    key: "grv",
+    // The Goods Receiving Voucher, as printed. It replaced the tool purchase
+    // report, the PP bag receipt and the asset PP bag count — three buttons for
+    // slices of one event, none of them matching the paper being filled in.
+    button: "📥 የዕቃ ገቢ ቫውቸር",
     captureMode: "asset_entry",
     input: "any",
-    question: "🧾 የመሣሪያ ግዢ ሪፖርት በደረጃ እናስገባለን።",
-  },
-  pp_bag_purchase: {
-    key: "pp_bag_purchase",
-    // The receipt half of a bag purchase. The counts belong to pp_bag_report,
-    // filed by whoever took the delivery.
-    button: "🛍 የPP ከረጢት ግዢ ደረሰኝ",
-    captureMode: "asset_entry",
-    input: "any",
-    question: "🛍 የPP ከረጢት ግዢ ደረሰኙን እናስመዘግባለን።",
+    question: "📥 የገቡትን ዕቃዎች ከቫውቸሩና ከደረሰኙ ጋር እናስመዘግባለን።",
   },
   price_list: {
     key: "price_list",
@@ -348,18 +337,15 @@ export const POSITIONS: Record<PositionKey, Position> = {
       "raw_material_received",
       "finished_goods_delivery",
       "pp_bag_damage",
-      // Both feed the monthly finance report: the daily issue figures fill its
+      // Both feed the monthly finance report: the store issue voucher fills its
       // consumption column, and the base balance opens each month.
-      "material_issue",
+      "store_issue",
       "base_balance",
-      // What bags arrived, counted by the people who took the delivery. Finance
-      // files the receipt for the same purchase but never the quantities.
-      "pp_bag_report",
     ],
     dailyRequired: true,
-    // pp_bag_purchases is deliberately absent: bag deliveries are occasional, and
-    // a table nobody files on a given day would mark this role non-compliant for
-    // every day without one.
+    // store_issue_vouchers is deliberately absent: nothing leaves the warehouse
+    // on some days, and a table nobody filed would mark this role non-compliant
+    // for every quiet day. material_issues stays so historic days still count.
     submissionTables: [
       "raw_material_receipts",
       "delivery_reports",
@@ -393,14 +379,14 @@ export const POSITIONS: Record<PositionKey, Position> = {
     en: "Finance",
     am: "ፋይናንስ",
     description:
-      "Files tool purchase reports, the monthly price list and PP bag purchase receipts, and registers the customers who still owe a WHT receipt.",
-    // Invoicing, payments and receivables went with the old module. These four
-    // are the whole of what finance files.
-    capabilities: ["tool_purchase", "pp_bag_purchase", "price_list", "wht_holder"],
+      "Files the goods receiving voucher for every purchase, the monthly price list, and registers the customers who still owe a WHT receipt.",
+    // The GRV replaced the tool purchase report and the PP bag receipt: one
+    // voucher covers every kind of purchase, PP bags included as line items.
+    capabilities: ["grv", "price_list", "wht_holder"],
     // Purchases are on-demand and the price list is monthly, so there is no
     // daily obligation to chase. The WHT chase is its own cron, not a reminder.
     dailyRequired: false,
-    submissionTables: ["finance_purchase_batches", "pp_bag_purchases", "wht_holders"],
+    submissionTables: ["goods_receiving_vouchers", "finance_purchase_batches", "wht_holders"],
   },
   hr: {
     key: "hr",

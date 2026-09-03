@@ -4,6 +4,7 @@ import { logActivity } from "@/lib/bot-auth";
 import { hasPosition, resolveCapabilities } from "@/lib/positions";
 import { sendSms, smsGatewayConfigured } from "@/lib/sms";
 import { sendMessage } from "@/lib/telegram";
+import { describeGap, reconcileBags } from "@/lib/stock-reconciliation";
 import {
   eatDayOfMonth,
   isBaseBalanceReminderWindow,
@@ -215,9 +216,37 @@ export async function GET(req: NextRequest) {
     );
   }
 
+  /* ────────────── 3. Does the bag stock agree with the vouchers? ─────────── */
+
+  // Sent to the two departments that can actually act on it: asset management
+  // holds the stock and the issue vouchers, finance holds the purchases. The
+  // owner sees the same gaps in the morning brief's exception list, so this is
+  // deliberately not broadcast wider.
+  let gapsFound = 0;
+  try {
+    const rec = await reconcileBags();
+    gapsFound = rec.discrepancies.length;
+    if (gapsFound > 0) {
+      const text =
+        `📦 <b>የPP ከረጢት ሒሳብ ልዩነት — ${rec.month}</b>\n\n` +
+        rec.discrepancies.map((r) => `• ${describeGap(r)}`).join("\n") +
+        `\n\n<i>የተቆጠረው ${rec.countedOn} ነው። የገባ/የወጣ ቫውቸር ተመዝግቦ እንደሆነ ያረጋግጡ።</i>`;
+      const recipients = employees.filter((u) =>
+        resolveCapabilities(u.positions, u.capabilities).some(
+          (c) => c.key === "store_issue" || c.key === "grv"
+        )
+      );
+      await Promise.all(recipients.map((u) => sendMessage(String(u.chat_id), text).catch(() => {})));
+    }
+  } catch (e) {
+    // The voucher tables arrive in 0019; the WHT chase above must still run.
+    console.warn("finance-daily: bag reconciliation unavailable", e);
+  }
+
   return NextResponse.json({
     ok: true,
     date: today,
+    bagGaps: gapsFound,
     sms: {
       configured: smsGatewayConfigured(),
       pendingHolders: holders.length,

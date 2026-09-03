@@ -51,6 +51,14 @@ const READABLE_TABLES = {
   damage_claims: "created_at",
   receipts: "created_at",
   purchase_requests: "created_at",
+  // The two paper vouchers, and their line items. The lines are readable on
+  // their own because that is where the stock ledger lives: "how many 25KG
+  // yellow bags did we buy in July" is a question about goods_receiving_items,
+  // not about the voucher headers.
+  goods_receiving_vouchers: "date",
+  goods_receiving_items: "created_at",
+  store_issue_vouchers: "date",
+  store_issue_items: "created_at",
   // Finance
   finance_purchase_batches: "date",
   finance_purchase_items: "created_at",

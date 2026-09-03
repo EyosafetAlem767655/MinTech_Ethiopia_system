@@ -9,9 +9,14 @@ import {
   PRODUCT_ORDER,
   PRODUCTION_PRODUCTS,
   bagLabel,
+  ledgerChoices,
+  ledgerLabel,
+  looksLikeStockItem,
+  parseBagLedgerKey,
   productLabel,
   RAW_MATERIALS,
   type BagSize,
+  type LedgerKind,
 } from "@/lib/products";
 import { upsertOpsDay, opsDateLabel } from "@/lib/ops-report";
 import { bagKey, productionTemplate, PROD_PREFIX, STOCK_PREFIX } from "@/lib/production-paste";
@@ -26,7 +31,7 @@ import {
   priceListTemplate,
 } from "@/lib/finance-paste";
 import { monthLabel, nextMonth, priceListItems } from "@/lib/finance-report";
-import type { BagPurchaseRead, ToolPhotoCheck } from "@/lib/llm";
+import type { ToolPhotoCheck, VoucherRead } from "@/lib/llm";
 
 /**
  * Guided step-by-step data entry for the reports filed from the bot — the three
@@ -52,12 +57,11 @@ export type AssetFlowKind =
   | "production_daily"
   // Asset management, feeding the monthly finance report.
   | "base_balance"
-  | "material_issue"
-  // The bags themselves: asset counts what arrived, finance files the receipt.
-  | "pp_bag_report"
+  // The two paper vouchers. They replaced four buttons that each captured a
+  // slice of the same events; the retired tables stay readable in Settings.
+  | "store_issue"
+  | "grv"
   // Finance.
-  | "tool_purchase"
-  | "pp_bag_purchase"
   | "price_list"
   | "wht_holder";
 
@@ -72,22 +76,22 @@ export interface AssetFlowState {
   photoFileIds?: string[];
   /** Gemini's verdict on that photo. */
   check?: ToolPhotoCheck;
-  /** What the AI read off a PP bag purchase's paperwork, kept for the audit trail. */
-  extraction?: BagExtractionRecord;
+  /** What the AI read off a voucher's photos, kept for the audit trail. */
+  extraction?: VoucherExtractionRecord;
 }
 
 /**
- * The record of an extraction attempt on a PP bag purchase.
+ * The record of an extraction attempt on a voucher.
  *
  * `checked: false` means the read did not happen — the model was unreachable, or
  * the photos could not be loaded back. It is never a statement about the
  * paperwork, the same distinction every other AI check in this system draws.
  */
-export interface BagExtractionRecord {
+export interface VoucherExtractionRecord {
   checked: boolean;
   confidence: number;
   notes: string;
-  /** Lines the model could not map to one of the six kinds, as printed. */
+  /** Rows the model could not read cleanly, as printed. */
   unmatched: string[];
   /** Draft keys the model filled — marked on the review card. */
   filled: string[];
@@ -113,6 +117,14 @@ export interface AssetStep {
   when?: (draft: Record<string, string | number>) => boolean;
   /** Accept "-" / "የለም" as empty instead of demanding a value. */
   skippable?: boolean;
+  /**
+   * A photos step that must collect at least one photo before moving on.
+   *
+   * Only the GRV sets it: the whole stock cross-check rests on there being paper
+   * behind a figure, so a purchase with no receipt is not a purchase we can act
+   * on. Every other photo step stays optional.
+   */
+  required?: boolean;
   /**
    * Extra check for a text step, returning the normalised value or a reason to
    * re-ask. Needed where a field is digits but NOT a quantity: `parseQty` strips
@@ -297,139 +309,212 @@ const BASE_BALANCE_STEPS: AssetStep[] = [
   })),
 ];
 
-/* ───────────────────── Daily raw-material issue (asset mgmt) ──────────────── */
+/* ═══════════════════════════ The two paper vouchers ════════════════════════
+ *
+ * MinTech documents goods on two pre-printed pads, and these two flows are those
+ * pads. They replaced four bot buttons that each captured a slice of the same
+ * events — a tool purchase report, a PP bag receipt, a PP bag count and a daily
+ * raw-material issue — none of which matched the paper anyone was actually
+ * filling in.
+ *
+ * Their tables and rows are untouched and still readable under
+ * Settings → Submissions; only the buttons are gone.
+ */
 
-/** What production consumed today — the Issue column of the monthly report. */
-const MATERIAL_ISSUE_STEPS: AssetStep[] = [
-  { id: "date", prompt: "📅 የፍጆታውን ቀን ይምረጡ።", type: "date" },
-  ...FINANCE_RAW_MATERIALS.map<AssetStep>((m) => ({
-    id: materialKey(m),
-    prompt: `🔥 ዛሬ ለምርት የዋለው የ<b>${m}</b> ብዛት በቶን። ከሌለ 0 ይፃፉ።`,
-    type: "number",
-  })),
-  ...BAG_SIZES.map<AssetStep>((size) => ({
-    id: bagFinanceKey(size),
-    prompt: `🧺 ዛሬ የዋለው የ<b>${BAG_SIZE_LABEL[size]} PP</b> ከረጢት ብዛት (ቁጥር)። ከሌለ 0 ይፃፉ።`,
-    type: "number",
-  })),
-];
-
-/* ──────────────────────── Tool purchase report (finance) ──────────────────── */
-
-/** Item slots on one purchase batch. */
-export const MAX_PURCHASE_ITEMS = 8;
+/** Line-item slots on one voucher. The printed pad has six rows. */
+export const MAX_VOUCHER_ITEMS = 8;
 
 /** True once item `i` has been reached — item 1 always, the rest on request. */
-function purchaseItemAsked(draft: Record<string, string | number>, i: number): boolean {
+function voucherItemAsked(draft: Record<string, string | number>, i: number): boolean {
   if (i === 1) return true;
   return draft[`more${i - 1}`] === "yes";
 }
 
+/* ── Draft keys for one line ──────────────────────────────────────────────── */
+export const itemKeys = (i: number) => ({
+  stockCode: `stock${i}`,
+  description: `desc${i}`,
+  unit: `unit${i}`,
+  quantity: `qty${i}`,
+  unitCost: `cost${i}`,
+  /** Which stock item this line is, confirmed by a person. */
+  ledger: `class${i}`,
+  /** The canonical quantity for that stock item — pieces or tonnes. */
+  ledgerQty: `lqty${i}`,
+  more: `more${i}`,
+});
+
+/** The "not a stock item" answer. A real value, so the question stays answered. */
+export const LEDGER_NONE = "none";
+
 /**
- * A batch of tools bought together.
+ * Should the bot ask what stock item this line is?
  *
- * The engine is a flat step table, so a genuinely unbounded item list is not
- * expressible. Fixed slots gated on an "add another?" answer behave the same
- * way: the flow stops at the first "no" and never asks about the next slot.
+ * Two triggers: the description reads like one, or the extractor suggested one.
+ * Both are hints, never conclusions — the question is the only thing that sets
+ * the ledger key, and answering "not tracked" is a first-class outcome.
  *
- * Money is asked ONCE, at the end, for the whole batch. A multi-item batch has a
- * single figure on the receipt, so per-item cost is genuinely unknown — dividing
- * the total out would invent numbers nobody wrote down.
+ * A false positive costs one extra question. A false negative just means the
+ * line is not counted, which is the safe direction to fail in.
  */
-const TOOL_PURCHASE_STEPS: AssetStep[] = [
-  { id: "date", prompt: "📅 የግዢውን ቀን ይምረጡ።", type: "date" },
-  ...Array.from({ length: MAX_PURCHASE_ITEMS }).flatMap<AssetStep>((_, idx) => {
+export function suggestsStockItem(draft: Record<string, string | number>, i: number): boolean {
+  if (!voucherItemAsked(draft, i)) return false;
+  const k = itemKeys(i);
+  if (String(draft[`${k.ledger}_hint`] || "")) return true;
+  return looksLikeStockItem(String(draft[k.description] || ""));
+}
+
+/** The choice list for a classification step, plus the opt-out. */
+function ledgerStepChoices(kinds: readonly LedgerKind[]) {
+  return [
+    ...ledgerChoices(kinds).map((c) => ({
+      label: c.kind === "bag" ? `🧺 ${c.label}` : `⛏ ${c.label}`,
+      value: c.key,
+    })),
+    { label: "➖ የክምችት ዕቃ አይደለም", value: LEDGER_NONE },
+  ];
+}
+
+/** The unit a confirmed ledger key is counted in. */
+export function ledgerUnitOf(key: string): "pcs" | "t" | null {
+  if (!key || key === LEDGER_NONE) return null;
+  if (parseBagLedgerKey(key)) return "pcs";
+  if ((FINANCE_RAW_MATERIALS as readonly string[]).includes(key)) return "t";
+  return null;
+}
+
+/**
+ * The repeating line block, shared by both vouchers.
+ *
+ * `ledgerQty` is asked separately from `quantity` and never derived from it: a
+ * line of "100 pak" is not 100 pieces, and inferring a pack size the system was
+ * never told is how a bag count silently triples. The prompt shows what was
+ * typed so the common case is one keystroke.
+ */
+function voucherItemSteps(opts: { kinds: readonly LedgerKind[]; costSkippable: boolean }): AssetStep[] {
+  return Array.from({ length: MAX_VOUCHER_ITEMS }).flatMap<AssetStep>((_, idx) => {
     const i = idx + 1;
+    const k = itemKeys(i);
+    const asked = (d: Record<string, string | number>) => voucherItemAsked(d, i);
+
     const steps: AssetStep[] = [
       {
-        id: `desc${i}`,
-        prompt: `📝 ዕቃ ${i} — ስሙንና ዝርዝሩን (specification) ይፃፉ።`,
+        id: k.description,
+        prompt: `📝 ዕቃ ${i} — ስሙንና ዝርዝሩን (Description/Specification) ይፃፉ።`,
         type: "text",
-        when: (d) => purchaseItemAsked(d, i),
+        when: asked,
       },
       {
-        id: `uom${i}`,
-        prompt: `📏 ዕቃ ${i} — መለኪያውን ይምረጡ።`,
-        type: "choice",
-        choices: [
-          { label: "🔢 pcs", value: "pcs" },
-          { label: "📦 pak", value: "pak" },
-        ],
-        when: (d) => purchaseItemAsked(d, i),
+        id: k.stockCode,
+        prompt: `🔖 ዕቃ ${i} — የStock Code ቁጥር ይፃፉ።`,
+        type: "text",
+        skippable: true,
+        when: asked,
       },
       {
-        id: `qty${i}`,
-        prompt: `🔢 ዕቃ ${i} — ብዛቱን ይፃፉ።`,
+        id: k.unit,
+        prompt: `📏 ዕቃ ${i} — መለኪያውን (Unit) ይፃፉ — ለምሳሌ pcs, pak, kg።`,
+        type: "text",
+        skippable: true,
+        when: asked,
+      },
+      {
+        id: k.quantity,
+        prompt: `🔢 ዕቃ ${i} — ብዛቱን (Qty) ይፃፉ።`,
         type: "number",
-        when: (d) => purchaseItemAsked(d, i),
+        when: asked,
+      },
+      {
+        id: k.unitCost,
+        prompt: `💲 ዕቃ ${i} — የነጠላ ዋጋ (Unit Cost)። ${opts.costSkippable ? 'ካልታወቀ "-" ይላኩ።' : "ካልታወቀ 0 ይፃፉ።"}`,
+        type: "number",
+        skippable: opts.costSkippable,
+        when: asked,
+      },
+      {
+        id: k.ledger,
+        prompt:
+          `📦 ዕቃ ${i} — ይህ ከየትኛው የክምችት ዕቃ ነው?\n` +
+          `<i>የክምችት ሒሳብ የሚያዘው በዚህ መልስ ብቻ ነው።</i>`,
+        type: "choice",
+        choices: ledgerStepChoices(opts.kinds),
+        when: (d) => suggestsStockItem(d, i),
+      },
+      {
+        id: k.ledgerQty,
+        prompt: `🔢 ዕቃ ${i} — በክምችት አሃድ ስንት ነው? <i>(የተፃፈው Qty ተመሳሳይ ከሆነ እሱኑ ይፃፉ)</i>`,
+        type: "number",
+        when: (d) => {
+          const key = String(d[itemKeys(i).ledger] || "");
+          return Boolean(key) && key !== LEDGER_NONE;
+        },
       },
     ];
+
     // No "add another?" after the last slot — there is nowhere left to go.
-    if (i < MAX_PURCHASE_ITEMS) {
+    if (i < MAX_VOUCHER_ITEMS) {
       steps.push({
-        id: `more${i}`,
+        id: k.more,
         prompt: "➕ ሌላ ዕቃ አለ?",
         type: "choice",
         choices: [
           { label: "➕ አዎ፣ ሌላ ዕቃ", value: "yes" },
           { label: "✅ በቃ", value: "no" },
         ],
-        when: (d) => purchaseItemAsked(d, i),
+        when: asked,
       });
     }
     return steps;
-  }),
-  { id: "supplier", prompt: "🏢 አቅራቢውን (Supplier) ይፃፉ።", type: "text", skippable: true },
-  { id: "costCenter", prompt: "🏷 ለየትኛው ክፍል እንደተገዛ (Cost Center) ይፃፉ።", type: "text", skippable: true },
-  { id: "purchaser", prompt: "🧑 ገዢውን (Purchaser) ይፃፉ።", type: "text", skippable: true },
-  {
-    id: "currency",
-    prompt: "💱 በየትኛው ገንዘብ ተከፍሏል?",
-    type: "choice",
-    choices: [
-      { label: "🇪🇹 ብር (ETB)", value: "ETB" },
-      { label: "💵 ዶላር (USD)", value: "USD" },
-    ],
-  },
-  { id: "totalAmount", prompt: "💰 የጠቅላላውን ግዢ ዋጋ ይፃፉ።", type: "number" },
-  {
-    id: "photos",
-    prompt: `🧾 የደረሰኙን ፎቶ(ዎች) ይላኩ — እስከ ${MAX_FLOW_PHOTOS} ፎቶ። ከጨረሱ በኋላ "✅ ጨርሻለሁ" ይጫኑ።`,
-    type: "photos",
-  },
-];
+  });
+}
 
-/* ─────────────────── PP bag purchase report (asset management) ────────────── */
+/* ── Goods Receiving Voucher (finance) ────────────────────────────────────── */
 
 /**
- * What PP bags arrived, counted by the people who took the delivery.
+ * Everything bought and received, PP bags included.
  *
- * The photos come SECOND, before any count is asked for, because the whole point
- * is that the paperwork answers most of the questions. When the reporter presses
- * "done", the webhook reads the images and fills whatever it can; the flow then
- * resumes at the first field the model missed, exactly as a half-filled paste
- * template does.
+ * The photos come SECOND, before any field is asked for, because the voucher
+ * answers most of the questions itself. When the reporter presses "done" the
+ * webhook reads the images and fills what it can; the flow then resumes at the
+ * first field the model missed, exactly as a half-filled paste template does.
  *
- * Nothing here depends on the extraction succeeding. If the model is unreachable
- * or the photos are unreadable, every step below is simply asked by hand — a slow
- * provider must never be able to strand someone mid-report.
+ * Nothing below depends on the extraction succeeding — if the model is
+ * unreachable, every step is simply asked by hand.
+ *
+ * Only bag kinds are offered for classification. Raw material arrives by truck
+ * against a delivery note and is already recorded by the raw-material intake
+ * form; letting a GRV line count as Dolomite received too would double the
+ * month's tonnage with nothing to say which entry was the real one.
  */
-const PP_BAG_REPORT_STEPS: AssetStep[] = [
-  { id: "date", prompt: "📅 ከረጢቱ የገባበትን ቀን ይምረጡ።", type: "date" },
+const GRV_STEPS: AssetStep[] = [
+  { id: "date", prompt: "📅 ዕቃው የገባበትን ቀን ይምረጡ።", type: "date" },
   {
     id: "photos",
     prompt:
-      `🧾 የደረሰኙን/የቅጹን ፎቶ(ዎች) ይላኩ — እስከ ${MAX_FLOW_PHOTOS} ፎቶ። ከጨረሱ በኋላ "✅ ጨርሻለሁ" ይጫኑ።\n` +
-      `<i>ፎቶዎቹ ተነብበው ብዛቱን በራሱ ይሞላል — እርስዎ አርመው ያረጋግጣሉ።</i>`,
+      `🧾 የGoods Receiving Voucher እና የደረሰኙን ፎቶ ይላኩ — እስከ ${MAX_FLOW_PHOTOS} ፎቶ። ` +
+      `ከጨረሱ በኋላ "✅ ጨርሻለሁ" ይጫኑ።\n` +
+      `<i>ፎቶዎቹ ተነብበው ቅጹን በራሱ ይሞላል — እርስዎ አርመው ያረጋግጣሉ።</i>`,
     type: "photos",
+    // The user asked for a receipt for confirmation, so this one cannot be
+    // skipped: the whole cross-check rests on there being paper behind a figure.
+    required: true,
   },
-  ...BAG_KINDS.map<AssetStep>(({ size, colour }) => ({
-    id: bagKey(size, colour),
-    prompt: `🧺 የገባው የ<b>${bagLabel(size, colour)}</b> ከረጢት ብዛት (ቁጥር)። ከሌለ 0 ይፃፉ።`,
-    type: "number",
-  })),
+  { id: "grvNo", prompt: "🔢 የቫውቸሩን ቁጥር (No.) ይፃፉ — ለምሳሌ 5516።", type: "text", skippable: true },
   { id: "supplier", prompt: "🏢 አቅራቢውን (Supplier) ይፃፉ።", type: "text", skippable: true },
-  { id: "dnNo", prompt: "📄 የመላኪያ ደረሰኝ/ቅጽ ቁጥር (D.N No.) ይፃፉ።", type: "text", skippable: true },
+  {
+    id: "supplierInvoiceNo",
+    prompt: "📄 የአቅራቢውን የደረሰኝ ቁጥር (Supplier's Invoice No.) ይፃፉ።",
+    type: "text",
+    skippable: true,
+  },
+  { id: "purchaseOrderNo", prompt: "📋 የPurchase Order ቁጥር ይፃፉ።", type: "text", skippable: true },
+  {
+    id: "receivingStoreNo",
+    prompt: "🏬 የReceiving Store ቁጥር ይፃፉ።",
+    type: "text",
+    skippable: true,
+  },
+  ...voucherItemSteps({ kinds: ["bag"], costSkippable: false }),
   {
     id: "currency",
     prompt: "💱 በየትኛው ገንዘብ ተከፍሏል?",
@@ -439,37 +524,57 @@ const PP_BAG_REPORT_STEPS: AssetStep[] = [
       { label: "💵 ዶላር (USD)", value: "USD" },
     ],
   },
-  { id: "totalAmount", prompt: "💰 የጠቅላላውን ግዢ ዋጋ ይፃፉ። ካልታወቀ 0 ይፃፉ።", type: "number" },
+  { id: "totalAmount", prompt: "💰 የጠቅላላውን ዋጋ (Total amount) ይፃፉ።", type: "number" },
+  { id: "remarks", prompt: "📝 አስተያየት (Remarks) ካለ ይፃፉ።", type: "text", skippable: true },
+  { id: "preparedBy", prompt: "🧑 ያዘጋጀው (Prepared by) ማን ነው?", type: "text", skippable: true },
+  { id: "receivedBy", prompt: "🧑 የተረከበው (Received by) ማን ነው?", type: "text", skippable: true },
+  { id: "approvedBy", prompt: "🧑 ያፀደቀው (Approved by) ማን ነው?", type: "text", skippable: true },
 ];
 
-/* ───────────────────────── PP bag purchase (finance) ──────────────────────── */
+/* ── Store Issue Voucher (asset management) ───────────────────────────────── */
 
 /**
- * Finance files the receipt, not the count.
+ * Everything taken out of the warehouse.
  *
- * The quantities come from asset management, who physically take the delivery and
- * report it through `pp_bag_report`. Asking finance for them as well would put two
- * numbers for one delivery into the column the monthly report sums, with nothing
- * to say which of them is the real one.
+ * Both bag kinds and raw materials are offered, because this replaced the daily
+ * raw-material issue and has to keep filling the Issue column of the monthly
+ * report.
+ *
+ * The photo step is optional here, unlike the GRV: the voucher is often filled
+ * at a bench with no camera to hand, and the user asked for "image or one-by-one
+ * input". Unit costs are optional for the same reason — the store issues goods,
+ * finance prices them, and the monthly report values issues from its own price
+ * list regardless.
  */
-const PP_BAG_PURCHASE_STEPS: AssetStep[] = [
-  { id: "date", prompt: "📅 የግዢውን ቀን ይምረጡ።", type: "date" },
-  { id: "supplier", prompt: "🏢 አቅራቢውን (Supplier) ይፃፉ።", type: "text", skippable: true },
-  {
-    id: "currency",
-    prompt: "💱 በየትኛው ገንዘብ ተከፍሏል?",
-    type: "choice",
-    choices: [
-      { label: "🇪🇹 ብር (ETB)", value: "ETB" },
-      { label: "💵 ዶላር (USD)", value: "USD" },
-    ],
-  },
-  { id: "totalAmount", prompt: "💰 የጠቅላላውን ግዢ ዋጋ ይፃፉ።", type: "number" },
+const STORE_ISSUE_STEPS: AssetStep[] = [
+  { id: "date", prompt: "📅 ዕቃው የወጣበትን ቀን ይምረጡ።", type: "date" },
   {
     id: "photos",
-    prompt: `🧾 የደረሰኙን ፎቶ(ዎች) ይላኩ — እስከ ${MAX_FLOW_PHOTOS} ፎቶ። ከጨረሱ በኋላ "✅ ጨርሻለሁ" ይጫኑ።`,
+    prompt:
+      `📷 የStore Issue Voucher ፎቶ ይላኩ — እስከ ${MAX_FLOW_PHOTOS} ፎቶ። ከጨረሱ በኋላ "✅ ጨርሻለሁ" ይጫኑ።\n` +
+      `<i>ፎቶ ከሌለ "✅ ጨርሻለሁ" ብለው በደረጃ በደረጃ ማስገባት ይችላሉ።</i>`,
     type: "photos",
   },
+  { id: "sivNo", prompt: "🔢 የቫውቸሩን ቁጥር (No.) ይፃፉ — ለምሳሌ 8610።", type: "text", skippable: true },
+  { id: "issuingStore", prompt: "🏬 የሚያወጣው መጋዘን (Issuing Store) የትኛው ነው?", type: "text", skippable: true },
+  { id: "issuedTo", prompt: "🧑 ለማን ተሰጠ (Issued To)?", type: "text" },
+  {
+    id: "departmentSection",
+    prompt: "🏷 ለየትኛው ክፍል (Department/Section) ነው?",
+    type: "text",
+    skippable: true,
+  },
+  {
+    id: "requisitionNo",
+    prompt: "📋 የStore Requisition Note ቁጥር ይፃፉ።",
+    type: "text",
+    skippable: true,
+  },
+  ...voucherItemSteps({ kinds: ["bag", "material"], costSkippable: true }),
+  { id: "remarks", prompt: "📝 አስተያየት (Remarks) ካለ ይፃፉ።", type: "text", skippable: true },
+  { id: "issuedBy", prompt: "🧑 ያወጣው (Issued by) ማን ነው?", type: "text", skippable: true },
+  { id: "approvedBy", prompt: "🧑 ያፀደቀው (Approved by) ማን ነው?", type: "text", skippable: true },
+  { id: "receivedBy", prompt: "🧑 የተረከበው (Received by) ማን ነው?", type: "text", skippable: true },
 ];
 
 /* ────────────────────────── Monthly price list (finance) ─────────────────── */
@@ -546,10 +651,8 @@ const STEPS: Record<AssetFlowKind, AssetStep[]> = {
   pp_bag_damage: PP_BAG_DAMAGE_STEPS,
   production_daily: PRODUCTION_STEPS,
   base_balance: BASE_BALANCE_STEPS,
-  material_issue: MATERIAL_ISSUE_STEPS,
-  pp_bag_report: PP_BAG_REPORT_STEPS,
-  tool_purchase: TOOL_PURCHASE_STEPS,
-  pp_bag_purchase: PP_BAG_PURCHASE_STEPS,
+  store_issue: STORE_ISSUE_STEPS,
+  grv: GRV_STEPS,
   price_list: PRICE_LIST_STEPS,
   wht_holder: WHT_HOLDER_STEPS,
 };
@@ -561,10 +664,8 @@ export const FLOW_TITLE: Record<AssetFlowKind, string> = {
   pp_bag_damage: "💔 የPP ከረጢት ብልሽት ሪፖርት",
   production_daily: "🏭 የቀኑ የምርት ሪፖርት",
   base_balance: "📊 የወሩ የመነሻ ሚዛን",
-  material_issue: "🔥 የቀኑ ጥሬ ዕቃ ፍጆታ",
-  pp_bag_report: "🧺 የPP ከረጢት ግዢ ሪፖርት",
-  tool_purchase: "🧾 የመሣሪያ ግዢ ሪፖርት",
-  pp_bag_purchase: "🛍 የPP ከረጢት ግዢ ደረሰኝ",
+  store_issue: "📤 የመጋዘን ወጪ ቫውቸር (SIV)",
+  grv: "📥 የዕቃ ገቢ ቫውቸር (GRV)",
   price_list: "💲 የወሩ የዋጋ ዝርዝር",
   wht_holder: "📄 WHT ደረሰኝ ያዢ",
 };
@@ -683,22 +784,27 @@ function jsonMap(draft: Record<string, string | number>, prefix: string, keys: r
   return out;
 }
 
-/* ─────────────────────── PP bag extraction → draft ────────────────────────── */
+/* ────────────────────── Voucher extraction → draft ────────────────────────── */
 
 /**
- * Merge what the model read off the paperwork into the draft.
+ * Merge what the model read off a voucher into the draft.
  *
  * Only fields the reporter has not already answered are touched, and only values
- * actually present: a colour the model returned nothing for stays unanswered so
+ * actually present: a cell the model returned nothing for stays unanswered so
  * the flow asks about it, rather than being recorded as a confident zero. That
- * distinction is the safety property here — a bag kind that arrived but was
+ * distinction is the safety property here — a quantity that was on the paper but
  * misread has to become a question, never a 0 nobody looked at.
+ *
+ * The ledger suggestion is written to a `_hint` key, NOT to the answer. It only
+ * makes the bot ask "which stock item is this?"; the person's reply is the only
+ * thing that ever sets a ledger key. A suggestion saved as an answer would put a
+ * bag quantity into the month's stock on the model's say-so alone.
  *
  * Pure, so the merge is testable without a webhook or a provider.
  */
-export function applyBagExtraction(
+export function applyVoucherExtraction(
   draft: Record<string, string | number>,
-  read: BagPurchaseRead
+  read: VoucherRead
 ): { filled: string[] } {
   const filled: string[] = [];
   const put = (key: string, value: string | number) => {
@@ -708,14 +814,36 @@ export function applyBagExtraction(
     filled.push(key);
   };
 
-  for (const { size, colour } of BAG_KINDS) {
-    const n = Number(read.bags?.[size]?.[colour]) || 0;
-    if (n > 0) put(bagKey(size, colour), Math.round(n));
+  if (read.voucherNo) {
+    put("grvNo", read.voucherNo);
+    put("sivNo", read.voucherNo);
   }
   if (read.supplier) put("supplier", read.supplier);
-  if (read.dnNo) put("dnNo", read.dnNo);
+  if (read.supplierInvoiceNo) put("supplierInvoiceNo", read.supplierInvoiceNo);
+  if (read.purchaseOrderNo) put("purchaseOrderNo", read.purchaseOrderNo);
+  if (read.issuingStore) put("issuingStore", read.issuingStore);
+  if (read.issuedTo) put("issuedTo", read.issuedTo);
+  if (read.departmentSection) put("departmentSection", read.departmentSection);
+  if (read.requisitionNo) put("requisitionNo", read.requisitionNo);
+  if (read.remarks) put("remarks", read.remarks);
   if (read.currency) put("currency", read.currency);
   if (read.total > 0) put("totalAmount", read.total);
+
+  read.items.slice(0, MAX_VOUCHER_ITEMS).forEach((item, idx) => {
+    const i = idx + 1;
+    const k = itemKeys(i);
+    if (item.description) put(k.description, item.description);
+    if (item.stockCode) put(k.stockCode, item.stockCode);
+    if (item.unit) put(k.unit, item.unit);
+    if (item.quantity > 0) put(k.quantity, item.quantity);
+    if (item.unitCost > 0) put(k.unitCost, item.unitCost);
+    // A hint, never an answer — see the note above.
+    if (item.ledgerKey) put(`${k.ledger}_hint`, item.ledgerKey);
+    // The repeating block is gated on "add another?", so a voucher the model
+    // read four lines from has to answer that question for the first three or
+    // the flow stops after line one and silently drops the rest.
+    if (i < MAX_VOUCHER_ITEMS) put(k.more, idx + 1 < Math.min(read.items.length, MAX_VOUCHER_ITEMS) ? "yes" : "no");
+  });
 
   return { filled };
 }
@@ -810,79 +938,76 @@ export function assetPreview(state: AssetFlowState): string {
     ].join("\n");
   }
 
-  if (state.kind === "material_issue") {
-    const mats = FINANCE_RAW_MATERIALS.map((m) => `${m}: <b>${qty(Number(d[materialKey(m)]) || 0)}</b> ቶን`);
-    const bags = BAG_SIZES.map((sz) => `${BAG_SIZE_LABEL[sz]} PP: <b>${qty(Number(d[bagFinanceKey(sz)]) || 0)}</b>`);
-    return [`🔥 <b>የቀኑ ጥሬ ዕቃ ፍጆታ</b>`, `📅 ${esc(d.date)}`, "", ...mats, "", ...bags].join("\n");
-  }
-
-  if (state.kind === "tool_purchase") {
-    const items = purchaseItems(d).map(
-      (it, i) => `${i + 1}. ${esc(it.description)} — ${qty(it.quantity)} ${esc(it.uom)}`
-    );
-    const photos = state.photoFileIds?.length || 0;
-    return [
-      `🧾 <b>የመሣሪያ ግዢ ሪፖርት</b>`,
-      `📅 ${esc(d.date)}`,
-      "",
-      ...items,
-      "",
-      `🏢 አቅራቢ: <b>${esc(d.supplier) || "—"}</b>`,
-      `🏷 ክፍል: <b>${esc(d.costCenter) || "—"}</b>`,
-      `🧑 ገዢ: <b>${esc(d.purchaser) || "—"}</b>`,
-      `💰 ጠቅላላ: <b>${money(Number(d.totalAmount) || 0)} ${esc(d.currency)}</b>`,
-      `🧾 ደረሰኝ: <b>${photos}</b> ፎቶ`,
-      photos > 0 ? "<i>ደረሰኙ ከተመዘገበ በኋላ በAI ይመረመራል።</i>" : "",
-    ]
-      .filter(Boolean)
-      .join("\n");
-  }
-
-  if (state.kind === "pp_bag_report") {
+  if (state.kind === "grv" || state.kind === "store_issue") {
+    const isGrv = state.kind === "grv";
     const ex = state.extraction;
     const read = new Set(ex?.filled || []);
     // Values the model supplied carry a marker. Everything on this card is about
     // to be saved, and a figure nobody typed has to be visibly distinguishable
     // from one somebody did — that is the whole reason the card exists.
-    const bags = BAG_KINDS.map(
-      ({ size, colour }) =>
-        `${bagLabel(size, colour)}: <b>${qty(Number(d[bagKey(size, colour)]) || 0)}</b>` +
-        (read.has(bagKey(size, colour)) ? " 🤖" : "")
-    );
-    const total = BAG_KINDS.reduce((a, { size, colour }) => a + (Number(d[bagKey(size, colour)]) || 0), 0);
-    const photos = state.photoFileIds?.length || 0;
     const mark = (key: string) => (read.has(key) ? " 🤖" : "");
+
+    const items = voucherItems(d).map((it, i) => {
+      const cost = it.unitCost ? ` × ${money(it.unitCost)}` : "";
+      const ledger = it.ledgerKey
+        ? `
+     └ 📦 ${ledgerLabel(it.ledgerKind, it.ledgerKey)}: <b>${qty(it.ledgerQty)}</b> ${
+            it.ledgerKind === "bag" ? "ከረጢት" : "ቶን"
+          }`
+        : "";
+      return (
+        `${i + 1}. ${esc(it.description)} — ${qty(it.quantity)} ${esc(it.unit) || "—"}${cost}` +
+        mark(itemKeys(i + 1).description) +
+        ledger
+      );
+    });
+
+    const photos = state.photoFileIds?.length || 0;
+    const head = isGrv
+      ? [
+          `📥 <b>የዕቃ ገቢ ቫውቸር (GRV)</b>`,
+          `🔢 No.: <b>${esc(d.grvNo) || "—"}</b>${mark("grvNo")}`,
+          `📅 ${esc(d.date)}`,
+          `🏢 አቅራቢ: <b>${esc(d.supplier) || "—"}</b>${mark("supplier")}`,
+          `📄 Invoice No.: <b>${esc(d.supplierInvoiceNo) || "—"}</b>${mark("supplierInvoiceNo")}`,
+        ]
+      : [
+          `📤 <b>የመጋዘን ወጪ ቫውቸር (SIV)</b>`,
+          `🔢 No.: <b>${esc(d.sivNo) || "—"}</b>${mark("sivNo")}`,
+          `📅 ${esc(d.date)}`,
+          `🏬 መጋዘን: <b>${esc(d.issuingStore) || "—"}</b>${mark("issuingStore")}`,
+          `🧑 ለ: <b>${esc(d.issuedTo) || "—"}</b>${mark("issuedTo")}`,
+          `🏷 ክፍል: <b>${esc(d.departmentSection) || "—"}</b>${mark("departmentSection")}`,
+        ];
+
+    const tail = isGrv
+      ? [
+          `💰 ጠቅላላ: <b>${money(Number(d.totalAmount) || 0)} ${esc(d.currency) || "ETB"}</b>${mark("totalAmount")}`,
+          `🧾 ፎቶ: <b>${photos}</b>`,
+          photos > 0 ? "<i>ደረሰኙ ከተመዘገበ በኋላ በAI ይመረመራል።</i>" : "",
+        ]
+      : [`📷 ፎቶ: <b>${photos}</b>`];
+
+    // Lines with no confirmed stock item are named, not hidden. A voucher whose
+    // bags were never classified simply does not move the stock balance, and the
+    // reporter is the only person who can still fix that — after saving, nobody
+    // is looking.
+    const unclassified = voucherItems(d).filter((it) => !it.ledgerKey).length;
+
     return [
-      `🧺 <b>የPP ከረጢት ግዢ ሪፖርት</b>`,
-      `📅 ${esc(d.date)}`,
+      ...head,
       "",
-      ...bags,
-      `  ─────────`,
-      `  <b>ጠቅላላ: ${qty(total)} ከረጢት</b>`,
+      ...(items.length > 0 ? items : ["  —"]),
       "",
-      `🏢 አቅራቢ: <b>${esc(d.supplier) || "—"}</b>${mark("supplier")}`,
-      `📄 D.N No.: <b>${esc(d.dnNo) || "—"}</b>${mark("dnNo")}`,
-      `💰 ጠቅላላ ዋጋ: <b>${money(Number(d.totalAmount) || 0)} ${esc(d.currency) || "ETB"}</b>${mark("totalAmount")}`,
-      `🧾 ደረሰኝ: <b>${photos}</b> ፎቶ`,
+      ...tail,
+      unclassified > 0
+        ? `<i>ℹ️ ${unclassified} ዕቃ በክምችት ሒሳብ ውስጥ አልገባም (የክምችት ዕቃ አይደለም ተብሏል)።</i>`
+        : "",
       ex?.checked ? `<i>🤖 ምልክት ያለው ከፎቶው የተነበበ ነው (እርግጠኝነት ${ex.confidence}%)። ስህተት ካለ ያስተካክሉ።</i>` : "",
       ex && !ex.checked ? "<i>ፎቶውን ማንበብ አልተቻለም — ሁሉንም በእጅ አስገብተዋል።</i>" : "",
     ]
       .filter(Boolean)
       .join("\n");
-  }
-
-  if (state.kind === "pp_bag_purchase") {
-    const photos = state.photoFileIds?.length || 0;
-    return [
-      `🛍 <b>የPP ከረጢት ግዢ ደረሰኝ</b>`,
-      `📅 ${esc(d.date)}`,
-      "",
-      `🏢 አቅራቢ: <b>${esc(d.supplier) || "—"}</b>`,
-      `💰 ጠቅላላ: <b>${money(Number(d.totalAmount) || 0)} ${esc(d.currency)}</b>`,
-      `🧾 ደረሰኝ: <b>${photos}</b> ፎቶ`,
-      "",
-      `<i>ብዛቱ የሚመዘገበው በንብረት ክፍል (Asset Management) ሪፖርት ነው።</i>`,
-    ].join("\n");
   }
 
   if (state.kind === "price_list") {
@@ -934,27 +1059,55 @@ function nextMonthOf(_draft: Record<string, string | number>): string {
   return nextMonth(monthLabel());
 }
 
-export interface PurchaseItem {
+export interface VoucherItem {
+  stockCode: string | null;
   description: string;
-  uom: string;
+  unit: string | null;
   quantity: number;
+  unitCost: number | null;
+  totalAmount: number | null;
+  /** Null unless a person confirmed which stock item this line is. */
+  ledgerKind: LedgerKind | null;
+  ledgerKey: string | null;
+  ledgerQty: number;
 }
 
 /**
- * The filled item slots of a purchase batch, in order.
+ * The filled item slots of a voucher, in order.
  *
- * Stops at the first empty description rather than scanning all eight, so a
- * slot left behind by an earlier edit can never be resurrected.
+ * Stops at the first empty description rather than scanning all eight, so a slot
+ * left behind by an earlier edit can never be resurrected.
+ *
+ * The ledger fields are populated ONLY from the confirmation answer. A line the
+ * extractor suggested but nobody confirmed comes back with them null and moves
+ * no balance — which is the whole point of asking.
  */
-export function purchaseItems(draft: Record<string, string | number>): PurchaseItem[] {
-  const out: PurchaseItem[] = [];
-  for (let i = 1; i <= MAX_PURCHASE_ITEMS; i++) {
-    const description = String(draft[`desc${i}`] || "").trim();
+export function voucherItems(draft: Record<string, string | number>): VoucherItem[] {
+  const out: VoucherItem[] = [];
+  for (let i = 1; i <= MAX_VOUCHER_ITEMS; i++) {
+    const k = itemKeys(i);
+    const description = String(draft[k.description] || "").trim();
     if (!description) break;
+
+    const answered = String(draft[k.ledger] || "");
+    const confirmed = answered && answered !== LEDGER_NONE ? answered : null;
+    const unit = ledgerUnitOf(confirmed || "");
+    const quantity = Number(draft[k.quantity]) || 0;
+    const unitCost = Number(draft[k.unitCost]) || 0;
+
     out.push({
+      stockCode: String(draft[k.stockCode] || "").trim() || null,
       description,
-      uom: String(draft[`uom${i}`] || "pcs"),
-      quantity: Number(draft[`qty${i}`]) || 0,
+      unit: String(draft[k.unit] || "").trim() || null,
+      quantity,
+      unitCost: unitCost > 0 ? unitCost : null,
+      // Derived, never asked: the line total is unit cost × quantity by
+      // definition, and asking for it invites a third figure that disagrees
+      // with the two it is made of.
+      totalAmount: unitCost > 0 ? Math.round(unitCost * quantity * 100) / 100 : null,
+      ledgerKind: confirmed ? (unit === "pcs" ? "bag" : "material") : null,
+      ledgerKey: confirmed,
+      ledgerQty: confirmed ? Number(draft[k.ledgerQty]) || 0 : 0,
     });
   }
   return out;
@@ -1061,86 +1214,66 @@ export async function saveAssetReport(
     return { id: row.id, table: "monthly_base_balances" };
   }
 
-  if (state.kind === "material_issue") {
+  if (state.kind === "grv" || state.kind === "store_issue") {
+    const isGrv = state.kind === "grv";
+    const items = voucherItems(d);
+    const extraction = state.extraction ? sql.json({ ...state.extraction }) : null;
+    const photos = state.photoFileIds || [];
     const date = reportDate(d.date);
-    // One row per day, like daily_ops_reports: two people reporting the same
-    // day must not produce two consumption figures nothing can reconcile.
-    const [row] = await sql<{ id: string }[]>`
-      insert into material_issues (date_label, date, materials, bags, reported_by, source)
-      values (${opsDateLabel(date)}, ${date},
-              ${sql.json(jsonMap(d, MATERIAL_PREFIX, FINANCE_RAW_MATERIALS))},
-              ${sql.json(jsonMap(d, BAG_PREFIX, BAG_SIZES))},
-              ${reportedBy}, 'telegram')
-      on conflict (date_label) do update set
-        materials = excluded.materials,
-        bags = excluded.bags,
-        reported_by = excluded.reported_by,
-        updated_at = now()
-      returning id`;
-    return { id: row.id, table: "material_issues" };
-  }
+    // A blank voucher number must be stored as NULL, not "". The unique index is
+    // partial on `not null`, so an empty string would make the SECOND unnumbered
+    // voucher collide with the first and be refused as a duplicate.
+    const voucherNo = String((isGrv ? d.grvNo : d.sivNo) || "").trim() || null;
 
-  if (state.kind === "tool_purchase") {
-    const items = purchaseItems(d);
-    const [batch] = await sql<{ id: string }[]>`
-      insert into finance_purchase_batches
-        (sr_no, date, supplier, cost_center, purchaser, currency, total_amount,
-         reported_by, photo_file_ids, source)
-      values (nextval('finance_purchase_sr_seq'), ${reportDate(d.date)},
-              ${String(d.supplier || "") || null}, ${String(d.costCenter || "") || null},
-              ${String(d.purchaser || "") || reportedBy},
-              ${d.currency === "USD" ? "USD" : "ETB"},
-              ${Number(d.totalAmount) || null}, ${reportedBy},
-              ${state.photoFileIds || []}, 'telegram')
-      returning id`;
+    const [header] = isGrv
+      ? await sql<{ id: string }[]>`
+          insert into goods_receiving_vouchers
+            (grv_no, date, supplier, supplier_invoice_no, purchase_order_no, receiving_store_no,
+             currency, total_amount, remarks, prepared_by, received_by, approved_by,
+             reported_by, photo_file_ids, extraction, source)
+          values (${voucherNo}, ${date}, ${String(d.supplier || "") || null},
+                  ${String(d.supplierInvoiceNo || "") || null},
+                  ${String(d.purchaseOrderNo || "") || null},
+                  ${String(d.receivingStoreNo || "") || null},
+                  ${d.currency === "USD" ? "USD" : "ETB"},
+                  ${Number(d.totalAmount) || null}, ${String(d.remarks || "") || null},
+                  ${String(d.preparedBy || "") || null}, ${String(d.receivedBy || "") || null},
+                  ${String(d.approvedBy || "") || null},
+                  ${reportedBy}, ${photos}, ${extraction}, 'telegram')
+          returning id`
+      : await sql<{ id: string }[]>`
+          insert into store_issue_vouchers
+            (siv_no, date, issuing_store, issued_to, department_section, store_requisition_no,
+             remarks, issued_by, approved_by, received_by,
+             reported_by, photo_file_ids, extraction, source)
+          values (${voucherNo}, ${date}, ${String(d.issuingStore || "") || null},
+                  ${String(d.issuedTo || "") || null},
+                  ${String(d.departmentSection || "") || null},
+                  ${String(d.requisitionNo || "") || null},
+                  ${String(d.remarks || "") || null},
+                  ${String(d.issuedBy || "") || null}, ${String(d.approvedBy || "") || null},
+                  ${String(d.receivedBy || "") || null},
+                  ${reportedBy}, ${photos}, ${extraction}, 'telegram')
+          returning id`;
 
     if (items.length > 0) {
-      await sql`
-        insert into finance_purchase_items ${sql(
-          items.map((it, i) => ({
-            batch_id: batch.id,
-            position: i,
-            description: it.description,
-            uom: it.uom,
-            quantity: it.quantity,
-          }))
-        )}`;
+      const rows = items.map((it, i) => ({
+        [isGrv ? "grv_id" : "siv_id"]: header.id,
+        position: i,
+        stock_code: it.stockCode,
+        description: it.description,
+        unit: it.unit,
+        quantity: it.quantity,
+        unit_cost: it.unitCost,
+        total_amount: it.totalAmount,
+        ledger_kind: it.ledgerKind,
+        ledger_key: it.ledgerKey,
+        ledger_qty: it.ledgerKey ? it.ledgerQty : null,
+      }));
+      await sql`insert into ${sql(isGrv ? "goods_receiving_items" : "store_issue_items")} ${sql(rows)}`;
     }
-    return { id: batch.id, table: "finance_purchase_batches" };
-  }
 
-  if (state.kind === "pp_bag_report") {
-    // The asset copy: the counts, by size and colour, in the same nested shape
-    // daily_ops_reports.bags uses. This is the row the monthly finance report
-    // reads for its bag "Received" line.
-    const [row] = await sql<{ id: string }[]>`
-      insert into pp_bag_purchases (date, bags, supplier, dn_no, currency, total_amount,
-                                    reported_by, photo_file_ids, extraction, filed_by_dept, source)
-      values (${reportDate(d.date)}, ${sql.json(bagMap(d))},
-              ${String(d.supplier || "") || null}, ${String(d.dnNo || "") || null},
-              ${d.currency === "USD" ? "USD" : "ETB"},
-              ${Number(d.totalAmount) || null}, ${reportedBy},
-              ${state.photoFileIds || []},
-              ${state.extraction ? sql.json({ ...state.extraction }) : null},
-              'asset', 'telegram')
-      returning id`;
-    return { id: row.id, table: "pp_bag_purchases" };
-  }
-
-  if (state.kind === "pp_bag_purchase") {
-    // The finance copy: the receipt and the money, no counts. An empty bags map
-    // contributes nothing to the month's received quantity, so the same delivery
-    // filed by both departments cannot double it.
-    const [row] = await sql<{ id: string }[]>`
-      insert into pp_bag_purchases (date, bags, supplier, currency, total_amount,
-                                    reported_by, photo_file_ids, filed_by_dept, source)
-      values (${reportDate(d.date)}, ${sql.json({})},
-              ${String(d.supplier || "") || null},
-              ${d.currency === "USD" ? "USD" : "ETB"},
-              ${Number(d.totalAmount) || null}, ${reportedBy},
-              ${state.photoFileIds || []}, 'finance', 'telegram')
-      returning id`;
-    return { id: row.id, table: "pp_bag_purchases" };
+    return { id: header.id, table: isGrv ? "goods_receiving_vouchers" : "store_issue_vouchers" };
   }
 
   if (state.kind === "price_list") {

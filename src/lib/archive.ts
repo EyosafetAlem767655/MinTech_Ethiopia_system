@@ -50,6 +50,13 @@ const CHILD_TABLES: ArchiveTable[] = [
     parent: { table: "finance_purchase_batches", fk: "batch_id", dateColumn: "date" } },
   { table: "wht_sms_log", dateColumn: "created_at", sheet: "wht_sms_log",
     parent: { table: "wht_holders", fk: "holder_id", dateColumn: "created_at" } },
+  // The voucher line items ARE the voucher. Without these two the yearly archive
+  // would ship headers with no contents, and the cascade would still delete the
+  // lines — the exact shape of loss this list exists to prevent.
+  { table: "goods_receiving_items", dateColumn: "created_at", sheet: "goods_receiving_items",
+    parent: { table: "goods_receiving_vouchers", fk: "grv_id", dateColumn: "date" } },
+  { table: "store_issue_items", dateColumn: "created_at", sheet: "store_issue_items",
+    parent: { table: "store_issue_vouchers", fk: "siv_id", dateColumn: "date" } },
   { table: "bag_events", dateColumn: "date", sheet: "bag_events",
     parent: { table: "bag_lots", fk: "lot_id", dateColumn: "received_at" } },
 ];

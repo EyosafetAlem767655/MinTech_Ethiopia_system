@@ -11,9 +11,9 @@ import RawMaterialReceivedPanel from "@/components/panels/RawMaterialReceivedPan
 import DeliveryReportPanel from "@/components/panels/DeliveryReportPanel";
 import ProductionPanels from "@/components/panels/ProductionPanels";
 import FinancePanels from "@/components/panels/FinancePanels";
+import VoucherPanels from "@/components/panels/VoucherPanels";
 import ToolRequestsPanel from "@/components/panels/ToolRequestsPanel";
 import PpBagDamagePanel from "@/components/panels/PpBagDamagePanel";
-import PpBagPurchasePanel from "@/components/panels/PpBagPurchasePanel";
 import SalesReceiptsPanel from "@/components/panels/SalesReceiptsPanel";
 
 /**
@@ -33,16 +33,19 @@ const PANELS: Record<DepartmentKey, ComponentType[]> = {
   asset_management: [
     RawMaterialReceivedPanel,
     DeliveryReportPanel,
-    // What bags came in, then what was spoiled — the two halves of the same
-    // stock, kept adjacent so one is read in the light of the other.
-    PpBagPurchasePanel,
+    // Goods in, goods out, and whether the two agree with the floor. First,
+    // because the stock check is the question the rest of the tab answers
+    // pieces of.
+    VoucherPanels,
     PpBagDamagePanel,
     ToolRequestsPanel,
     BagControlPanel,
     PurchasesPanel,
   ],
   sales: [SalesReceiptsPanel],
-  finance: [FinancePanels],
+  // Finance files the goods receiving voucher, so it reads the same panel —
+  // one record of a purchase, seen from both departments.
+  finance: [FinancePanels, VoucherPanels],
 };
 
 /**

@@ -1,5 +1,6 @@
 import sql from "@/lib/sql";
 import { addDays, daysBetween, eatDateLabel, eatDayStart, yesterdayRange } from "@/lib/dates";
+import { reconcileBags } from "@/lib/stock-reconciliation";
 
 /**
  * All dashboard numbers. Previously 10 MongoDB aggregation pipelines; now SQL.
@@ -533,7 +534,26 @@ export async function detectExceptions(
   }
 
 
-  // 3. (Gate stone-quality exception removed with the traceability module.)
+  // 3. The bag stock on the floor disagrees with the vouchers.
+  //
+  //    Three people's records predict a fourth's count: opening balance, goods
+  //    received, goods issued → what should be left. A gap means something moved
+  //    that nobody wrote down, and it only gets harder to explain with age.
+  try {
+    const rec = await reconcileBags();
+    for (const row of rec.discrepancies) {
+      const gap = row.gap ?? 0;
+      exceptions.push(
+        `${row.label} bags: ${row.counted?.toLocaleString()} counted on ${rec.countedOn}, ` +
+          `${row.expected.toLocaleString()} expected from the vouchers ` +
+          `(${gap > 0 ? "+" : ""}${gap.toLocaleString()}).`
+      );
+    }
+  } catch (e) {
+    // The voucher tables arrive in 0019. A database one migration behind must
+    // still produce every other exception on this list.
+    console.warn("detectExceptions: bag reconciliation unavailable", e);
+  }
 
   // 4. Lot balance gaps (possible theft / unrecorded use)
   for (const lot of deps.lotGaps ?? (await getLotGaps())) {

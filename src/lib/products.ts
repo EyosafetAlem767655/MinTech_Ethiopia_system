@@ -111,6 +111,92 @@ export function bagGrandTotal(bags: BagCounts | null | undefined): number {
   return totals.kg25 + totals.kg40;
 }
 
+/* ────────────────────────────── The stock ledger ──────────────────────────── */
+
+/**
+ * What a voucher line can be counted as.
+ *
+ * A Goods Receiving Voucher and a Store Issue Voucher are free text — a line
+ * reads "PP bag 25KG Yellow" or "Dolomite chips". That string is not a quantity
+ * of anything until somebody says which stock item it is, which is what these
+ * keys are for: `ledger_key` on the line row holds one of them, and only lines
+ * carrying one are ever summed into a report or a balance.
+ */
+export type LedgerKind = "bag" | "material";
+
+/** "kg25:Yellow" — a bag kind as a single opaque key. */
+export function bagLedgerKey(size: BagSize, colour: string): string {
+  return `${size}:${colour}`;
+}
+
+/** The reverse, returning null for anything that is not one of the six kinds. */
+export function parseBagLedgerKey(key: string): { size: BagSize; colour: string } | null {
+  const [size, colour] = String(key || "").split(":");
+  if (!(BAG_SIZES as readonly string[]).includes(size)) return null;
+  if (!BAG_STOCK[size as BagSize].includes(colour)) return null;
+  return { size: size as BagSize, colour };
+}
+
+/** Every key a person may confirm a line as, in menu order. */
+export function ledgerChoices(kinds: readonly LedgerKind[] = ["bag", "material"]) {
+  const out: { kind: LedgerKind; key: string; label: string; unit: "pcs" | "t" }[] = [];
+  if (kinds.includes("bag")) {
+    for (const { size, colour } of BAG_KINDS) {
+      out.push({
+        kind: "bag",
+        key: bagLedgerKey(size, colour),
+        label: `${bagLabel(size, colour)} PP`,
+        unit: "pcs",
+      });
+    }
+  }
+  if (kinds.includes("material")) {
+    for (const m of FINANCE_RAW_MATERIALS) {
+      out.push({ kind: "material", key: m, label: m, unit: "t" });
+    }
+  }
+  return out;
+}
+
+/** Display name for a ledger key, falling back to the raw key. */
+export function ledgerLabel(kind: string | null, key: string | null): string {
+  if (!kind || !key) return "—";
+  if (kind === "bag") {
+    const parsed = parseBagLedgerKey(key);
+    return parsed ? `${bagLabel(parsed.size, parsed.colour)} PP` : key;
+  }
+  return key;
+}
+
+/**
+ * Does this line look like something the stock ledger tracks?
+ *
+ * Used ONLY to decide whether the bot asks the confirmation question — never to
+ * classify a line on its own. A false positive costs one extra question; a false
+ * negative means the line is simply not counted, which is the safe direction.
+ */
+const LEDGER_HINTS = [
+  "pp",
+  "bag",
+  "sack",
+  "ከረጢት",
+  "ጆንያ",
+  "dolomite",
+  "lime",
+  "limestone",
+  "talc",
+  "kuni",
+  "chips",
+  "guji",
+  "ዶሎማይት",
+  "ኖራ",
+];
+
+export function looksLikeStockItem(description: string): boolean {
+  const d = String(description || "").toLowerCase();
+  return LEDGER_HINTS.some((h) => d.includes(h));
+}
+
 /**
  * The raw-material intake columns, in sheet order.
  *

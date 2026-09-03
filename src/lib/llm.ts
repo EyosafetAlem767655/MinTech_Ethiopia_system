@@ -1,6 +1,12 @@
 import OpenAI from "openai";
 import { envValue } from "@/lib/env";
-import { BAG_SIZES, BAG_SIZE_LABEL, BAG_STOCK } from "@/lib/products";
+import {
+  BAG_SIZES,
+  BAG_SIZE_LABEL,
+  BAG_STOCK,
+  FINANCE_RAW_MATERIALS,
+  parseBagLedgerKey,
+} from "@/lib/products";
 
 /* ─────────────────────────────── AI providers ──────────────────────────────
  * Text (chat, morning brief, report extraction) → NVIDIA Nemotron-3.
@@ -411,98 +417,164 @@ export async function extractReceiptGemini(
   }
 }
 
-/* ─────────────────── PP bag purchase extraction (Gemini) ────────────────────
- * Backs the asset-management PP bag report: photographs of the supplier's
- * receipt, delivery note or goods-received form, read into the six bag kinds.
+/* ────────────────────── Voucher extraction (Gemini) ─────────────────────────
+ * Backs both paper vouchers: the Goods Receiving Voucher (what was bought and
+ * received) and the Store Issue Voucher (what left the warehouse). Photographs
+ * of the pad are read into a header plus its line items.
  *
  * Unlike the sales receipt reader this is a PREFILL, not a verdict. Whatever it
  * returns is shown to the reporter for correction before anything is saved, so
  * the cost of a misread field is one edit rather than a wrong row.
+ *
+ * The `ledgerKind`/`ledgerKey` it returns per line are SUGGESTIONS ONLY. They
+ * decide whether the bot asks "is this 25KG Yellow?" — they are never saved on
+ * their own. A quantity nobody agreed to must not move a stock balance.
  */
 
-export interface BagPurchaseRead {
+export type VoucherKind = "grv" | "siv";
+
+export interface VoucherLineRead {
+  stockCode: string;
+  description: string;
+  unit: string;
+  quantity: number;
+  unitCost: number;
+  totalAmount: number;
+  /** Suggested classification. "" means the model saw nothing trackable. */
+  ledgerKind: "bag" | "material" | "";
+  /** e.g. "kg25:Yellow" or "Dolomite". Only meaningful with a ledgerKind. */
+  ledgerKey: string;
+}
+
+export interface VoucherRead {
   date: string;
+  voucherNo: string;
+  /** GRV only. */
   supplier: string;
-  dnNo: string;
-  /** { kg25: { Yellow: n, … }, kg40: { … } } — only kinds actually read. */
-  bags: Record<string, Record<string, number>>;
+  supplierInvoiceNo: string;
+  purchaseOrderNo: string;
   currency: "ETB" | "USD" | "";
   total: number;
+  /** SIV only. */
+  issuingStore: string;
+  issuedTo: string;
+  departmentSection: string;
+  requisitionNo: string;
+  remarks: string;
+  items: VoucherLineRead[];
   confidence: number; // 0-100
   notes: string;
-  /** Bag lines it could not map to a known kind, as printed. */
+  /** Lines it could not read cleanly, copied as printed. */
   unmatched: string[];
 }
 
-export type BagPurchaseReadResult =
-  | { ok: true; data: BagPurchaseRead }
-  | { ok: false; error: string };
+export type VoucherReadResult = { ok: true; data: VoucherRead } | { ok: false; error: string };
 
-/** "25KG: Yellow, White, Beige" — the kinds spelled out for the prompt. */
-const BAG_KIND_LIST = BAG_SIZES.map(
-  (size) => `${BAG_SIZE_LABEL[size]} (key "${size}"): ${BAG_STOCK[size].join(", ")}`
-).join("; ");
+/** The stock keys the model may suggest, spelled out for the prompt. */
+const LEDGER_KEY_LIST =
+  BAG_SIZES.map((size) =>
+    BAG_STOCK[size].map((colour) => `"${size}:${colour}" (${BAG_SIZE_LABEL[size]} ${colour} PP bag, pieces)`).join(", ")
+  ).join(", ") +
+  ", " +
+  FINANCE_RAW_MATERIALS.map((m) => `"${m}" (raw material, tonnes)`).join(", ");
 
-const GEMINI_BAG_SYSTEM =
-  "You read Ethiopian supplier receipts, delivery notes and goods-received forms for PP bags " +
-  "(woven polypropylene sacks) and return STRICT JSON only.\n" +
-  "IMPORTANT: every image you are given is a page or angle of ONE SINGLE purchase. Merge what you can " +
-  "read across them into ONE result. Never return several purchases, and never add quantities across " +
-  "images that show the same page.\n" +
-  `The only bag kinds that exist are: ${BAG_KIND_LIST}.\n` +
-  'Return exactly: { "date": "YYYY-MM-DD", "supplier": string, ' +
-  '"dnNo": string (the delivery note / DN / form number printed on the paper), ' +
-  '"bags": { "kg25": { "Yellow": number, "White": number, "Beige": number }, ' +
-  '"kg40": { "Yellow": number, "Green": number, "Beige": number } } (PIECES, not weight; ' +
-  "include only the kinds you actually read), " +
-  '"currency": "ETB" or "USD", "total": number (the grand total paid), ' +
-  '"confidence": number (0-100 — how clearly legible the document is), ' +
-  '"notes": string (one short sentence), ' +
-  '"unmatched": string[] (bag lines you could NOT map to one of the kinds above, copied as printed) }.\n' +
-  "Map colour words to the nearest listed colour ONLY when it is the same colour (cream/off-white → " +
-  'Beige, ነጭ → White, ቢጫ → Yellow, አረንጓዴ → Green). If a line names a colour or size that is not ' +
-  'listed, put the whole line in "unmatched" — do NOT force it into a kind that is close enough. ' +
-  "Read every number exactly as printed; do not calculate, correct or total anything yourself. " +
-  'Use "" for text and 0 for numbers that are not visible.';
+function voucherSystemPrompt(kind: VoucherKind): string {
+  const header =
+    kind === "grv"
+      ? 'The document is a GOODS RECEIVING VOUCHER: goods bought and received from a supplier. Read ' +
+        '"voucherNo" from the No. printed at the top, plus "supplier", "supplierInvoiceNo", ' +
+        '"purchaseOrderNo", "currency" and "total".'
+      : 'The document is a STORE ISSUE VOUCHER: goods taken out of the warehouse. Read "voucherNo" ' +
+        'from the No. printed at the top, plus "issuingStore", "issuedTo", "departmentSection" and ' +
+        '"requisitionNo". It usually has no supplier and no currency — leave those "".';
 
-/** Only the six real kinds survive; anything else is dropped, not guessed at. */
-function normaliseBagRead(raw: unknown): Record<string, Record<string, number>> {
-  const out: Record<string, Record<string, number>> = {};
-  const src = (raw || {}) as Record<string, unknown>;
-  for (const size of BAG_SIZES) {
-    const inner = src[size];
-    if (!inner || typeof inner !== "object") continue;
-    const counts: Record<string, number> = {};
-    for (const colour of BAG_STOCK[size]) {
-      const v = Math.round(receiptNum((inner as Record<string, unknown>)[colour]));
-      // Bags are counted, never fractional, and a negative count is a misread.
-      if (v > 0) counts[colour] = v;
-    }
-    if (Object.keys(counts).length > 0) out[size] = counts;
+  return (
+    "You read Ethiopian store vouchers and return STRICT JSON only.\n" +
+    header +
+    "\n" +
+    "IMPORTANT: every image you are given is a page or angle of ONE SINGLE voucher. Merge what you " +
+    "can read across them into ONE result. Never return several vouchers, and never add quantities " +
+    "across images that show the same page.\n" +
+    'Return exactly: { "date": "YYYY-MM-DD", "voucherNo": string, "supplier": string, ' +
+    '"supplierInvoiceNo": string, "purchaseOrderNo": string, "currency": "ETB" or "USD" or "", ' +
+    '"total": number, "issuingStore": string, "issuedTo": string, "departmentSection": string, ' +
+    '"requisitionNo": string, "remarks": string, "confidence": number (0-100 — how clearly legible ' +
+    'the document is), "notes": string (one short sentence), "unmatched": string[] (rows you could ' +
+    'not read cleanly, copied as printed), "items": [ { "stockCode": string, "description": string ' +
+    '(the Description/Specification cell, exactly as written), "unit": string (the Unit cell, e.g. ' +
+    'pcs, pak, kg, roll), "quantity": number, "unitCost": number, "totalAmount": number, ' +
+    '"ledgerKind": "bag" or "material" or "", "ledgerKey": string } ].\n' +
+    `When a line clearly names one of these stock items, set ledgerKind and ledgerKey to it: ${LEDGER_KEY_LIST}.\n` +
+    'If a line is a tool, a spare part, or anything else, leave ledgerKind and ledgerKey as "". ' +
+    "Do NOT force a line into a stock key because it is close enough — a person confirms every " +
+    "classification, and a wrong suggestion costs them more than a missing one.\n" +
+    "Return ONE items entry per printed row, in the order they appear. Skip blank rows entirely.\n" +
+    "Read every number exactly as printed; do not calculate, correct or total anything yourself. A " +
+    "printed total that disagrees with its own line items must be reported as printed, because that " +
+    'disagreement is precisely what the cross-check looks for. Use "" for text and 0 for numbers ' +
+    "that are not visible."
+  );
+}
+
+/** Only the six bag kinds and three materials survive; anything else is dropped. */
+function normaliseLedgerSuggestion(kindRaw: unknown, keyRaw: unknown): { kind: "bag" | "material" | ""; key: string } {
+  const kind = String(kindRaw || "").toLowerCase();
+  const key = String(keyRaw || "").trim();
+  if (kind === "bag" && parseBagLedgerKey(key)) return { kind: "bag", key };
+  if (kind === "material" && (FINANCE_RAW_MATERIALS as readonly string[]).includes(key)) {
+    return { kind: "material", key };
+  }
+  return { kind: "", key: "" };
+}
+
+function normaliseLines(raw: unknown, max: number): VoucherLineRead[] {
+  if (!Array.isArray(raw)) return [];
+  const out: VoucherLineRead[] = [];
+  for (const entry of raw) {
+    const e = (entry || {}) as Record<string, unknown>;
+    const description = String(e.description || "").trim();
+    // A row with no description is a blank line on the pad, not an item.
+    if (!description) continue;
+    const suggestion = normaliseLedgerSuggestion(e.ledgerKind, e.ledgerKey);
+    out.push({
+      stockCode: String(e.stockCode || "").trim(),
+      description,
+      unit: String(e.unit || "").trim(),
+      quantity: receiptNum(e.quantity),
+      unitCost: receiptNum(e.unitCost),
+      totalAmount: receiptNum(e.totalAmount),
+      ledgerKind: suggestion.kind,
+      ledgerKey: suggestion.key,
+    });
+    if (out.length >= max) break;
   }
   return out;
 }
 
 /**
- * Read a PP bag purchase off its paperwork.
+ * Read a voucher off its photographs.
  *
  * Bounded by RECEIPT_BUDGET_MS inside geminiGenerate, because this runs in the
  * Telegram webhook when the reporter finishes sending photos. A failure here is
  * not an error the user has to deal with — the flow simply asks every question
  * by hand instead.
  */
-export async function extractBagPurchaseGemini(
+export async function extractVoucherGemini(
+  kind: VoucherKind,
   images: { base64: string; contentType: string }[],
-  caption?: string
-): Promise<BagPurchaseReadResult> {
+  opts: { maxItems?: number; caption?: string } = {}
+): Promise<VoucherReadResult> {
   if (images.length === 0) return { ok: false, error: "no images to read" };
 
   const parts: GeminiPart[] = images.slice(0, 3).map((img) => ({
     inline_data: { mime_type: img.contentType || "image/jpeg", data: img.base64 },
   }));
-  parts.push({ text: GEMINI_BAG_SYSTEM + (caption ? `\nNote: ${caption}` : "") });
+  parts.push({ text: voucherSystemPrompt(kind) + (opts.caption ? `\nNote: ${opts.caption}` : "") });
 
-  const res = await geminiGenerate([{ role: "user", parts }], { json: true });
+  // A voucher carries far more than a receipt's dozen fields, so the default
+  // output cap is lifted: a truncated JSON array is an unparseable response, and
+  // the whole read is lost for the sake of a few hundred tokens.
+  const res = await geminiGenerate([{ role: "user", parts }], { json: true, maxOutputTokens: 4096 });
   if (!res.ok) return { ok: false, error: res.error || "Gemini call failed" };
   if (!res.text.trim()) return { ok: false, error: "Gemini returned an empty response" };
 
@@ -513,11 +585,18 @@ export async function extractBagPurchaseGemini(
       ok: true,
       data: {
         date: String(p.date || "").trim(),
+        voucherNo: String(p.voucherNo || "").trim(),
         supplier: String(p.supplier || "").trim(),
-        dnNo: String(p.dnNo || "").trim(),
-        bags: normaliseBagRead(p.bags),
+        supplierInvoiceNo: String(p.supplierInvoiceNo || "").trim(),
+        purchaseOrderNo: String(p.purchaseOrderNo || "").trim(),
         currency: currency === "USD" ? "USD" : currency === "ETB" ? "ETB" : "",
         total: receiptNum(p.total),
+        issuingStore: String(p.issuingStore || "").trim(),
+        issuedTo: String(p.issuedTo || "").trim(),
+        departmentSection: String(p.departmentSection || "").trim(),
+        requisitionNo: String(p.requisitionNo || "").trim(),
+        remarks: String(p.remarks || "").trim(),
+        items: normaliseLines(p.items, opts.maxItems ?? 8),
         confidence: Math.max(0, Math.min(100, Math.round(Number(p.confidence) || 50))),
         notes: String(p.notes || "").trim(),
         unmatched: Array.isArray(p.unmatched)
@@ -526,7 +605,7 @@ export async function extractBagPurchaseGemini(
       },
     };
   } catch (e) {
-    console.error("extractBagPurchaseGemini could not parse the response:", e);
+    console.error("extractVoucherGemini could not parse the response:", e);
     return { ok: false, error: "Gemini returned an unreadable response" };
   }
 }

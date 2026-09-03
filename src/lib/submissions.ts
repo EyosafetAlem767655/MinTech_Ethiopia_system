@@ -31,6 +31,9 @@ export const SUBMISSION_COLLECTIONS = [
   "shift",
   "invoice",
   "payment",
+  // The two paper vouchers.
+  "grv",
+  "store_issue",
   // Finance, rebuilt.
   "tool_purchase",
   "pp_bag_purchase",
@@ -420,6 +423,46 @@ export const SUBMISSIONS: Record<SubmissionCollection, SubmissionSpec> = {
     // not editable either: it says which flow wrote the row, not an opinion.
     editableKeys: ["supplier", "dn_no", "total_amount"],
     photosColumn: "photo_file_ids",
+  },
+  grv: {
+    table: "goods_receiving_vouchers",
+    label: "Goods receiving voucher",
+    icon: "📥",
+    dateColumn: "date",
+    authorColumn: "reported_by",
+    searchColumns: ["grv_no", "supplier", "supplier_invoice_no", "reported_by"],
+    displayFields: [
+      TEXT("grv_no", "Voucher No."),
+      TEXT("supplier", "Supplier"),
+      TEXT("supplier_invoice_no", "Invoice No."),
+      TEXT("currency", "Currency"),
+      NUM("total_amount", "Total"),
+      TEXT("received_by", "Received by"),
+    ],
+    // grv_no is not editable: it is uniquely indexed to stop the same voucher
+    // being filed twice, and retyping it here could silently claim another
+    // voucher's number.
+    editableKeys: ["supplier", "supplier_invoice_no", "total_amount", "received_by"],
+    photosColumn: "photo_file_ids",
+    extraChildren: [{ table: "goods_receiving_items", foreignKey: "grv_id" }],
+  },
+  store_issue: {
+    table: "store_issue_vouchers",
+    label: "Store issue voucher",
+    icon: "📤",
+    dateColumn: "date",
+    authorColumn: "reported_by",
+    searchColumns: ["siv_no", "issued_to", "department_section", "reported_by"],
+    displayFields: [
+      TEXT("siv_no", "Voucher No."),
+      TEXT("issuing_store", "Issuing store"),
+      TEXT("issued_to", "Issued to"),
+      TEXT("department_section", "Department"),
+      TEXT("received_by", "Received by"),
+    ],
+    editableKeys: ["issuing_store", "issued_to", "department_section", "received_by"],
+    photosColumn: "photo_file_ids",
+    extraChildren: [{ table: "store_issue_items", foreignKey: "siv_id" }],
   },
   base_balance: {
     table: "monthly_base_balances",
