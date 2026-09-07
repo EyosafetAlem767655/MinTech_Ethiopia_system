@@ -21,6 +21,9 @@ export type AssetFlowKind =
   // slice of the same events; the retired tables stay readable in Settings.
   | "store_issue"
   | "grv"
+  // Production's own daily and per-shift records.
+  | "pp_bag_used"
+  | "whiteness_check"
   // Finance.
   | "price_list"
   | "wht_holder";
@@ -34,6 +37,8 @@ export const FLOW_TITLE: Record<AssetFlowKind, string> = {
   base_balance: "📊 የወሩ የመነሻ ሚዛን",
   store_issue: "📤 የመጋዘን ወጪ ቫውቸር (SIV)",
   grv: "📥 የዕቃ ገቢ ቫውቸር (GRV)",
+  pp_bag_used: "🧺 የቀኑ የPP ከረጢት ፍጆታ",
+  whiteness_check: "⚪ የነጭነት ጥራት ምርመራ",
   price_list: "💲 የወሩ የዋጋ ዝርዝር",
   wht_holder: "📄 WHT ደረሰኝ ያዢ",
 };

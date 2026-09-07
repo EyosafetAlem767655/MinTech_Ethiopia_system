@@ -75,7 +75,7 @@ const ACTION_STYLES: Record<string, string> = {
   error: "bg-red-200 text-red-900",
 };
 
-type Tab = "users" | "submissions" | "activity" | "devices";
+type Tab = "users" | "submissions" | "errors" | "activity" | "devices";
 
 export default function SettingsPage() {
   const [tab, setTab] = useState<Tab>("users");
@@ -116,7 +116,7 @@ export default function SettingsPage() {
       </div>
 
       <div className="flex gap-1.5 py-5">
-        {(["users", "submissions", "activity", "devices"] as const).map((t) => (
+        {(["users", "submissions", "errors", "activity", "devices"] as const).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -128,6 +128,8 @@ export default function SettingsPage() {
               ? "Employees"
               : t === "submissions"
               ? "Submissions"
+              : t === "errors"
+              ? "Errors"
               : t === "activity"
               ? "Bot activity"
               : "Devices"}
@@ -137,6 +139,7 @@ export default function SettingsPage() {
 
       {tab === "users" && <UsersTab />}
       {tab === "submissions" && <SubmissionsTab />}
+      {tab === "errors" && <ErrorsTab />}
       {tab === "activity" && <ActivityTab />}
       {tab === "devices" && <DevicesTab />}
     </main>
@@ -606,6 +609,131 @@ function SubmissionsTab() {
     </div>
   );
 }
+
+/* ──────────────────────────────────── Errors ──────────────────────────────── */
+
+interface ErrorRow {
+  id: string;
+  source: string;
+  kind: string;
+  message: string;
+  detail: Record<string, unknown> | null;
+  actor: string | null;
+  chatId: string | null;
+  createdAt: string;
+  resolvedAt: string | null;
+  last24h: number;
+}
+
+/**
+ * What has been failing.
+ *
+ * Before this screen existed, a Gemini timeout reached exactly one person — the
+ * salesperson holding the phone — and left no trace anywhere else. Nobody could
+ * answer how often it happened or whether it was still happening.
+ *
+ * The 24-hour count beside each row is the point of it: one timeout is weather,
+ * forty is a broken deployment, and the message alone cannot tell them apart.
+ */
+function ErrorsTab() {
+  const [rows, setRows] = useState<ErrorRow[] | null>(null);
+  const [showResolved, setShowResolved] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    setRows(null);
+    const res = await fetch(`/api/errors${showResolved ? "?all=1" : ""}`);
+    if (!res.ok) {
+      setRows([]);
+      return;
+    }
+    const json = await res.json();
+    setRows(Array.isArray(json.rows) ? json.rows : []);
+  }, [showResolved]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const resolve = async (id: string) => {
+    setBusy(true);
+    await fetch("/api/errors", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    }).catch(() => {});
+    setBusy(false);
+    await load();
+  };
+
+  return (
+    <div className="space-y-3 pb-10">
+      <div className="flex items-center justify-between gap-2 px-1">
+        <p className="text-[11px] text-stone-500">
+          {rows === null ? "Loading…" : `${rows.length} ${showResolved ? "recorded" : "open"}`}
+        </p>
+        <button
+          onClick={() => setShowResolved((v) => !v)}
+          className="rounded-full bg-clay-50 px-3 py-1 text-[11px] font-bold text-clay-700"
+        >
+          {showResolved ? "Open only" : "Include resolved"}
+        </button>
+      </div>
+
+      {rows === null ? (
+        <div className="card h-24 animate-pulse bg-clay-50" />
+      ) : rows.length === 0 ? (
+        <p className="card p-4 text-sm text-stone-400">
+          {showResolved ? "Nothing recorded." : "Nothing failing. 🎉"}
+        </p>
+      ) : (
+        rows.map((r) => (
+          <div key={r.id} className="card space-y-1.5 p-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="rounded-full bg-red-100 px-2 py-0.5 text-[10px] font-bold text-red-700">
+                {r.kind}
+              </span>
+              <span className="text-[11px] font-bold text-stone-500">{r.source}</span>
+              {r.last24h > 1 && (
+                <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-800">
+                  {r.last24h}× in 24h
+                </span>
+              )}
+              {r.resolvedAt && (
+                <span className="rounded-full bg-green-100 px-2 py-0.5 text-[10px] font-bold text-green-700">
+                  resolved
+                </span>
+              )}
+              <span className="ml-auto text-[10px] text-stone-400">{fmtTime(r.createdAt)}</span>
+            </div>
+
+            <p className="whitespace-pre-wrap break-words text-xs text-stone-700">{r.message}</p>
+
+            {(r.actor || r.chatId) && (
+              <p className="text-[10px] text-stone-400">
+                {r.actor ?? "—"}
+                {r.chatId ? ` · chat ${r.chatId}` : ""}
+              </p>
+            )}
+
+            {r.detail && Object.keys(r.detail).length > 0 && (
+              <pre className="overflow-x-auto rounded bg-clay-50 p-2 text-[10px] text-stone-600">
+                {JSON.stringify(r.detail, null, 1)}
+              </pre>
+            )}
+
+            {!r.resolvedAt && (
+              <div className="border-t border-clay-50 pt-2">
+                <SmallBtn label="✓ Mark resolved" tone="green" disabled={busy} onClick={() => resolve(r.id)} />
+              </div>
+            )}
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
 
 /* ─────────────────────────────────── Devices ──────────────────────────────── */
 

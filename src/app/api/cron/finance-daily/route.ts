@@ -5,6 +5,7 @@ import { hasPosition, resolveCapabilities } from "@/lib/positions";
 import { sendSms, smsGatewayConfigured } from "@/lib/sms";
 import { sendMessage } from "@/lib/telegram";
 import { describeGap, reconcileBags } from "@/lib/stock-reconciliation";
+import { triggerScanWorker } from "@/lib/sales-scan";
 import {
   eatDayOfMonth,
   isBaseBalanceReminderWindow,
@@ -253,10 +254,29 @@ export async function GET(req: NextRequest) {
     console.warn("finance-daily: bag reconciliation unavailable", e);
   }
 
+  /* ─────────── 4. Sweep any sales read whose worker never finished ───────── */
+
+  // The webhook triggers the worker directly, so this only ever picks up the
+  // exceptions: a trigger that never landed, or a function killed mid-read. Left
+  // alone, those leave a salesperson waiting for a reply that never comes.
+  let sweptScans = 0;
+  try {
+    const stuck = await sql<{ n: string }[]>`
+      select count(*) as n from sales_scan_jobs
+       where status = 'pending'
+          or (status = 'reading' and claimed_at < now() - interval '5 minutes')
+    `;
+    sweptScans = Number(stuck[0]?.n) || 0;
+    if (sweptScans > 0) triggerScanWorker();
+  } catch {
+    // sales_scan_jobs arrives in 0021; the WHT chase above must still run.
+  }
+
   return NextResponse.json({
     ok: true,
     date: today,
     bagGaps: gapsFound,
+    sweptScans,
     sms: {
       configured: smsGatewayConfigured(),
       pendingHolders: holders.length,

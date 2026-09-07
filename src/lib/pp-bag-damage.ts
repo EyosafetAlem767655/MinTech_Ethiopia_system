@@ -161,25 +161,49 @@ function mergeVerdict(photos: PpPhotoResult[]): DamagePhotoCheck {
  * Analyse every photo on a saved report, persist the per-photo rows, and update
  * the report's flags and trust score.
  */
+/** One photographed pile: what kind it is, how many, and the photo itself. */
+export interface PpDamagePile {
+  fileId: string;
+  /** A bag kind, spelled as bagLedgerKey does: 'kg25:Yellow'. */
+  ledgerKey: string;
+  quantity: number;
+  label: string;
+}
+
+/**
+ * Check each pile against ITS OWN claim.
+ *
+ * Previously every photo in a report was checked against the report's single
+ * reason and total, so the model was really only asked "does this look like
+ * damage?". Now the photo and the number were captured together, it can be asked
+ * whether THIS pile plausibly holds THIS many bags of THIS kind — a question
+ * with an actual answer, and the only version of this check worth running.
+ */
 export async function processPpDamageReport(
   reportId: string,
-  fileIds: string[],
-  reason: string,
-  quantity: number
+  piles: PpDamagePile[],
+  reason: string
 ): Promise<PpDamageVerdict> {
   const results: PpPhotoResult[] = [];
   // Sequential on purpose: each photo's duplicate search must see the ones
   // already inserted, or two copies of the same image in one submission slip
   // past each other.
-  for (const fileId of fileIds.slice(0, 3)) {
-    const r = await processOne(fileId, reportId, reason, quantity);
+  for (const pile of piles.slice(0, 8)) {
+    const context = `${pile.label} — ${reason}`;
+    const r = await processOne(pile.fileId, reportId, context, pile.quantity);
     if (!r) continue;
     results.push(r);
     await sql`
       insert into pp_bag_damage_photos (report_id, file_id, phash, duplicate_of_report_id, ai, exif_check)
-      values (${reportId}, ${fileId}, ${r.phash ?? null}, ${r.duplicateOfReportId ?? null},
+      values (${reportId}, ${pile.fileId}, ${r.phash ?? null}, ${r.duplicateOfReportId ?? null},
               ${jsonb(r.ai)}, ${jsonb(r.exifCheck)})
     `;
+    // The verdict is written onto the pile it judged, not just onto the report:
+    // "one of these three photos is wrong" is far less useful than knowing which.
+    await sql`
+      update pp_bag_damage_items set ai = ${jsonb(r.ai)}
+       where report_id = ${reportId} and file_id = ${pile.fileId}
+    `.catch(() => {});
   }
 
   const flags = Array.from(new Set(results.flatMap((p) => p.flags)));

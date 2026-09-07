@@ -34,6 +34,9 @@ export const SUBMISSION_COLLECTIONS = [
   // The two paper vouchers.
   "grv",
   "store_issue",
+  // Production's own records.
+  "pp_bag_usage",
+  "whiteness",
   // Finance, rebuilt.
   "tool_purchase",
   "pp_bag_purchase",
@@ -423,6 +426,39 @@ export const SUBMISSIONS: Record<SubmissionCollection, SubmissionSpec> = {
     // not editable either: it says which flow wrote the row, not an opinion.
     editableKeys: ["supplier", "dn_no", "total_amount"],
     photosColumn: "photo_file_ids",
+  },
+  pp_bag_usage: {
+    table: "pp_bag_usage",
+    label: "PP bags used",
+    icon: "🧺",
+    dateColumn: "date",
+    authorColumn: "reported_by",
+    searchColumns: ["date_label", "reported_by"],
+    displayFields: [TEXT("date_label", "Date"), TEXT("reported_by", "By")],
+    // The figures live in the item rows; correcting one means re-filing the day
+    // through the bot, which replaces its lines rather than adding to them.
+    editableKeys: [],
+    extraChildren: [{ table: "pp_bag_usage_items", foreignKey: "usage_id" }],
+  },
+  whiteness: {
+    table: "whiteness_checks",
+    label: "Whiteness check",
+    icon: "⚪",
+    dateColumn: "date",
+    authorColumn: "reported_by",
+    searchColumns: ["date_label", "product_code", "reported_by"],
+    displayFields: [
+      TEXT("date_label", "Date"),
+      NUM("quarter", "Quarter"),
+      TEXT("product_code", "Product"),
+      NUM("line", "Line"),
+      NUM("avg", "Avg %"),
+      TEXT("reported_by", "By"),
+    ],
+    // The readings are a jsonb map and the average is derived from them, so
+    // neither is editable here: changing one without the other would put an
+    // average on screen that its own readings contradict.
+    editableKeys: [],
   },
   grv: {
     table: "goods_receiving_vouchers",

@@ -18,11 +18,12 @@ export type CapabilityKey =
   | "hr"
   // Structured department report formats (text / photo / Excel).
   | "production_report"
+  | "pp_bag_used"
+  | "whiteness_check"
   | "raw_material_received"
   | "finished_goods_delivery"
   | "purchase_items"
-  | "sales_receipt_scan"
-  | "sales_report_entry"
+  | "sales_report"
   | "tool_request"
   | "pp_bag_damage"
   // Asset management feeds the monthly finance report.
@@ -42,10 +43,12 @@ export type CaptureMode =
   | "capture"
   /** Pasted multi-day operations report. */
   | "ops_paste"
-  /** Scan receipt photo(s) → OCR + Qwen → preview/edit → Excel (sales). */
-  | "receipt_scan"
-  /** Guided field-by-field sales report entry (+ attached receipts) → Excel. */
-  | "sales_entry"
+  /**
+   * The day's sales report: pick the date, then per sale send its documents
+   * (main receipt + WHT receipt + bank slip), which are read in the background
+   * and merged into one row.
+   */
+  | "sales_report"
   /** Guided column-by-column asset report (raw material / delivery / tool request). */
   | "asset_entry";
 
@@ -113,6 +116,20 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
     captureMode: "asset_entry",
     input: "any",
     question: "🏭 የቀኑን የምርትና የክምችት ሪፖርት በደረጃ እናስገባለን።",
+  },
+  pp_bag_used: {
+    key: "pp_bag_used",
+    button: "🧺 የቀኑ የPP ከረጢት ፍጆታ",
+    captureMode: "asset_entry",
+    input: "any",
+    question: "🧺 ዛሬ የዋሉትን የPP ከረጢቶች በዓይነት እናስመዘግባለን።",
+  },
+  whiteness_check: {
+    key: "whiteness_check",
+    button: "⚪ የነጭነት ጥራት ምርመራ",
+    captureMode: "asset_entry",
+    input: "any",
+    question: "⚪ የነጭነት ምርመራ መረጃውን በደረጃ እናስገባለን።",
   },
   raw_material_received: {
     key: "raw_material_received",
@@ -192,21 +209,16 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
     question:
       "🧾 የተገዙ ዕቃዎችን ይላኩ — ጽሑፍ፣ ፎቶ ወይም Excel። መግለጫ፣ መለኪያ (uom)፣ ብዛት፣ አቅራቢ፣ ዋጋ፣ የወጪ ማዕከል እና ገዢ ያካትቱ።",
   },
-  sales_report_entry: {
-    key: "sales_report_entry",
-    button: "🧾 የሽያጭ ሪፖርት",
-    captureMode: "sales_entry",
+  sales_report: {
+    key: "sales_report",
+    // One button. The guided field-by-field entry and the separate scanner both
+    // captured the same row two different ways, and a salesperson had to know
+    // which one to press before they could start.
+    button: "🧾 የቀኑ የሽያጭ ሪፖርት",
+    captureMode: "sales_report",
     input: "any",
     question:
-      "🧾 የሽያጭ ሪፖርት በደረጃ እናስገባለን። መጀመሪያ የደንበኛውን ስም ይፃፉ።",
-  },
-  sales_receipt_scan: {
-    key: "sales_receipt_scan",
-    button: "📷 ደረሰኝ ስካን",
-    captureMode: "receipt_scan",
-    input: "photo",
-    question:
-      "📷 የደረሰኙን ፎቶ(ዎች) ይላኩ — እስከ 3 ፎቶ። ከጨረሱ በኋላ \"✅ ጨርሻለሁ\" የሚለውን ይጫኑ።",
+      "🧾 የቀኑን የሽያጭ ሪፖርት እናስገባለን። ቀኑን ከመረጡ በኋላ የእያንዳንዱን ሽያጭ ሰነዶች ይላካሉ።",
   },
   materials: {
     key: "materials",
@@ -318,7 +330,7 @@ export const POSITIONS: Record<PositionKey, Position> = {
     // column by column — five ways to record the same day, none of them
     // agreeing. Shift analysis and stone traceability are gone from the system
     // entirely; their historic rows stay readable under Settings → Submissions.
-    capabilities: ["production_report"],
+    capabilities: ["production_report", "pp_bag_used", "whiteness_check"],
     dailyRequired: true,
     // production_reports is written on every submission; daily_ops_reports only
     // when the stock half is non-empty, so it cannot stand in as the signal.
@@ -346,10 +358,12 @@ export const POSITIONS: Record<PositionKey, Position> = {
     // store_issue_vouchers is deliberately absent: nothing leaves the warehouse
     // on some days, and a table nobody filed would mark this role non-compliant
     // for every quiet day. material_issues stays so historic days still count.
+    // pp_bag_damage_reports is deliberately absent: the damage report is filed
+    // weekly now, and leaving it here meant one weekly report marked this role
+    // compliant for that day — masking a missing daily raw-material report.
     submissionTables: [
       "raw_material_receipts",
       "delivery_reports",
-      "pp_bag_damage_reports",
       "material_issues",
     ],
   },
@@ -369,7 +383,7 @@ export const POSITIONS: Record<PositionKey, Position> = {
     en: "Sales report & receipts",
     am: "የሽያጭ ሪፖርትና ደረሰኝ",
     description: "Files the daily sales report together with receipts.",
-    capabilities: ["sales_report_entry", "sales_receipt_scan"],
+    capabilities: ["sales_report"],
     dailyRequired: true,
     submissionTables: ["sales_receipts"],
   },

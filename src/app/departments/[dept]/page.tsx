@@ -10,6 +10,7 @@ import PurchasesPanel from "@/components/panels/PurchasesPanel";
 import RawMaterialReceivedPanel from "@/components/panels/RawMaterialReceivedPanel";
 import DeliveryReportPanel from "@/components/panels/DeliveryReportPanel";
 import ProductionPanels from "@/components/panels/ProductionPanels";
+import WhitenessPanel from "@/components/panels/WhitenessPanel";
 import FinancePanels from "@/components/panels/FinancePanels";
 import VoucherPanels from "@/components/panels/VoucherPanels";
 import ToolRequestsPanel from "@/components/panels/ToolRequestsPanel";
@@ -26,7 +27,7 @@ const PANELS: Record<DepartmentKey, ComponentType[]> = {
   // Shift analysis and stone traceability were removed from the system; the
   // monthly stock-status sheet went earlier. Historic rows for all three remain
   // readable and deletable under Settings → Submissions.
-  production: [ProductionPanels],
+  production: [ProductionPanels, WhitenessPanel],
   // The three reports the asset manager files come first, then the wider bag /
   // purchase context. Stock status and purchased items are gone: the asset role
   // no longer files either, so a panel for them would only ever show stale rows.

@@ -57,6 +57,10 @@ const CHILD_TABLES: ArchiveTable[] = [
     parent: { table: "goods_receiving_vouchers", fk: "grv_id", dateColumn: "date" } },
   { table: "store_issue_items", dateColumn: "created_at", sheet: "store_issue_items",
     parent: { table: "store_issue_vouchers", fk: "siv_id", dateColumn: "date" } },
+  { table: "pp_bag_usage_items", dateColumn: "created_at", sheet: "pp_bag_usage_items",
+    parent: { table: "pp_bag_usage", fk: "usage_id", dateColumn: "date" } },
+  { table: "pp_bag_damage_items", dateColumn: "created_at", sheet: "pp_bag_damage_items",
+    parent: { table: "pp_bag_damage_reports", fk: "report_id", dateColumn: "date" } },
   { table: "bag_events", dateColumn: "date", sheet: "bag_events",
     parent: { table: "bag_lots", fk: "lot_id", dateColumn: "received_at" } },
 ];
@@ -82,6 +86,10 @@ const EXTRA_TABLES: ArchiveTable[] = [
   // The recycle bin is data too: emptied by the reset like everything else, and
   // exported first so a deleted-but-not-yet-purged report is still in the file.
   { table: "deleted_submissions", dateColumn: "deleted_at", sheet: "deleted_submissions" },
+  // The error log and the read jobs are operational history, not reports, but
+  // they are the record of what went wrong and are worth keeping in the archive.
+  { table: "system_errors", dateColumn: "created_at", sheet: "system_errors" },
+  { table: "sales_scan_jobs", dateColumn: "created_at", sheet: "sales_scan_jobs" },
 ];
 
 /**

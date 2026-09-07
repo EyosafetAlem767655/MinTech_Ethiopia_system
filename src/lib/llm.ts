@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 import { envValue } from "@/lib/env";
+import { logError, providerErrorKind } from "@/lib/errors";
 import {
   BAG_SIZES,
   BAG_SIZE_LABEL,
@@ -29,15 +30,32 @@ export const GEMINI_BASE = envValue("GEMINI_BASE_URL") || "https://generativelan
 export const GEMINI_MODEL = envValue("GEMINI_MODEL") || "gemini-3.5-flash-lite";
 
 /**
- * Hard ceiling for a receipt read, in ms.
+ * Hard ceiling for one model call, in ms.
  *
- * This runs inside the Telegram webhook, and the webhook MUST answer 200 before
- * the serverless function is killed — an unanswered update is redelivered
- * forever. On Vercel Hobby the budget is small, so 8s leaves room for the
- * storage downloads and the reply that follow. Never raise this above the
- * function's maxDuration minus a comfortable margin.
+ * This was 8s, sized for Vercel Hobby, and it stayed there long after the
+ * project moved to Pro — which is why a perfectly ordinary receipt read failed
+ * in production with "Gemini timed out after 8000ms". Pro allows a 300s
+ * function, so 45s leaves ample room for the storage downloads and the reply
+ * that follow while still fitting comfortably inside the webhook's limit.
+ *
+ * The ceiling is NOT removed, and must not be. An unbounded call means the
+ * function is killed with the update unanswered, and Telegram then redelivers it
+ * forever — the redelivery loop this codebase has already had to fix once. A
+ * bounded failure that is logged and retried is strictly better than an
+ * unbounded one that hangs.
  */
-export const RECEIPT_BUDGET_MS = Number(envValue("GEMINI_TIMEOUT_MS")) || 8000;
+export const RECEIPT_BUDGET_MS = Number(envValue("GEMINI_TIMEOUT_MS")) || 45000;
+
+/** Wait between the first attempt and the retry. */
+const RETRY_BACKOFF_MS = 1200;
+
+/** Worth trying once more: a cold model or a transient upstream fault. */
+function isRetryable(error: string): boolean {
+  const m = (error || "").toLowerCase();
+  if (m.includes("timed out")) return true;
+  const status = Number(m.match(/http (\d{3})/)?.[1] || 0);
+  return status >= 500;
+}
 
 function nvidiaKey(): string {
   return envValue("NIVIDA_API_KEY") || envValue("NVIDIA_API_KEY");
@@ -225,10 +243,16 @@ export interface GeminiReceipt {
  * merged into ONE row — not read as three separate sales.
  */
 const GEMINI_RECEIPT_SYSTEM =
-  "You read Ethiopian sales receipts / cash-sale invoices and return STRICT JSON only.\n" +
-  "IMPORTANT: every image you are given is a page or angle of ONE SINGLE receipt. Merge what you can " +
-  "read across them into ONE result: if a field is legible in any image, use it. Never return several " +
-  "receipts, and never add quantities or totals across images.\n" +
+  "You read the paperwork for ONE Ethiopian sale and return STRICT JSON only.\n" +
+  "IMPORTANT: the images are the DIFFERENT DOCUMENTS belonging to that one sale — typically the main " +
+  "cash-sale receipt, a separate 3% withholding (WHT) receipt, and sometimes a bank deposit slip. They " +
+  "may also be several angles of the same page. Either way they describe ONE sale and you must merge " +
+  "them into ONE result.\n" +
+  "Take each field from the document that actually carries it: the product, quantity, unit price and " +
+  "grand total from the main receipt; the withholding amount from the WHT receipt; the bank from the " +
+  "deposit slip. If a field appears on more than one document, prefer the main receipt.\n" +
+  "Never return several sales, and NEVER add quantities or totals across images — two documents showing " +
+  "the same total mean one sale, not two.\n" +
   'Return exactly: { "date": "YYYY-MM-DD", "customerName": string, ' +
   '"fsNo": string (the "FS No" / fiscal receipt serial number, digits as printed), ' +
   '"attNo": string (the "Att. No" / attachment or machine number), ' +
@@ -290,7 +314,14 @@ export interface GeminiCallResult {
  * check and the dashboard chat — so the auth header, the timeout discipline and
  * the "404 means wrong model for this key" diagnosis exist exactly once.
  */
-export async function geminiGenerate(
+/**
+ * One call, one attempt. `geminiGenerate` below wraps this with the retry.
+ *
+ * Split so the retry cannot accidentally share an AbortController between
+ * attempts — a reused controller is already aborted, and the second attempt
+ * would fail instantly while looking like a real timeout.
+ */
+async function geminiAttempt(
   contents: GeminiContent[],
   opts: {
     json?: boolean;
@@ -370,6 +401,60 @@ export async function geminiGenerate(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * One place that knows how to talk to Gemini, with one retry and a log.
+ *
+ * The retry earns its place: a first-attempt timeout is far more often a cold
+ * model than a broken one, and the alternative — handing the failure straight
+ * back to someone holding a phone full of receipts — is what happened in
+ * production. It retries ONCE, only on a timeout or a 5xx; a 401, a 404 or a
+ * malformed request will fail identically however many times it is sent.
+ *
+ * Every final failure is recorded through `logError`, which never throws, so
+ * this function's contract is unchanged: it returns a result, never rejects.
+ */
+export async function geminiGenerate(
+  contents: GeminiContent[],
+  opts: Parameters<typeof geminiAttempt>[1] & { errorSource?: string } = {}
+): Promise<GeminiCallResult> {
+  const source = opts.errorSource || "llm";
+  const first = await geminiAttempt(contents, opts);
+  if (first.ok) return first;
+
+  if (!isRetryable(first.error || "")) {
+    void logError({
+      source,
+      kind: providerErrorKind("gemini", first.error || ""),
+      message: first.error || "Gemini call failed",
+      detail: { model: GEMINI_MODEL, retried: false },
+    });
+    return first;
+  }
+
+  await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS));
+  const second = await geminiAttempt(contents, opts);
+  if (second.ok) {
+    // Worth recording even though the caller succeeded: a model that needs a
+    // second attempt every time is a budget problem waiting to become an outage,
+    // and nothing else in the system would ever show it.
+    void logError({
+      source,
+      kind: "gemini_retry_succeeded",
+      message: `first attempt failed: ${first.error}`,
+      detail: { model: GEMINI_MODEL },
+    });
+    return second;
+  }
+
+  void logError({
+    source,
+    kind: providerErrorKind("gemini", second.error || ""),
+    message: second.error || "Gemini call failed",
+    detail: { model: GEMINI_MODEL, retried: true, firstError: first.error },
+  });
+  return second;
 }
 
 export async function extractReceiptGemini(

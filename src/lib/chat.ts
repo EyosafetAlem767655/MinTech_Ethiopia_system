@@ -59,6 +59,11 @@ const READABLE_TABLES = {
   goods_receiving_items: "created_at",
   store_issue_vouchers: "date",
   store_issue_items: "created_at",
+  // Production's own records.
+  pp_bag_usage: "date",
+  pp_bag_usage_items: "created_at",
+  whiteness_checks: "date",
+  pp_bag_damage_items: "created_at",
   // Finance
   finance_purchase_batches: "date",
   finance_purchase_items: "created_at",

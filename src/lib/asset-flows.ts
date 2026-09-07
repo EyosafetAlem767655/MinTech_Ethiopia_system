@@ -10,6 +10,7 @@ import {
   PRODUCT_ORDER,
   PRODUCTION_PRODUCTS,
   bagLabel,
+  bagLedgerKey,
   ledgerChoices,
   ledgerLabel,
   looksLikeStockItem,
@@ -61,6 +62,14 @@ export interface AssetFlowState {
   draft: Record<string, string | number>;
   /** stored_files id of the damaged-item photo (tool_request/maintenance). */
   photoFileId?: string;
+  /**
+   * stored_files id per photo STEP, for flows with more than one.
+   *
+   * The damage report photographs each pile separately, and each photo has to
+   * stay tied to the kind and quantity claimed beside it — a single
+   * `photoFileId` could only ever hold the last one.
+   */
+  photoByStep?: Record<string, string>;
   /** stored_files ids for flows that collect several photos (pp_bag_damage). */
   photoFileIds?: string[];
   /** Gemini's verdict on that photo. */
@@ -177,16 +186,105 @@ const TOOL_REQUEST_STEPS: AssetStep[] = [
   },
 ];
 
+/** Piles one damage report can carry. The report is weekly, so several. */
+export const MAX_DAMAGE_PILES = 6;
+
+/** Draft keys for one photographed pile. */
+export const pileKeys = (i: number) => ({
+  photo: `pilePhoto${i}`,
+  kind: `pileKind${i}`,
+  quantity: `pileQty${i}`,
+  more: `pileMore${i}`,
+});
+
+function pileAsked(draft: Record<string, string | number>, i: number): boolean {
+  if (i === 1) return true;
+  return draft[pileKeys(i - 1).more] === "yes";
+}
+
+/**
+ * PP bag damage — filed weekly, one entry per photographed pile.
+ *
+ * Each pile carries its own photo, bag kind and quantity, captured together.
+ * That grouping is the whole point: with a loose set of photos and one total,
+ * the AI could only be asked "is this damage?", which almost anything passes.
+ * Tied together, it can be asked whether this pile plausibly holds this many
+ * bags of this kind.
+ */
 const PP_BAG_DAMAGE_STEPS: AssetStep[] = [
-  { id: "date", prompt: "📅 ብልሽቱ የተከሰተበትን ቀን ይምረጡ።", type: "date" },
+  { id: "date", prompt: "📅 ሪፖርቱ የሚሸፍነውን ቀን ይምረጡ።", type: "date" },
+  ...Array.from({ length: MAX_DAMAGE_PILES }).flatMap<AssetStep>((_, idx) => {
+    const i = idx + 1;
+    const k = pileKeys(i);
+    const asked = (d: Record<string, string | number>) => pileAsked(d, i);
+    const steps: AssetStep[] = [
+      {
+        id: k.photo,
+        prompt: `📷 ክምር ${i} — የተበላሹትን ከረጢቶች ፎቶ ይላኩ።`,
+        type: "photo",
+        when: asked,
+      },
+      {
+        id: k.kind,
+        prompt: `🧺 ክምር ${i} — የትኛው ከረጢት ነው?`,
+        type: "choice",
+        choices: BAG_KINDS.map(({ size, colour }) => ({
+          label: `${bagLabel(size, colour)} PP`,
+          value: bagLedgerKey(size, colour),
+        })),
+        when: asked,
+      },
+      {
+        id: k.quantity,
+        prompt: `🔢 ክምር ${i} — በዚህ ፎቶ ላይ ያሉት የተበላሹ ከረጢቶች ብዛት።`,
+        type: "number",
+        when: asked,
+      },
+    ];
+    if (i < MAX_DAMAGE_PILES) {
+      steps.push({
+        id: k.more,
+        prompt: "➕ ሌላ ክምር አለ?",
+        type: "choice",
+        choices: [
+          { label: "➕ አዎ፣ ሌላ ክምር", value: "yes" },
+          { label: "✅ በቃ", value: "no" },
+        ],
+        when: asked,
+      });
+    }
+    return steps;
+  }),
   { id: "reason", prompt: "❓ ከረጢቶቹ ለምን እንደተበላሹ ይግለጹ።", type: "text" },
-  { id: "quantity", prompt: "🔢 የተበላሹትን ከረጢቶች ብዛት ይፃፉ።", type: "number" },
-  {
-    id: "photos",
-    prompt: `📷 የተበላሹትን ከረጢቶች ፎቶ ይላኩ — እስከ ${MAX_FLOW_PHOTOS} ፎቶ። ከጨረሱ በኋላ "✅ ጨርሻለሁ" ይጫኑ።`,
-    type: "photos",
-  },
 ];
+
+export interface DamagePile {
+  fileId: string;
+  ledgerKey: string;
+  quantity: number;
+  label: string;
+}
+
+/** The filled piles, in order. Stops at the first without a photo. */
+export function damagePiles(
+  draft: Record<string, string | number>,
+  photos: Record<string, string> = {}
+): DamagePile[] {
+  const out: DamagePile[] = [];
+  for (let i = 1; i <= MAX_DAMAGE_PILES; i++) {
+    const k = pileKeys(i);
+    const fileId = String(photos[k.photo] || draft[k.photo] || "");
+    const ledgerKey = String(draft[k.kind] || "");
+    if (!fileId || !ledgerKey) break;
+    out.push({
+      fileId,
+      ledgerKey,
+      quantity: Math.round(Number(draft[k.quantity]) || 0),
+      label: ledgerLabel("bag", ledgerKey),
+    });
+  }
+  return out;
+}
 
 /**
  * FGR numbers: one or two four-digit document numbers.
@@ -651,6 +749,205 @@ const WHT_HOLDER_STEPS: AssetStep[] = [
   },
 ];
 
+/* ─────────────────────── PP bags used, daily (production) ────────────────── */
+
+/** Bag kinds one day's usage can list. */
+export const MAX_USAGE_ITEMS = 6;
+
+export const usageKeys = (i: number) => ({
+  kind: `useKind${i}`,
+  reference: `useRef${i}`,
+  quantity: `useQty${i}`,
+  more: `useMore${i}`,
+});
+
+function usageAsked(draft: Record<string, string | number>, i: number): boolean {
+  if (i === 1) return true;
+  return draft[usageKeys(i - 1).more] === "yes";
+}
+
+/**
+ * What production actually filled today, by bag kind.
+ *
+ * Repeating, because a day routinely draws several kinds — the flow stops at the
+ * first "no" rather than marching through six.
+ */
+const PP_BAG_USED_STEPS: AssetStep[] = [
+  { id: "date", prompt: "📅 የዋለበትን ቀን ይምረጡ።", type: "date" },
+  ...Array.from({ length: MAX_USAGE_ITEMS }).flatMap<AssetStep>((_, idx) => {
+    const i = idx + 1;
+    const k = usageKeys(i);
+    const asked = (d: Record<string, string | number>) => usageAsked(d, i);
+    const steps: AssetStep[] = [
+      {
+        id: k.kind,
+        prompt: `🧺 ዕቃ ${i} — የትኛው ከረጢት ዋለ?`,
+        type: "choice",
+        choices: BAG_KINDS.map(({ size, colour }) => ({
+          label: `${bagLabel(size, colour)} PP`,
+          value: bagLedgerKey(size, colour),
+        })),
+        when: asked,
+      },
+      {
+        id: k.reference,
+        prompt: `🔢 ዕቃ ${i} — የማጣቀሻ ቁጥር (Reference No.) ይፃፉ።`,
+        type: "number",
+        when: asked,
+      },
+      {
+        id: k.quantity,
+        prompt: `📦 ዕቃ ${i} — የዋለው ብዛት (ቁጥር)።`,
+        type: "number",
+        when: asked,
+      },
+    ];
+    if (i < MAX_USAGE_ITEMS) {
+      steps.push({
+        id: k.more,
+        prompt: "➕ ሌላ ዓይነት ከረጢት ዋለ?",
+        type: "choice",
+        choices: [
+          { label: "➕ አዎ፣ ሌላ", value: "yes" },
+          { label: "✅ በቃ", value: "no" },
+        ],
+        when: asked,
+      });
+    }
+    return steps;
+  }),
+];
+
+export interface BagUsageItem {
+  ledgerKey: string;
+  label: string;
+  referenceNo: string | null;
+  quantity: number;
+}
+
+/** The filled usage rows, in order. Stops at the first without a kind. */
+export function bagUsageItems(draft: Record<string, string | number>): BagUsageItem[] {
+  const out: BagUsageItem[] = [];
+  for (let i = 1; i <= MAX_USAGE_ITEMS; i++) {
+    const k = usageKeys(i);
+    const ledgerKey = String(draft[k.kind] || "");
+    if (!ledgerKey) break;
+    const ref = String(draft[k.reference] ?? "").trim();
+    out.push({
+      ledgerKey,
+      label: ledgerLabel("bag", ledgerKey),
+      referenceNo: ref || null,
+      quantity: Number(draft[k.quantity]) || 0,
+    });
+  }
+  return out;
+}
+
+/* ──────────────── Whiteness quality check, 4× daily (production) ─────────── */
+
+/** The six readings taken at each check. */
+export const WB_SLOTS = ["wb1", "wb2", "wb3", "wb4", "wb5", "wb6"] as const;
+
+/** The four checks a day. */
+export const WHITENESS_QUARTERS = ["1", "2", "3", "4"] as const;
+
+/**
+ * Non-numeric readings that are legitimate answers, not missing data.
+ *
+ * A line down for maintenance is NOT a whiteness of zero, and recording it as
+ * one would drag the day's average down and report a stopped line as a badly
+ * performing one. They are stored as typed and excluded from the mean.
+ */
+export const WB_NON_NUMERIC = ["MNT", "OUTAGE", "OFF"] as const;
+
+const WB_ALIASES: Record<string, string> = {
+  mnt: "MNT",
+  maintenance: "MNT",
+  ጥገና: "MNT",
+  outage: "OUTAGE",
+  power: "OUTAGE",
+  መብራት: "OUTAGE",
+  off: "OFF",
+  ዝግ: "OFF",
+};
+
+/**
+ * Read one whiteness slot.
+ *
+ * Deliberately a TEXT step rather than a number: a percentage, one of the three
+ * words above, or nothing at all are all valid, and a number step would reject
+ * two of those three.
+ */
+export function parseWhitenessReading(raw: string): string {
+  const t = String(raw ?? "").trim();
+  if (!t || isSkip(t)) return "";
+  const alias = WB_ALIASES[t.toLowerCase()];
+  if (alias) return alias;
+  if ((WB_NON_NUMERIC as readonly string[]).includes(t.toUpperCase())) return t.toUpperCase();
+  const n = Number(t.replace(/[%\s,]/g, ""));
+  if (isFinite(n) && n >= 0 && n <= 100) return String(Math.round(n * 100) / 100);
+  // Anything else is kept verbatim: an unexpected note is still what the
+  // operator wrote down, and dropping it would lose the only record of it.
+  return t.slice(0, 20);
+}
+
+/**
+ * The average of the numeric readings, divided by HOW MANY THERE WERE.
+ *
+ * Not by six. A line that ran two of its six slots and was down for the rest
+ * averaged over six would read as a third of its real whiteness — which is a
+ * quality failure that never happened.
+ *
+ * Returns null when nothing numeric was recorded, which is a different fact from
+ * an average of zero and must not be stored as one.
+ */
+export function whitenessAverage(readings: Record<string, string>): number | null {
+  const nums: number[] = [];
+  for (const slot of WB_SLOTS) {
+    const v = readings[slot];
+    if (v === undefined || v === null || String(v).trim() === "") continue;
+    const n = Number(v);
+    if (isFinite(n)) nums.push(n);
+  }
+  if (nums.length === 0) return null;
+  return Math.round((nums.reduce((a, b) => a + b, 0) / nums.length) * 100) / 100;
+}
+
+/** The readings map as the flow collected it. */
+export function whitenessReadings(draft: Record<string, string | number>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const slot of WB_SLOTS) out[slot] = String(draft[slot] ?? "");
+  return out;
+}
+
+const WHITENESS_STEPS: AssetStep[] = [
+  { id: "date", prompt: "📅 የምርመራውን ቀን ይምረጡ።", type: "date" },
+  {
+    id: "quarter",
+    prompt: "🕐 የስንተኛው ዙር ሪፖርት ነው? (በቀን 4 ጊዜ)",
+    type: "choice",
+    choices: WHITENESS_QUARTERS.map((q) => ({ label: `${q}ኛ ዙር`, value: q })),
+  },
+  {
+    id: "productCode",
+    prompt: "📦 ምርቱን ይምረጡ።",
+    type: "choice",
+    choices: PRODUCT_ORDER.map((code) => ({ label: productLabel(code), value: code })),
+  },
+  { id: "line", prompt: "🏭 የመስመሩን ቁጥር (Line) ይፃፉ።", type: "number" },
+  ...WB_SLOTS.map<AssetStep>((slot, i) => ({
+    id: slot,
+    prompt:
+      `⚪ ${slot.toUpperCase()} — የነጭነት መጠን በ% ይፃፉ።\n` +
+      (i === 0
+        ? `<i>ካልተነበበ MNT (ጥገና)፣ outage (መብራት) ወይም off ይፃፉ። ከሌለ "-" ይላኩ።</i>`
+        : ""),
+    type: "text",
+    skippable: true,
+  })),
+];
+
+
 const STEPS: Record<AssetFlowKind, AssetStep[]> = {
   raw_material: RAW_MATERIAL_STEPS,
   delivery: DELIVERY_STEPS,
@@ -660,6 +957,8 @@ const STEPS: Record<AssetFlowKind, AssetStep[]> = {
   base_balance: BASE_BALANCE_STEPS,
   store_issue: STORE_ISSUE_STEPS,
   grv: GRV_STEPS,
+  pp_bag_used: PP_BAG_USED_STEPS,
+  whiteness_check: WHITENESS_STEPS,
   price_list: PRICE_LIST_STEPS,
   wht_holder: WHT_HOLDER_STEPS,
 };
@@ -904,14 +1203,52 @@ export function assetPreview(state: AssetFlowState): string {
   }
 
   if (state.kind === "pp_bag_damage") {
-    const n = state.photoFileIds?.length || 0;
+    const piles = damagePiles(d, state.photoByStep || {});
+    const total = piles.reduce((a, p) => a + p.quantity, 0);
+    const lines = piles.map((p, i) => `  ${i + 1}. ${p.label}: <b>${qty(p.quantity)}</b> ከረጢት`);
     return (
       head +
       `📅 Date: ${esc(d.date)}\n` +
-      `❓ ምክንያት: ${esc(d.reason)}\n` +
-      `🔢 ብዛት: ${qty(Number(d.quantity) || 0)} ከረጢት\n` +
-      `📷 ፎቶ: ${n}\n\n` +
-      `<i>ፎቶዎቹ ከተቀመጠ በኋላ በAI ይጣራሉ — ውጤቱን እንልክልዎታለን።</i>\n`
+      `❓ ምክንያት: ${esc(d.reason)}\n\n` +
+      `🧺 <b>በክምር</b>\n${lines.join("\n") || "  —"}\n` +
+      `  ─────────\n  <b>ጠቅላላ: ${qty(total)} ከረጢት</b>\n\n` +
+      `<i>የእያንዳንዱ ክምር ፎቶ ከተቀመጠ በኋላ በAI ይጣራል — ውጤቱን እንልክልዎታለን።</i>\n`
+    );
+  }
+
+  if (state.kind === "pp_bag_used") {
+    const items = bagUsageItems(d);
+    const lines = items.map(
+      (it, i) =>
+        `  ${i + 1}. ${it.label}: <b>${qty(it.quantity)}</b>` +
+        (it.referenceNo ? ` · Ref ${esc(it.referenceNo)}` : "")
+    );
+    const total = items.reduce((a, it) => a + it.quantity, 0);
+    return (
+      head +
+      `📅 Date: ${esc(d.date)}\n\n` +
+      `🧺 <b>የዋሉ ከረጢቶች</b>\n${lines.join("\n") || "  —"}\n` +
+      `  ─────────\n  <b>ጠቅላላ: ${qty(total)} ከረጢት</b>\n`
+    );
+  }
+
+  if (state.kind === "whiteness_check") {
+    const readings = whitenessReadings(d);
+    const avg = whitenessAverage(readings);
+    const slots = WB_SLOTS.map((s) => `  ${s.toUpperCase()}: <b>${esc(readings[s] || "—")}</b>`);
+    return (
+      head +
+      `📅 Date: ${esc(d.date)}\n` +
+      `🕐 ዙር: <b>${esc(d.quarter)}</b>\n` +
+      `📦 ምርት: <b>${productLabel(String(d.productCode || ""))}</b>\n` +
+      `🏭 Line: <b>${esc(d.line)}</b>\n\n` +
+      `⚪ <b>ንባቦች</b>\n${slots.join("\n")}\n` +
+      `  ─────────\n` +
+      // Stated rather than shown as 0: an average of nothing is not zero, and a
+      // shift that was down for maintenance must not read as a quality failure.
+      `  <b>Avg: ${avg === null ? "—" : `${qty(avg)}%`}</b>` +
+      (avg === null ? `\n<i>ምንም የቁጥር ንባብ አልተመዘገበም።</i>` : "") +
+      `\n`
     );
   }
 
@@ -1181,14 +1518,91 @@ export async function saveAssetReport(
   }
 
   if (state.kind === "pp_bag_damage") {
+    const piles = damagePiles(d, state.photoByStep || {});
+    // The report's own `quantity` stays the sum of its piles, so every existing
+    // reader — the brief, the metrics, the exception list — keeps working
+    // without knowing the report gained a breakdown.
+    const total = piles.reduce((a, p) => a + p.quantity, 0);
+
     // Saved without a verdict: the AI chain runs after this returns, so the user
     // is never left waiting on three providers inside the webhook.
     const [row] = await sql<{ id: string }[]>`
       insert into pp_bag_damage_reports (date, reason, quantity, reported_by, source)
-      values (${reportDate(d.date)}, ${String(d.reason || "")}, ${Math.round(Number(d.quantity) || 0)},
+      values (${reportDate(d.date)}, ${String(d.reason || "")}, ${total},
               ${reportedBy}, 'telegram')
       returning id`;
+
+    if (piles.length > 0) {
+      await sql`
+        insert into pp_bag_damage_items ${sql(
+          piles.map((p, i) => ({
+            report_id: row.id,
+            position: i,
+            ledger_key: p.ledgerKey,
+            quantity: p.quantity,
+            file_id: p.fileId,
+          }))
+        )}`.catch((e) => {
+        // pp_bag_damage_items arrives in 0022. The report itself, and its total,
+        // must still land on a database one migration behind.
+        const code = (e as { code?: string })?.code;
+        if (code !== "42P01") throw e;
+        console.warn("pp_bag_damage_items not present yet");
+      });
+    }
     return { id: row.id, table: "pp_bag_damage_reports" };
+  }
+
+  if (state.kind === "pp_bag_used") {
+    const date = reportDate(d.date);
+    const items = bagUsageItems(d);
+    // One row per day, upserted, like daily_ops_reports: two people reporting
+    // the same day must not produce two consumption figures nothing can
+    // reconcile. Re-filing replaces the day's lines rather than adding to them.
+    const [row] = await sql<{ id: string }[]>`
+      insert into pp_bag_usage (date_label, date, reported_by, source)
+      values (${opsDateLabel(date)}, ${date}, ${reportedBy}, 'telegram')
+      on conflict (date_label) do update set
+        reported_by = excluded.reported_by,
+        updated_at = now()
+      returning id`;
+
+    await sql`delete from pp_bag_usage_items where usage_id = ${row.id}`.catch(() => {});
+    if (items.length > 0) {
+      await sql`
+        insert into pp_bag_usage_items ${sql(
+          items.map((it, i) => ({
+            usage_id: row.id,
+            position: i,
+            ledger_key: it.ledgerKey,
+            reference_no: it.referenceNo,
+            quantity: it.quantity,
+          }))
+        )}`;
+    }
+    return { id: row.id, table: "pp_bag_usage" };
+  }
+
+  if (state.kind === "whiteness_check") {
+    const date = reportDate(d.date);
+    const readings = whitenessReadings(d);
+    // One reading set per quarter per product per line. A correction replaces
+    // the reading it corrects — a second row would be counted twice by the
+    // weekly average with nothing to choose between them.
+    const [row] = await sql<{ id: string }[]>`
+      insert into whiteness_checks (date, date_label, quarter, product_code, line,
+                                    readings, avg, reported_by, source)
+      values (${date}, ${opsDateLabel(date)}, ${Number(d.quarter) || 1},
+              ${String(d.productCode || "")}, ${Math.round(Number(d.line) || 0)},
+              ${sql.json(readings)}, ${whitenessAverage(readings)},
+              ${reportedBy}, 'telegram')
+      on conflict (date_label, quarter, product_code, line) do update set
+        readings = excluded.readings,
+        avg = excluded.avg,
+        reported_by = excluded.reported_by,
+        updated_at = now()
+      returning id`;
+    return { id: row.id, table: "whiteness_checks" };
   }
 
   if (state.kind === "base_balance") {
