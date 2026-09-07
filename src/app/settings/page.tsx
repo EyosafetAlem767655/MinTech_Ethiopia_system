@@ -142,7 +142,164 @@ export default function SettingsPage() {
       {tab === "errors" && <ErrorsTab />}
       {tab === "activity" && <ActivityTab />}
       {tab === "devices" && <DevicesTab />}
+
+      {/* Kept out of the tabs on purpose. Nothing here is recoverable, so it
+          should be somewhere you arrive at deliberately rather than somewhere
+          you land while looking for something else. */}
+      {tab === "submissions" && <DangerZone />}
     </main>
+  );
+}
+
+/* ──────────────────────────────── Danger zone ─────────────────────────────── */
+
+interface PurgeCounts {
+  sales: { receipts: number; briefs: number };
+  request_photos: { photos: number };
+}
+
+/**
+ * Permanent, scoped deletion — rows AND the storage objects behind them.
+ *
+ * This exists because the SQL scripts under supabase/ cannot finish the job: SQL
+ * run in the Supabase editor has no reach into the storage bucket, so it clears
+ * the rows and leaves the images paying rent forever.
+ */
+function DangerZone() {
+  const [counts, setCounts] = useState<PurgeCounts | null>(null);
+  const [open, setOpen] = useState(false);
+  const [typed, setTyped] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState("");
+  const [result, setResult] = useState("");
+
+  const load = useCallback(async () => {
+    const res = await fetch("/api/admin/purge").catch(() => null);
+    setCounts(res?.ok ? await res.json() : null);
+  }, []);
+
+  useEffect(() => {
+    if (open) load();
+  }, [open, load]);
+
+  const run = async (scope: "sales" | "request_photos") => {
+    setBusy(scope);
+    setResult("");
+    try {
+      const res = await fetch("/api/admin/purge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scope, confirm: typed[scope] || "" }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setResult(body.error || "That did not run.");
+        return;
+      }
+      setResult(
+        scope === "sales"
+          ? `Removed ${body.receiptsDeleted} sales report(s), ${body.filesRemoved} image(s) and ${body.briefsDeleted} cached brief(s).`
+          : `Removed ${body.filesRemoved} image(s) from ${body.requestsAffected} request(s). The requests themselves are untouched.`
+      );
+      setTyped((t) => ({ ...t, [scope]: "" }));
+      await load();
+    } finally {
+      setBusy("");
+    }
+  };
+
+  if (!open) {
+    return (
+      <button
+        onClick={() => setOpen(true)}
+        className="mt-8 w-full rounded-xl border border-dashed border-stone-200 p-3 text-xs font-bold text-stone-400 hover:border-red-200 hover:text-red-600"
+      >
+        ⚠️ Danger zone
+      </button>
+    );
+  }
+
+  return (
+    <section className="mt-8 space-y-3 rounded-xl border-2 border-red-100 p-3">
+      <div className="flex items-baseline justify-between">
+        <h2 className="text-sm font-bold text-red-700">⚠️ Danger zone</h2>
+        <button onClick={() => setOpen(false)} className="text-[11px] font-bold text-stone-400">
+          Hide
+        </button>
+      </div>
+      <p className="text-[11px] text-stone-500">
+        Permanent. Both actions delete the images from storage as well as the rows — which is the part
+        the SQL scripts cannot do.
+      </p>
+
+      {result && <p className="rounded-lg bg-stone-100 p-2 text-[11px] font-bold text-stone-700">{result}</p>}
+
+      <PurgeCard
+        title="Clear the sales tab"
+        detail={
+          counts
+            ? `${counts.sales.receipts} sales report(s) and their receipt images, plus ${counts.sales.briefs} cached brief(s).`
+            : "…"
+        }
+        scope="sales"
+        typed={typed.sales || ""}
+        onType={(v) => setTyped((t) => ({ ...t, sales: v }))}
+        busy={busy === "sales"}
+        onRun={() => run("sales")}
+      />
+      <PurgeCard
+        title="Delete purchase request images"
+        detail={
+          counts
+            ? `${counts.request_photos.photos} image(s). The requests themselves stay — only the photos go.`
+            : "…"
+        }
+        scope="request_photos"
+        typed={typed.request_photos || ""}
+        onType={(v) => setTyped((t) => ({ ...t, request_photos: v }))}
+        busy={busy === "request_photos"}
+        onRun={() => run("request_photos")}
+      />
+    </section>
+  );
+}
+
+function PurgeCard({
+  title,
+  detail,
+  scope,
+  typed,
+  onType,
+  busy,
+  onRun,
+}: {
+  title: string;
+  detail: string;
+  scope: string;
+  typed: string;
+  onType: (v: string) => void;
+  busy: boolean;
+  onRun: () => void;
+}) {
+  return (
+    <div className="space-y-2 rounded-lg bg-stone-50 p-3">
+      <p className="text-xs font-bold text-stone-800">{title}</p>
+      <p className="text-[11px] text-stone-500">{detail}</p>
+      <div className="flex gap-2">
+        <input
+          value={typed}
+          onChange={(e) => onType(e.target.value)}
+          placeholder={`Type ${scope}`}
+          className="min-w-0 flex-1 rounded-lg border border-stone-200 px-2 py-1.5 text-xs"
+        />
+        <button
+          onClick={onRun}
+          disabled={busy || typed !== scope}
+          className="shrink-0 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-bold text-white disabled:bg-stone-200 disabled:text-stone-400"
+        >
+          {busy ? "…" : "Delete"}
+        </button>
+      </div>
+    </div>
   );
 }
 

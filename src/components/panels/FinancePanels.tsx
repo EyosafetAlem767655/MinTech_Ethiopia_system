@@ -470,6 +470,9 @@ function WhtTab() {
   const [smsConfigured, setSmsConfigured] = useState(true);
   const [busy, setBusy] = useState<Record<string, boolean>>({});
   const [error, setError] = useState("");
+  /** What happened to the SMS that registration sends — separate from `error`,
+   *  because "registered, but the text failed" is not a failed registration. */
+  const [notice, setNotice] = useState("");
   const [form, setForm] = useState({ company: "", phone: "", description: "" });
   const [saving, setSaving] = useState(false);
 
@@ -510,16 +513,29 @@ function WhtTab() {
   const add = async () => {
     setSaving(true);
     setError("");
+    setNotice("");
     try {
       const res = await fetch("/api/finance/wht", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(form),
       });
+      const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setError((await res.json().catch(() => ({}))).error || "Could not register that holder.");
+        setError(body.error || "Could not register that holder.");
         return;
       }
+      // The first chase goes out on registration, not at the next morning's
+      // cron. Saying so here is the only place the person registering finds out
+      // it failed — otherwise a dead gateway is discovered days later, by which
+      // point nobody has been chased at all.
+      setNotice(
+        body.sms?.sent
+          ? "Registered. The first SMS has been queued — the handset sends it when it next has internet."
+          : body.sms?.error
+          ? `Registered, but the SMS did not go: ${body.sms.error}`
+          : "Registered."
+      );
       setForm({ company: "", phone: "", description: "" });
       await load();
     } finally {
@@ -540,11 +556,14 @@ function WhtTab() {
 
       {!smsConfigured && (
         <p className="card border-l-4 border-l-amber-500 p-3 text-xs font-bold text-amber-800">
-          The SMS gateway is not configured, so nobody is being chased. Set LONG_TOKEN on Vercel
-          (and optionally LOCAL_URL + SHORT_TOKEN for the office Wi-Fi route).
+          The SMS gateway is not configured, so nobody is being chased. Set HTTPSMS_API_KEY and
+          PHONE_NUMBER on Vercel (PHONE_NUMBER must be the number registered in the httpSMS app).
         </p>
       )}
       {error && <p className="card border-l-4 border-l-red-500 p-3 text-xs font-bold text-red-700">{error}</p>}
+      {notice && (
+        <p className="card border-l-4 border-l-clay-400 p-3 text-xs font-bold text-stone-700">{notice}</p>
+      )}
 
       <div className="card space-y-2 p-3">
         <p className="text-[10px] font-bold uppercase tracking-widest text-stone-400">Register a holder</p>

@@ -16,6 +16,14 @@ export const SALES_BTN = {
   edit: "✏️ አስተካክል",
   anotherSale: "➕ ሌላ ሽያጭ",
   finishDay: "🏁 ቀኑን ጨርስ",
+  /**
+   * The escape hatch out of a read that is not coming back.
+   *
+   * A model outage must not mean the day's sales cannot be filed at all. This
+   * drops into the same field prompts the flow already uses for the columns a
+   * successful read could not fill, so there is one way of asking, not two.
+   */
+  manual: "🖐 በእጅ ሙላ",
 } as const;
 
 export const SALES_REVIEW_KEYBOARD = {
@@ -26,6 +34,13 @@ export const SALES_REVIEW_KEYBOARD = {
 
 export const SALES_NEXT_KEYBOARD = {
   keyboard: [[{ text: SALES_BTN.anotherSale }], [{ text: SALES_BTN.finishDay }]],
+  resize_keyboard: true,
+  one_time_keyboard: false,
+};
+
+/** Offered while a read is in flight, and after one has given up. */
+export const SALES_MANUAL_KEYBOARD = {
+  keyboard: [[{ text: SALES_BTN.manual }], [{ text: "❌ ተወው" }]],
   resize_keyboard: true,
   one_time_keyboard: false,
 };

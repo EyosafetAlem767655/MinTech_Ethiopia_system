@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import sql from "@/lib/sql";
 import { normalisePhone, smsGatewayConfigured } from "@/lib/sms";
+import { chaseHolder } from "@/lib/wht-sms";
 
 export const dynamic = "force-dynamic";
 
@@ -56,5 +57,20 @@ export async function POST(req: NextRequest) {
     values (${company}, ${phone}, ${description || null}, 'Dashboard', 'app')
     returning id
   `;
-  return NextResponse.json({ ok: true, id: row.id });
+
+  // Chased immediately, not at tomorrow's cron. httpSMS takes the message onto
+  // its own queue and the handset delivers it the next time it has internet, so
+  // "immediately" holds even when the phone is out of coverage right now.
+  //
+  // Awaited, so the dashboard can say whether it went — the person registering
+  // is standing there and a silent failure would be found days later. The claim
+  // inside chaseHolder also takes today's slot, so the cron will skip this
+  // holder tomorrow morning rather than texting them a second time.
+  const sms = await chaseHolder({ id: row.id, company, phone, description }).catch(() => null);
+
+  return NextResponse.json({
+    ok: true,
+    id: row.id,
+    sms: sms ? { sent: sms.ok, skipped: sms.skipped, error: sms.error ?? null } : null,
+  });
 }

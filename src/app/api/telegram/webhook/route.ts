@@ -37,10 +37,12 @@ import {
 } from "@/lib/asset-flows";
 import { parseProductionPaste } from "@/lib/production-paste";
 import { parseFinancePaste } from "@/lib/finance-paste";
-import { FINANCE_RECEIPT_KIND, backgroundPurchaseReceiptCheck } from "@/lib/finance-receipts";
+import { backgroundPurchaseReceiptCheck } from "@/lib/finance-receipts";
 import { backgroundVoucherVerify } from "@/lib/voucher-verify";
 import { logError } from "@/lib/errors";
-import { createScanJob, triggerScanWorker } from "@/lib/sales-scan";
+import { createScanJob, drainScanJobs } from "@/lib/sales-scan";
+import { runAfter } from "@/lib/after";
+import { loadImage, telegramFileId } from "@/lib/images";
 import { applyReceiptEdit, describeChanges, EDITABLE_FIELDS } from "@/lib/receipt-edit";
 import {
   firstMissingField,
@@ -48,6 +50,7 @@ import {
   MAX_SALE_DOCUMENTS,
   PRODUCT_KEYBOARD,
   SALES_BTN,
+  SALES_MANUAL_KEYBOARD,
   SALES_NEXT_KEYBOARD,
   SALES_PHOTOS_KEYBOARD,
   SALES_REQUIRED_FIELDS,
@@ -106,7 +109,10 @@ import {
 } from "@/lib/receipt-scan";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+// The sales read now finishes inside this invocation, after the response has
+// gone out (see runAfter). Telegram is answered immediately either way — this
+// ceiling only governs how long the background half is allowed to take.
+export const maxDuration = 300;
 
 /* ──────────────────────────── Text normalisation ─────────────────────────── */
 
@@ -440,10 +446,17 @@ async function handleEditCallback(data: string, callbackId: string, chatId: stri
 
 /* ──────────────────────────── Typed record writers ───────────────────────── */
 
+/**
+ * Bytes for one image reference, whichever kind it is.
+ *
+ * Some flows still upload (PP bag damage, whose photos are hashed against a
+ * year of previous ones; the tool request, which is evidence behind a spending
+ * decision) and hold a `stored_files` uuid. The vouchers and sales receipts no
+ * longer upload at all and hold a Telegram file id. `loadImage` tells the two
+ * apart by shape, so every caller here is unaffected by which it was handed.
+ */
 async function getPhotoBase64(fileId: string): Promise<{ base64: string; contentType: string } | null> {
-  const file = await getFileBytes(fileId);
-  if (!file) return null;
-  return { base64: file.base64, contentType: file.contentType };
+  return loadImage(fileId);
 }
 
 
@@ -489,6 +502,12 @@ async function ensureSalesReceiptsSchema(): Promise<void> {
   await sql`create index if not exists sales_receipts_created_idx on sales_receipts (created_at desc)`.catch(() => {});
   await sql`alter table sales_receipts add column if not exists remark text`.catch(() => {});
   await sql`alter table sales_receipts add column if not exists receipt_check jsonb`.catch(() => {});
+  // 0023. Receipts are no longer uploaded, so the reference kept is Telegram's
+  // own file id — text, not a uuid, which is why it cannot share the column
+  // above. Self-healed here because the insert path depends on it existing.
+  await sql`alter table sales_receipts add column if not exists tg_file_ids text[] not null default '{}'`.catch(
+    () => {}
+  );
   _salesSchemaEnsured = true;
 }
 
@@ -859,6 +878,7 @@ const NORM_SALES = {
   edit: normaliseChoice(SALES_BTN.edit),
   anotherSale: normaliseChoice(SALES_BTN.anotherSale),
   finishDay: normaliseChoice(SALES_BTN.finishDay),
+  manual: normaliseChoice(SALES_BTN.manual),
 };
 
 /** Ask for one column the read could not fill. */
@@ -899,11 +919,34 @@ const ASSET_FLOW_BY_CAP: Record<string, AssetFlowKind | undefined> = {
  */
 const PHOTO_KIND_BY_FLOW: Partial<Record<AssetFlowKind, string>> = {
   pp_bag_damage: PP_BAG_PHOTO_KIND,
-  // Both vouchers are the evidence behind a stock movement as well as a money
-  // figure, so both outlive the short sweep.
-  grv: FINANCE_RECEIPT_KIND,
-  store_issue: FINANCE_RECEIPT_KIND,
 };
+
+/**
+ * Flows whose photos go straight to the model and are never uploaded.
+ *
+ * Both vouchers are read once, and the figures taken off them are the record —
+ * keeping the megabytes as well was storage rent on a photograph nobody opens
+ * again. Telegram's own file id is kept instead: it resolves back to the same
+ * image on demand and costs nothing, because the bytes never left Telegram.
+ *
+ * PP bag damage is deliberately absent. Its photos are hashed and compared
+ * against a year of previous ones, and a photo that was never stored can never
+ * be matched — re-submitting last month's damage pile would become undetectable.
+ * The tool request photo is absent for the same reason its request row is kept:
+ * it is the evidence behind a spending decision.
+ */
+const DIRECT_READ_FLOWS = new Set<AssetFlowKind>(["grv", "store_issue"]);
+
+/**
+ * One image reference for a flow step — an uploaded `stored_files` uuid, or a
+ * Telegram file id for the flows that never upload. Both are resolved by
+ * `loadImages`, so nothing downstream has to know which it got.
+ */
+async function captureFlowPhoto(msg: any, kind: AssetFlowKind, fallbackKind?: string): Promise<string | null> {
+  if (DIRECT_READ_FLOWS.has(kind)) return telegramFileId(msg);
+  const stored = await storeIncomingPhoto(msg, PHOTO_KIND_BY_FLOW[kind] ?? fallbackKind);
+  return stored?.id ?? null;
+}
 
 const assetReviewKeyboard = {
   keyboard: [[{ text: RECEIPT_BTN.approve }], [{ text: NAV_BUTTONS.changeReport }, { text: NAV_BUTTONS.cancel }]],
@@ -1576,8 +1619,8 @@ export async function POST(req: NextRequest) {
           await sendMessage(chatId, "📷 እባክዎ የዕቃውን ፎቶ ይላኩ።", { reply_markup: CHANGE_CANCEL_KEYBOARD });
           return NextResponse.json({ ok: true });
         }
-        const stored = await storeIncomingPhoto(msg, PHOTO_KIND_BY_FLOW[state.kind]);
-        if (!stored) {
+        const ref = await captureFlowPhoto(msg, state.kind);
+        if (!ref) {
           await sendMessage(chatId, "⚠️ ፎቶውን ማውረድ አልተቻለም። እባክዎ ድጋሚ ይሞክሩ።", { reply_markup: CHANGE_CANCEL_KEYBOARD });
           return NextResponse.json({ ok: true });
         }
@@ -1585,8 +1628,8 @@ export async function POST(req: NextRequest) {
         // piles and each photo has to stay tied to the kind and quantity claimed
         // beside it. `photoFileId` is kept for the single-photo tool request,
         // whose AI check below reads it.
-        state.photoByStep = { ...(state.photoByStep || {}), [step.id]: stored.id };
-        state.photoFileId = stored.id;
+        state.photoByStep = { ...(state.photoByStep || {}), [step.id]: ref };
+        state.photoFileId = ref;
 
         // Only the tool request has a photo worth checking here. The damage
         // piles are checked after the reply, per pile, against their own claim —
@@ -1594,7 +1637,7 @@ export async function POST(req: NextRequest) {
         if (state.kind === "tool_request") {
           // Bounded by RECEIPT_BUDGET_MS inside analyseToolPhoto, so it cannot
           // run past the function limit and leave the update unacknowledged.
-          const bytes = await getPhotoBase64(stored.id).catch(() => null);
+          const bytes = await getPhotoBase64(ref).catch(() => null);
           state.check = bytes
             ? await analyseToolPhoto(bytes, String(state.draft.title || ""), Number(state.draft.quantity) || undefined)
             : { checked: false, plausible: false, confidence: 0, observations: "photo could not be read back" };
@@ -1615,12 +1658,12 @@ export async function POST(req: NextRequest) {
             });
             return NextResponse.json({ ok: true });
           }
-          const stored = await storeIncomingPhoto(msg, PHOTO_KIND_BY_FLOW[state.kind] ?? PP_BAG_PHOTO_KIND);
-          if (!stored) {
+          const ref = await captureFlowPhoto(msg, state.kind, PP_BAG_PHOTO_KIND);
+          if (!ref) {
             await sendMessage(chatId, "⚠️ ፎቶውን ማውረድ አልተቻለም። እባክዎ ድጋሚ ይሞክሩ።", { reply_markup: photosKeyboard });
             return NextResponse.json({ ok: true });
           }
-          state.photoFileIds = [...collected, stored.id];
+          state.photoFileIds = [...collected, ref];
           session.assetFlow = { ...state };
           await persist(session);
           await sendMessage(
@@ -1795,25 +1838,14 @@ export async function POST(req: NextRequest) {
           });
           return NextResponse.json({ ok: true });
         }
-        let stored: { id: string } | null = null;
-        try {
-          stored = await storeIncomingPhoto(msg);
-        } catch (e) {
-          const detail = e instanceof Error ? e.message.slice(0, 300) : String(e);
-          await logError({
-            source: "telegram-webhook",
-            kind: "photo_store_failed",
-            message: detail,
-            actor: submitterName,
-            chatId,
-          });
-          await sendMessage(chatId, `⚠️ ፎቶ ማስቀመጥ አልተቻለም (storage)፦\n${detail}`, {
-            reply_markup: SALES_PHOTOS_KEYBOARD,
-          });
-          return NextResponse.json({ ok: true });
-        }
-        if (!stored) {
-          await sendMessage(chatId, "⚠️ ፎቶውን ከቴሌግራም ማውረድ አልተቻለም። እባክዎ ምስሉን እንደ ፎቶ (እንደ ፋይል ሳይሆን) ይላኩ።", {
+        // Nothing is uploaded. The receipt goes straight from Telegram to the
+        // model, and Telegram's own file id is what is kept — it resolves back
+        // to the same image whenever a read has to be retried, at no storage
+        // cost. A bucket growing by four photographs per sale was paying rent on
+        // pictures nobody opens once the figures are out of them.
+        const ref = telegramFileId(msg);
+        if (!ref) {
+          await sendMessage(chatId, "⚠️ ፎቶውን ማንበብ አልተቻለም። እባክዎ ምስሉን እንደ ፎቶ (እንደ ፋይል ሳይሆን) ይላኩ።", {
             reply_markup: SALES_PHOTOS_KEYBOARD,
           });
           return NextResponse.json({ ok: true });
@@ -1822,7 +1854,7 @@ export async function POST(req: NextRequest) {
         // photos at once sends them as separate updates that land on separate
         // serverless instances, each having loaded the same session. Writing the
         // whole array back lost all but the last.
-        rs.images = await appendReceiptImage(chatId, stored.id);
+        rs.images = await appendReceiptImage(chatId, ref);
         session.receiptScan = { ...rs };
         await persist(session);
         await sendMessage(
@@ -1849,8 +1881,8 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true });
       }
 
-      // The read happens in a worker. Nothing below waits on a provider, which
-      // is what makes this reply instant and the timeout impossible.
+      // The job row is written before the reply so the read survives whatever
+      // happens to this invocation: the scheduled sweep picks up anything left.
       const jobId = await createScanJob({
         chatId,
         reportedBy: submitterName,
@@ -1866,22 +1898,47 @@ export async function POST(req: NextRequest) {
       }
 
       session.state = "sales_reading";
-      session.receiptScan = { ...rs, jobId, images: rs.images };
+      session.receiptScan = { ...rs, jobId, images: rs.images, readingSince: Date.now() };
       await persist(session);
       await sendMessage(
         chatId,
         `✅ ${rs.images.length} ሰነድ ተቀብለናል — በማንበብ ላይ።\n` +
-          `<i>ንባቡ ሲጠናቀቅ እንልክልዎታለን። መጠበቅ አያስፈልግም።</i>`
+          `<i>ንባቡ ሲጠናቀቅ እንልክልዎታለን። መጠበቅ አያስፈልግም።</i>`,
+        { reply_markup: SALES_MANUAL_KEYBOARD }
       );
-      // Fire-and-forget: the reply above has already been sent, and the cron
-      // sweep covers a trigger that never lands.
-      triggerScanWorker();
+      // The read continues in THIS invocation, after the response. It is not
+      // handed to another function over HTTP: that was the previous design, and
+      // an un-awaited self-fetch fired just before returning is not guaranteed
+      // to leave the instance — which is how the flow went silent with no error
+      // recorded anywhere.
+      runAfter(drainScanJobs(1));
       return NextResponse.json({ ok: true });
     }
 
-    /* ── The worker is reading ── */
+    /* ── The read is in flight ── */
     if (session.state === "sales_reading") {
-      await sendMessage(chatId, "⏳ ሰነዶቹ አሁንም እየተነበቡ ነው። ሲጠናቀቅ እንልክልዎታለን።");
+      const rs = (session.receiptScan || {}) as { saleDate?: string; readingSince?: number };
+
+      // The way out. A model outage must never mean the day's sales cannot be
+      // filed — the same prompts a successful read leaves behind are used to ask
+      // for every column instead of only the missing ones.
+      if (normText === NORM_SALES.manual) {
+        const blank = computeReceipt({ date: String(rs.saleDate || eatDateKey()) } as never);
+        session.receiptScan = { saleDate: rs.saleDate, images: [], draft: blank, fillField: firstMissingField(blank) };
+        session.state = "sales_fill";
+        await persist(session);
+        await sendMessage(chatId, "🖐 እሺ — መስኮቹን በጥያቄ እንሞላቸዋለን።");
+        await askSalesField(chatId, firstMissingField(blank) as SalesRequiredField);
+        return NextResponse.json({ ok: true });
+      }
+
+      const waited = rs.readingSince ? Math.round((Date.now() - rs.readingSince) / 1000) : null;
+      await sendMessage(
+        chatId,
+        `⏳ ሰነዶቹ አሁንም እየተነበቡ ነው${waited !== null ? ` (${waited} ሰከንድ)` : ""}።\n` +
+          `<i>ሲጠናቀቅ እንልክልዎታለን። መጠበቅ ካልፈለጉ "${SALES_BTN.manual}" ይጫኑ።</i>`,
+        { reply_markup: SALES_MANUAL_KEYBOARD }
+      );
       return NextResponse.json({ ok: true });
     }
 
@@ -1974,7 +2031,7 @@ export async function POST(req: NextRequest) {
         const insertReceipt = () => sql<{ id: string }[]>`
           insert into sales_receipts (date, customer_name, fs_no, att_no, product_ty, qty, unit_price,
                                       sub_total, vat, grand_total, withhold, net_pay, deposited_bank, remark,
-                                      status, reported_by, photo_file_ids)
+                                      status, reported_by, tg_file_ids)
           values (${parseReportDate(d.date)}, ${d.customerName || null},
                   ${d.fsNo || null}, ${d.attNo || null},
                   ${d.productTy || null}, ${d.qty}, ${d.unitPrice}, ${d.subTotal}, ${d.vat}, ${d.grandTotal},

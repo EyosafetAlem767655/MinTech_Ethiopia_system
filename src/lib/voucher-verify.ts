@@ -1,6 +1,6 @@
 import sql, { jsonb } from "@/lib/sql";
 import { extractVoucherGemini } from "@/lib/llm";
-import { getFileBytes } from "@/lib/storage";
+import { loadImages } from "@/lib/images";
 import type { VoucherItem } from "@/lib/asset-flows";
 
 /**
@@ -137,11 +137,10 @@ export async function backgroundVoucherVerify(opts: {
   if (opts.fileIds.length === 0) return null;
 
   try {
-    const images = [];
-    for (const id of opts.fileIds.slice(0, 3)) {
-      const f = await getFileBytes(id);
-      if (f) images.push({ base64: f.base64, contentType: f.contentType });
-    }
+    // Straight from Telegram. Voucher photos are no longer uploaded — the id
+    // kept is Telegram's own, and loadImages still resolves the stored-file
+    // uuids on historic rows.
+    const images = await loadImages(opts.fileIds.slice(0, 3));
     if (images.length === 0) return null;
 
     const result = await extractVoucherGemini("siv", images);

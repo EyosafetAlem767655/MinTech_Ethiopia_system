@@ -49,6 +49,9 @@ interface Voucher {
   receivedBy?: string | null;
   reportedBy: string;
   photoFileIds: string[];
+  /** Telegram file ids, for vouchers photographed after receipts stopped being
+   *  uploaded. /api/files serves either kind, so both render the same way. */
+  tgFileIds?: string[];
   receiptCheck?: ReceiptCheck | null;
 }
 
@@ -368,7 +371,7 @@ function VoucherCard({ v, items, isGrv }: { v: Voucher; items: Item[]; isGrv: bo
       {v.remarks && <p className="text-[11px] italic text-stone-500">“{v.remarks}”</p>}
 
       <div className="flex flex-wrap items-center gap-1.5">
-        {(v.photoFileIds ?? []).map((id) => (
+        {[...(v.photoFileIds ?? []), ...(v.tgFileIds ?? [])].map((id) => (
           <a key={id} href={`/api/files/${id}`} target="_blank" rel="noreferrer">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img

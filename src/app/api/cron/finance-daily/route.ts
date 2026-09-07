@@ -2,10 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import sql from "@/lib/sql";
 import { logActivity } from "@/lib/bot-auth";
 import { hasPosition, resolveCapabilities } from "@/lib/positions";
-import { sendSms, smsGatewayConfigured } from "@/lib/sms";
+import { smsGatewayConfigured } from "@/lib/sms";
+import { chaseHolder } from "@/lib/wht-sms";
 import { sendMessage } from "@/lib/telegram";
 import { describeGap, reconcileBags } from "@/lib/stock-reconciliation";
-import { triggerScanWorker } from "@/lib/sales-scan";
+import { drainScanJobs } from "@/lib/sales-scan";
 import {
   eatDayOfMonth,
   isBaseBalanceReminderWindow,
@@ -78,46 +79,14 @@ export async function GET(req: NextRequest) {
   let smsSkipped = 0;
 
   for (const h of holders) {
-    // Claim the day BEFORE sending. The unique (holder_id, sent_on) index is
-    // what makes "one a day" true: a retry, an overlapping invocation or a
-    // double cron fire all lose the race here instead of sending twice.
-    const claimed = await sql<{ id: string }[]>`
-      insert into wht_sms_log (holder_id, sent_on, phone)
-      values (${h.id}, ${today}::date, ${h.phone})
-      on conflict (holder_id, sent_on) do nothing
-      returning id
-    `.catch(() => []);
-    if (claimed.length === 0) {
-      smsSkipped += 1;
-      continue;
-    }
-
-    const message =
-      `MinTech Ethiopia: we are still missing the 3% withholding (WHT) receipt from ` +
-      `${h.company}${h.description ? ` for ${h.description}` : ""}. ` +
-      `Please send it at your earliest convenience. Thank you.`;
-
-    const res = await sendSms(h.phone, message);
-    // The claim row is UPDATED rather than deleted on failure. Deleting it would
-    // let the next run try again the same day, which is how a broken gateway
-    // turns into a flood of duplicate messages to a customer.
-    await sql`
-      update wht_sms_log
-         set ok = ${res.ok}, status = ${res.status ?? null}, error = ${res.error ?? null},
-             route = ${res.route ?? null}
-       where holder_id = ${h.id} and sent_on = ${today}::date
-    `.catch(async () => {
-      // `route` arrives in 0020. Losing which endpoint delivered is a nuisance;
-      // losing the record that we sent at all would let tomorrow's run text the
-      // customer twice, so the rest of the update still has to land.
-      await sql`
-        update wht_sms_log
-           set ok = ${res.ok}, status = ${res.status ?? null}, error = ${res.error ?? null}
-         where holder_id = ${h.id} and sent_on = ${today}::date
-      `.catch(() => {});
-    });
-
-    if (res.ok) smsSent += 1;
+    // The claim-then-send, the message and the failure logging all live in
+    // chaseHolder, shared with the two paths that chase on registration. A
+    // holder registered yesterday afternoon was already texted then and has
+    // today's slot free; one registered this morning does not get a second
+    // message hours later.
+    const res = await chaseHolder(h, now);
+    if (!res.claimed) smsSkipped += 1;
+    else if (res.ok) smsSent += 1;
     else smsFailed += 1;
   }
 
@@ -256,18 +225,14 @@ export async function GET(req: NextRequest) {
 
   /* ─────────── 4. Sweep any sales read whose worker never finished ───────── */
 
-  // The webhook triggers the worker directly, so this only ever picks up the
-  // exceptions: a trigger that never landed, or a function killed mid-read. Left
-  // alone, those leave a salesperson waiting for a reply that never comes.
+  // The webhook finishes its own read after replying and a five-minute cron
+  // drains the rest, so by the time this runs there is normally nothing here.
+  // It is awaited rather than fired off: the previous version asked another
+  // function to do the work over HTTP and returned, which is exactly how reads
+  // went missing.
   let sweptScans = 0;
   try {
-    const stuck = await sql<{ n: string }[]>`
-      select count(*) as n from sales_scan_jobs
-       where status = 'pending'
-          or (status = 'reading' and claimed_at < now() - interval '5 minutes')
-    `;
-    sweptScans = Number(stuck[0]?.n) || 0;
-    if (sweptScans > 0) triggerScanWorker();
+    sweptScans = (await drainScanJobs(20)).read;
   } catch {
     // sales_scan_jobs arrives in 0021; the WHT chase above must still run.
   }

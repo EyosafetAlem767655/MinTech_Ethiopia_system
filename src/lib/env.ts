@@ -40,10 +40,12 @@ export function integrationEnvChecks(): Record<string, EnvCheck> {
     ai: check(["NIVIDA_API_KEY", "QWEN_API", "GEMINI_API_KEY"]),
     telegram: check(["TELEGRAM_BOT_TOKEN", "TELEGRAM_CEO_CHAT_ID", "TELEGRAM_WEBHOOK_SECRET", "APP_URL"]),
     cron: check(["CRON_SECRET"]),
-    // Traccar's cloud relay is the route that works from a serverless cron;
-    // LOCAL_URL + SHORT_TOKEN are the optional on-Wi-Fi fallback, so only the
-    // long token is required for the chase to run at all.
-    sms: check(["LONG_TOKEN"]),
+    // httpSMS queues the message and the company handset delivers it when it
+    // next has internet. Both are required: the key authenticates, and
+    // PHONE_NUMBER must be the number registered in the app on that handset —
+    // the API refuses to send `from` anything else.
+    // SERVER_URL is optional and defaults to https://api.httpsms.com.
+    sms: check(["HTTPSMS_API_KEY", "PHONE_NUMBER"]),
     push: check(["VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY", "VAPID_SUBJECT", "NEXT_PUBLIC_VAPID_PUBLIC_KEY"]),
     dashboardAuth: check(["ADMIN_PASSWORD"]),
   };

@@ -21,6 +21,8 @@ import {
   type LedgerKind,
 } from "@/lib/products";
 import { upsertOpsDay, opsDateLabel } from "@/lib/ops-report";
+import { runAfter } from "@/lib/after";
+import { chaseHolder } from "@/lib/wht-sms";
 import { bagKey, productionTemplate, PROD_PREFIX, STOCK_PREFIX } from "@/lib/production-paste";
 import {
   BAG_PREFIX,
@@ -1630,6 +1632,10 @@ export async function saveAssetReport(
     const isGrv = state.kind === "grv";
     const items = voucherItems(d);
     const extraction = state.extraction ? sql.json({ ...state.extraction }) : null;
+    // Telegram file ids, not stored-file uuids: voucher photos are read once and
+    // never uploaded. They go into `tg_file_ids` (text[]) rather than
+    // `photo_file_ids` (uuid[]), which the recycle bin, the archive and both
+    // storage purges all join against stored_files.
     const photos = state.photoFileIds || [];
     const date = reportDate(d.date);
     // A blank voucher number must be stored as NULL, not "". The unique index is
@@ -1642,7 +1648,7 @@ export async function saveAssetReport(
           insert into goods_receiving_vouchers
             (grv_no, date, supplier, supplier_invoice_no, purchase_order_no, receiving_store_no,
              currency, total_amount, remarks, prepared_by, received_by, approved_by,
-             reported_by, photo_file_ids, extraction, source)
+             reported_by, tg_file_ids, extraction, source)
           values (${voucherNo}, ${date}, ${String(d.supplier || "") || null},
                   ${String(d.supplierInvoiceNo || "") || null},
                   ${String(d.purchaseOrderNo || "") || null},
@@ -1657,7 +1663,7 @@ export async function saveAssetReport(
           insert into store_issue_vouchers
             (siv_no, date, issuing_store, issued_to, department_section, store_requisition_no,
              remarks, issued_by, approved_by, received_by,
-             reported_by, photo_file_ids, extraction, source)
+             reported_by, tg_file_ids, extraction, source)
           values (${voucherNo}, ${date}, ${String(d.issuingStore || "") || null},
                   ${String(d.issuedTo || "") || null},
                   ${String(d.departmentSection || "") || null},
@@ -1711,11 +1717,20 @@ export async function saveAssetReport(
   }
 
   if (state.kind === "wht_holder") {
+    const company = String(d.company || "");
+    const phone = String(d.phone || "");
+    const description = String(d.description || "") || null;
     const [row] = await sql<{ id: string }[]>`
       insert into wht_holders (company, phone, description, registered_by, source)
-      values (${String(d.company || "")}, ${String(d.phone || "")},
-              ${String(d.description || "") || null}, ${reportedBy}, 'telegram')
+      values (${company}, ${phone}, ${description}, ${reportedBy}, 'telegram')
       returning id`;
+
+    // The customer is texted the moment they are registered rather than at the
+    // next morning's cron. Sent after the reply, not before it: the bot's answer
+    // must not sit behind an outbound HTTP call, and chaseHolder claims today's
+    // slot so tomorrow's cron skips this holder instead of asking twice.
+    runAfter(chaseHolder({ id: row.id, company, phone, description }));
+
     return { id: row.id, table: "wht_holders" };
   }
 

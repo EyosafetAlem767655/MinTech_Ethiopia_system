@@ -10,6 +10,14 @@
 --    STEP 2  deletes it, in one transaction.
 --    STEP 3  re-run STEP 1 to confirm.
 --
+--  ⚠️ SQL CANNOT REACH THE STORAGE BUCKET. This clears the rows and leaves any
+--  images they referenced sitting in storage, referenced by nothing and paying
+--  rent forever. Settings → Danger zone → "Clear the sales tab" does both halves
+--  and is the complete version of this script.
+--
+--  (Receipts filed after migration 0023 are not uploaded at all, so for those
+--  there is nothing left behind either way.)
+--
 --  ⚠️ This is unconditional — it removes ALL sales receipts, not a date range.
 --  It is meant for clearing test data before going live. If any genuine sale has
 --  been filed through the bot, use supabase/wipe-one-day.sql instead, which

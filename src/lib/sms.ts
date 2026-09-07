@@ -1,31 +1,37 @@
 import { envValue } from "@/lib/env";
 
 /**
- * Outbound SMS through the Traccar SMS gateway app.
+ * Outbound SMS through httpSMS.
  *
- * The gateway is the company's own Android handset. It is reachable two ways and
- * they are NOT interchangeable:
+ * The gateway is still the company's own Android handset, but it now works the
+ * other way round. Traccar's relay had to reach the phone at the moment of
+ * sending, so a message could only go out while the handset happened to be
+ * reachable — and from a serverless cron that was often not true. httpSMS
+ * accepts the message onto its own queue and the handset pulls it down the next
+ * time it has internet.
  *
- *   cloud  https://www.traccar.org/sms/  with LONG_TOKEN
- *          Traccar's relay. The only route a serverless cron can use, because it
- *          is the only one on the public internet.
+ * That is the whole reason for the move: a WHT holder registered at 4pm gets
+ * their text at 4pm rather than at whatever hour a cron next ran and found the
+ * phone awake.
  *
- *   local  LOCAL_URL                     with SHORT_TOKEN
- *          The phone's own address on the office Wi-Fi. Unreachable from Vercel;
- *          useful when this code runs on the same network.
+ *   POST {SERVER_URL}/v1/messages/send
+ *   x-api-key: HTTPSMS_API_KEY
+ *   { "from": PHONE_NUMBER, "to": "+2519…", "content": "…" }
  *
- * Each has its OWN token — a long one for the relay, a short one for the device
- * — so the pairs are never mixed. Sending the wrong token to the wrong URL comes
- * back as a 401, which is why the two are kept together in one place.
- *
- * Auth is the raw token in the Authorization header, not Basic and not Bearer.
- * The body is a single `{ to, message }`.
+ * `from` must be the number registered in the httpSMS app on the handset — the
+ * API rejects anything else, and it rejects a local-format number outright,
+ * which is why it goes through normalisePhone like every recipient does.
  */
 
-const CLOUD_URL = envValue("TRACCAR_CLOUD_URL") || "https://www.traccar.org/sms/";
+const DEFAULT_BASE = "https://api.httpsms.com";
 const TIMEOUT_MS = Number(envValue("SMS_GATEWAY_TIMEOUT_MS")) || 15000;
 
-export type SmsRoute = "cloud" | "local";
+/**
+ * Kept as a type so `wht_sms_log.route` keeps meaning "which gateway delivered
+ * this". There is one route now; the column still answers the question when the
+ * next gateway arrives.
+ */
+export type SmsRoute = "httpsms";
 
 export interface SmsResult {
   ok: boolean;
@@ -35,21 +41,26 @@ export interface SmsResult {
   error?: string;
   /** Which endpoint delivered it. Recorded, so "it sent but nothing arrived" is answerable. */
   route?: SmsRoute;
+  /** httpSMS's own message id, for looking a message up in their dashboard. */
+  messageId?: string;
 }
 
 export function smsGatewayConfigured(): boolean {
-  return Boolean(envValue("LONG_TOKEN") || (envValue("LOCAL_URL") && envValue("SHORT_TOKEN")));
+  return Boolean(envValue("HTTPSMS_API_KEY") && envValue("PHONE_NUMBER"));
 }
 
-/** Which routes are actually usable right now, in the order they are tried. */
-export function smsRoutes(): { route: SmsRoute; url: string; token: string }[] {
-  const out: { route: SmsRoute; url: string; token: string }[] = [];
-  const longToken = envValue("LONG_TOKEN");
-  if (longToken) out.push({ route: "cloud", url: CLOUD_URL, token: longToken });
-  const localUrl = envValue("LOCAL_URL");
-  const shortToken = envValue("SHORT_TOKEN");
-  if (localUrl && shortToken) out.push({ route: "local", url: localUrl, token: shortToken });
-  return out;
+/**
+ * The send endpoint.
+ *
+ * SERVER_URL is accepted as either the API base or the full send path, because
+ * both are plausible things to have put in the variable and guessing wrong is a
+ * 404 that looks like an outage.
+ */
+export function smsEndpoint(): string {
+  const raw = (envValue("SERVER_URL") || DEFAULT_BASE).trim().replace(/\/+$/, "");
+  if (/\/messages\/send$/.test(raw)) return raw;
+  if (/\/v1$/.test(raw)) return `${raw}/messages/send`;
+  return `${raw}/v1/messages/send`;
 }
 
 /**
@@ -69,64 +80,69 @@ export function normalisePhone(raw: string): string | null {
   return null;
 }
 
-async function postOnce(
-  url: string,
-  token: string,
-  to: string,
-  message: string
-): Promise<{ ok: boolean; status?: number; error?: string }> {
-  // Its own controller per attempt, so a local endpoint this host cannot see
-  // costs one timeout rather than eating the budget for the whole run.
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
-  try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: token },
-      body: JSON.stringify({ to, message }),
-      signal: ctrl.signal,
-    });
-    if (res.ok) return { ok: true, status: res.status };
-    const body = (await res.text().catch(() => "")).slice(0, 300);
-    // 401 here almost always means the token belongs to the other endpoint,
-    // which is worth saying rather than leaving as a bare status code.
-    const hint = res.status === 401 ? " (wrong token for this URL?)" : "";
-    return { ok: false, status: res.status, error: `${body || `HTTP ${res.status}`}${hint}` };
-  } catch (e) {
-    const aborted = e instanceof Error && e.name === "AbortError";
-    return {
-      ok: false,
-      error: aborted ? `timed out after ${TIMEOUT_MS}ms` : e instanceof Error ? e.message : String(e),
-    };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 /**
- * Send one SMS, cloud first and local only as a fallback.
+ * Send one SMS.
  *
- * The order is not arbitrary: from Vercel the local address is on a network the
- * function has never heard of, so trying it first would spend a timeout on every
- * single message before reaching the route that works.
+ * A 200 here means httpSMS accepted the message onto its queue, NOT that it has
+ * been delivered — the handset sends it when it next has a connection. That
+ * distinction is worth keeping in mind when reading `wht_sms_log`: `ok` records
+ * that the request was accepted.
  */
 export async function sendSms(to: string, message: string): Promise<SmsResult> {
-  const routes = smsRoutes();
-  if (routes.length === 0) {
-    return { ok: false, skipped: true, error: "LONG_TOKEN (or LOCAL_URL + SHORT_TOKEN) is not set" };
+  const apiKey = envValue("HTTPSMS_API_KEY");
+  const fromRaw = envValue("PHONE_NUMBER");
+  if (!apiKey || !fromRaw) {
+    return { ok: false, skipped: true, error: "HTTPSMS_API_KEY and PHONE_NUMBER are not set" };
+  }
+
+  const from = normalisePhone(fromRaw);
+  if (!from) {
+    return { ok: false, skipped: false, error: `PHONE_NUMBER is not a usable sender: ${fromRaw}` };
   }
 
   const phone = normalisePhone(to);
   if (!phone) return { ok: false, skipped: false, error: `unusable phone number: ${to}` };
 
-  const failures: string[] = [];
-  for (const { route, url, token } of routes) {
-    const res = await postOnce(url, token, phone, message);
-    if (res.ok) return { ok: true, skipped: false, status: res.status, route };
-    failures.push(`${route}: ${res.error}`);
-  }
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+  try {
+    const res = await fetch(smsEndpoint(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": apiKey },
+      body: JSON.stringify({ from, to: phone, content: message }),
+      signal: ctrl.signal,
+    });
 
-  // Every route's reason is kept. "It failed" is not actionable; "cloud said 401
-  // and local timed out" tells you which token to look at.
-  return { ok: false, skipped: false, error: failures.join(" · ") };
+    const body = await res.text().catch(() => "");
+    if (res.ok) {
+      let messageId: string | undefined;
+      try {
+        messageId = JSON.parse(body)?.data?.id;
+      } catch {
+        // The id is a convenience for looking the message up later, not
+        // something the send depends on.
+      }
+      return { ok: true, skipped: false, status: res.status, route: "httpsms", messageId };
+    }
+
+    // 401 is the wrong API key, 422 is almost always a `from` that is not the
+    // number registered on the handset. Both are worth saying rather than
+    // leaving as a bare status code.
+    const hint =
+      res.status === 401
+        ? " (check HTTPSMS_API_KEY)"
+        : res.status === 422
+        ? " (is PHONE_NUMBER the number registered in the httpSMS app?)"
+        : "";
+    return { ok: false, skipped: false, status: res.status, error: `${body.slice(0, 300) || `HTTP ${res.status}`}${hint}` };
+  } catch (e) {
+    const aborted = e instanceof Error && e.name === "AbortError";
+    return {
+      ok: false,
+      skipped: false,
+      error: aborted ? `timed out after ${TIMEOUT_MS}ms` : e instanceof Error ? e.message : String(e),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
 }
