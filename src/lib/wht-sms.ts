@@ -1,6 +1,6 @@
 import sql from "@/lib/sql";
 import { logError } from "@/lib/errors";
-import { sendSms, type SmsResult } from "@/lib/sms";
+import { sendSms, smsGatewayConfigured, type SmsResult } from "@/lib/sms";
 
 /**
  * Chasing a customer for the 3% withholding receipt.
@@ -49,6 +49,13 @@ export function chaseMessage(h: WhtHolder): string {
  */
 export async function chaseHolder(h: WhtHolder, now = new Date()): Promise<ChaseResult> {
   const today = eatToday(now);
+
+  // Nothing can send, so nothing claims the day. Claiming first and failing
+  // would mark this customer as chased and skip them until tomorrow — an unset
+  // API key would quietly cost a day of chasing for every holder, every day.
+  if (!smsGatewayConfigured()) {
+    return { ok: false, skipped: true, claimed: false, error: "the SMS gateway is not configured" };
+  }
 
   const claimed = await sql<{ id: string }[]>`
     insert into wht_sms_log (holder_id, sent_on, phone)

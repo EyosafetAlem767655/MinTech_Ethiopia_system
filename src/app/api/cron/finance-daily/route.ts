@@ -3,7 +3,7 @@ import sql from "@/lib/sql";
 import { logActivity } from "@/lib/bot-auth";
 import { hasPosition, resolveCapabilities } from "@/lib/positions";
 import { smsGatewayConfigured } from "@/lib/sms";
-import { chaseHolder } from "@/lib/wht-sms";
+import { dailyHeartbeat } from "@/lib/heartbeat";
 import { sendMessage } from "@/lib/telegram";
 import { describeGap, reconcileBags } from "@/lib/stock-reconciliation";
 import { drainScanJobs } from "@/lib/sales-scan";
@@ -70,25 +70,16 @@ export async function GET(req: NextRequest) {
 
   /* ─────────────────── 1. Chase the outstanding WHT receipts ─────────────── */
 
-  const holders = await sql<{ id: string; company: string; phone: string; description: string | null }[]>`
-    select id, company, phone, description from wht_holders where status = 'pending'
-  `.catch(() => []);
-
-  let smsSent = 0;
-  let smsFailed = 0;
-  let smsSkipped = 0;
-
-  for (const h of holders) {
-    // The claim-then-send, the message and the failure logging all live in
-    // chaseHolder, shared with the two paths that chase on registration. A
-    // holder registered yesterday afternoon was already texted then and has
-    // today's slot free; one registered this morning does not get a second
-    // message hours later.
-    const res = await chaseHolder(h, now);
-    if (!res.claimed) smsSkipped += 1;
-    else if (res.ok) smsSent += 1;
-    else smsFailed += 1;
-  }
+  // The same function ordinary traffic runs. The chase does not belong to this
+  // cron any more — a Telegram update or a dashboard load will usually have done
+  // it hours earlier — so this is a backstop, and on a normal day it reports
+  // everything as already chased. `force` because a cron should do the check
+  // whatever this particular instance happens to have seen.
+  const beat = await dailyHeartbeat(true);
+  const smsSent = beat.chased;
+  const smsFailed = beat.failed;
+  const smsSkipped = beat.alreadyChased;
+  const pendingHolders = smsSent + smsFailed + smsSkipped;
 
   /* ──────────────── 2. The monthly opening balance ──────────────────────── */
 
@@ -244,7 +235,7 @@ export async function GET(req: NextRequest) {
     sweptScans,
     sms: {
       configured: smsGatewayConfigured(),
-      pendingHolders: holders.length,
+      pendingHolders,
       sent: smsSent,
       failed: smsFailed,
       alreadySentToday: smsSkipped,

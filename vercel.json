@@ -19,10 +19,6 @@
     {
       "path": "/api/cron/archive-and-purge",
       "schedule": "0 1 1 9 *"
-    },
-    {
-      "path": "/api/sales/scan-worker",
-      "schedule": "*/5 * * * *"
     }
   ]
 }

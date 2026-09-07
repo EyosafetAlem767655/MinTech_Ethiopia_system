@@ -42,6 +42,7 @@ import { backgroundVoucherVerify } from "@/lib/voucher-verify";
 import { logError } from "@/lib/errors";
 import { createScanJob, drainScanJobs } from "@/lib/sales-scan";
 import { runAfter } from "@/lib/after";
+import { dailyHeartbeat } from "@/lib/heartbeat";
 import { loadImage, telegramFileId } from "@/lib/images";
 import { applyReceiptEdit, describeChanges, EDITABLE_FIELDS } from "@/lib/receipt-edit";
 import {
@@ -1234,6 +1235,13 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, deduped: true });
     }
   }
+
+  /* ── The day's background work rides along with ordinary traffic ──
+     The WHT chase and the sales-document sweep no longer wait for a scheduler.
+     This runs AFTER the reply and is idempotent at the database — a customer
+     gets one message a day however many updates arrive. Placed after the dedupe
+     so a redelivery storm cannot multiply the work. */
+  runAfter(dailyHeartbeat());
 
   /* ── Inline-button callbacks (purchase decisions, owner only) ── */
   const cb = update?.callback_query;

@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import sql from "@/lib/sql";
 import { latestBrief as fetchLatestBrief } from "@/lib/brief";
+import { runAfter } from "@/lib/after";
+import { dailyHeartbeat } from "@/lib/heartbeat";
 import {
   bestAndWorstDays,
   damageTripwires,
@@ -13,9 +15,19 @@ import {
 } from "@/lib/metrics";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 30;
+// Raised because the daily heartbeat now finishes behind this response. The
+// dashboard payload itself is unchanged and still returns in its own time —
+// nothing here waits on the background half.
+export const maxDuration = 120;
 
 export async function GET() {
+  // The second place the day's work can start, after the Telegram webhook.
+  // Neither is a scheduler, so between them the WHT chase happens on whichever
+  // comes first — someone messaging the bot, or someone opening the dashboard.
+  // Sending twice is impossible: chaseHolder claims the day in wht_sms_log
+  // before it sends.
+  runAfter(dailyHeartbeat());
+
   // One 90-day fetch serves every window the dashboard needs. Previously this
   // route ran getDailySeries five separate times (7/30/90 + two more inside
   // monthOnMonth) — and because the pool is small those queries queued up
