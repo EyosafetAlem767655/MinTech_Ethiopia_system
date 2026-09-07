@@ -1606,8 +1606,25 @@ export async function POST(req: NextRequest) {
           await sendReportMenu(chatId, userCapabilities(user).map((c) => c.button));
           return NextResponse.json({ ok: true });
         }
-        await askAssetStep(chatId, state);
-        return NextResponse.json({ ok: true });
+
+        // Correcting a template-only report means sending the template again.
+        // There are no per-field questions left to walk back into, so a filled
+        // block arriving at the review card is the edit — it is re-parsed over
+        // the draft and the card is redrawn. Without this the only way to fix a
+        // typo would be to cancel and start the whole report over.
+        if (
+          (state.kind === "production_daily" || state.kind === "base_balance") &&
+          /[=:]/.test(text || "") &&
+          (text || "").includes("\n")
+        ) {
+          state.step = "paste";
+          session.assetFlow = { ...state };
+          await persist(session);
+          // Falls through to the paste handler below on this same message.
+        } else {
+          await askAssetStep(chatId, state);
+          return NextResponse.json({ ok: true });
+        }
       }
 
       const step = findStep(state.kind, state.step);
@@ -1784,10 +1801,17 @@ export async function POST(req: NextRequest) {
         // mistyped line the user believes was recorded is the worst outcome here.
         const problems = [...parsed.invalid, ...parsed.unknown].slice(0, 6);
         if (problems.length > 0) {
+          // What happens next differs by flow, and saying the wrong one is worse
+          // than saying nothing. The two template-only reports have no questions
+          // left to fall through to — an unread line there is simply blank, and
+          // the review card names it.
+          const templateOnly = state.kind === "production_daily" || state.kind === "base_balance";
           await sendMessage(
             chatId,
             `⚠️ እነዚህ መስመሮች አልተነበቡም፦\n${problems.map((p) => `• ${escapeHtml(p)}`).join("\n")}\n\n` +
-              `<i>የቀሩት በጥያቄ ይጠየቃሉ።</i>`
+              (templateOnly
+                ? `<i>ባዶ ሆነው ይቀራሉ። ማስተካከል ከፈለጉ ቅጂውን ሞልተው ድጋሚ ይላኩ።</i>`
+                : `<i>የቀሩት በጥያቄ ይጠየቃሉ።</i>`)
           );
         }
 

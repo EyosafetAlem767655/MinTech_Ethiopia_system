@@ -111,7 +111,10 @@ export async function GET(req: NextRequest) {
       `📊 <b>የ${upcoming} የመነሻ ሚዛን</b>\n\n` +
       `ወሩ ከመጀመሩ በፊት የሁሉንም ምርቶች፣ የጥሬ ዕቃና የPP ከረጢት የመነሻ ሚዛን (ቀሪ ብዛት) ያስገቡ።\n` +
       `${urgency}\n\n` +
-      `📊 "የወሩ የመነሻ ሚዛን" የሚለውን ይጫኑ።`;
+      // The report is one filled-in block now, not nineteen questions. Saying so
+      // in the reminder is what stops someone opening it, seeing a template and
+      // assuming the bot has broken.
+      `📊 "የወሩ የመነሻ ሚዛን" የሚለውን ይጫኑ — ቦቱ አንድ ቅጂ ይልክልዎታል፤ ሞልተው ይመልሱት።`;
 
     // Sent to every asset reporter with a known chat, signed in or not. Being
     // logged out is a reason to be told the count is due — the reminder is what
@@ -181,7 +184,9 @@ export async function GET(req: NextRequest) {
       assetStaff.map((u) =>
         sendMessage(
           String(u.chat_id),
-          `📊 <b>የ${current} የመነሻ ሚዛን ገና አልገባም</b>\n\nእባክዎ ዛሬ ያስገቡ — የወሩ ሪፖርት በዚህ ይጠብቃል።`
+          `📊 <b>የ${current} የመነሻ ሚዛን ገና አልገባም</b>\n\n` +
+            `እባክዎ ዛሬ ያስገቡ — የወሩ ሪፖርት በዚህ ይጠብቃል።\n` +
+            `<i>ቦቱ የሚልክልዎትን ቅጂ ሞልተው መመለስ ብቻ ነው።</i>`
         ).catch(() => {})
       )
     );

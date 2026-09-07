@@ -288,74 +288,33 @@ export function damagePiles(
   return out;
 }
 
-/**
- * FGR numbers: one or two four-digit document numbers.
- *
- * Deliberately NOT a `number` step — `parseQty` strips commas, so "1234, 1235"
- * would be recorded as the single number 12341235 with nothing to show anything
- * had gone wrong.
+/*
+ * The FGR rule (one or two four-digit numbers) now lives in
+ * `parseProductionPaste`, which is the only place it can be broken since the
+ * per-field question was removed. It was duplicated here as a step validator;
+ * two copies of the same rule is how one of them quietly stops matching.
  */
-export function validateFgr(raw: string): StepValidation {
-  const parts = raw
-    .split(",")
-    .map((p) => p.trim())
-    .filter(Boolean);
-  if (parts.length === 0 || parts.length > 2) {
-    return { ok: false, error: "❌ አንድ ወይም ሁለት የFGR ቁጥር ብቻ — ሁለት ከሆኑ በኮማ ይለያዩ (ለምሳሌ 1234, 1235)።" };
-  }
-  if (!parts.every((p) => /^\d{4}$/.test(p))) {
-    return { ok: false, error: "❌ እያንዳንዱ የFGR ቁጥር በ4 አሃዝ መሆን አለበት (ለምሳሌ 1234)።" };
-  }
-  return { ok: true, value: parts.join(", ") };
-}
 
 /**
  * One button, two tables: what was produced today, then what is on hand.
  *
- * The paste step comes second, straight after the date, because answering all of
- * this one question at a time is 28 messages. Whatever the paste leaves blank
- * falls through to the individual questions below it.
+ * Pick a date, fill in one block, done. There is no question-at-a-time route any
+ * more and no choice between the two — this report is 28 figures, and asking for
+ * them one message at a time was a quarter of an hour of typing that nobody
+ * finished in one sitting. The template is the report.
+ *
+ * Anything left blank in the block is simply not recorded, and the review card
+ * names it. That is the honest outcome: a line the reporter skipped is unknown,
+ * and turning it into a question they must answer before anything can be saved
+ * is what made the old flow unfinishable.
  */
 const PRODUCTION_STEPS: AssetStep[] = [
   { id: "date", prompt: "📅 የሪፖርቱን ቀን ይምረጡ።", type: "date" },
   {
-    id: "fill",
-    prompt: "📋 እንዴት ማስገባት ይፈልጋሉ?",
-    type: "choice",
-    choices: [
-      { label: "📋 በአንድ ላይ (ሠንጠረዥ)", value: "paste" },
-      { label: "1️⃣ በደረጃ በደረጃ", value: "steps" },
-    ],
-  },
-  {
     id: "paste",
-    prompt: "📋 የሚከተለውን ቅጂ ሞልተው ይመልሱት። ያልሞሉት መስመር በጥያቄ ይጠየቃል።",
+    prompt: "📋 የሚከተለውን ቅጂ ሞልተው ይመልሱት።",
     type: "paste",
-    when: (d) => d.fill === "paste",
   },
-  {
-    id: "fgrNo",
-    prompt: "🔢 የFGR ቁጥር ይፃፉ። ሁለት ከሆኑ በኮማ ይለያዩ (ለምሳሌ 1234, 1235)።",
-    type: "text",
-    validate: validateFgr,
-  },
-  ...PRODUCTION_PRODUCTS.map<AssetStep>((code) => ({
-    id: `${PROD_PREFIX}${code}`,
-    prompt: `🏭 የዛሬ ምርት — የ<b>${productLabel(code)}</b> ብዛት በቶን። ከሌለ 0 ይፃፉ።`,
-    type: "number",
-  })),
-  ...PRODUCTION_PRODUCTS.map<AssetStep>((code) => ({
-    id: `${STOCK_PREFIX}${code}`,
-    prompt: `📦 ክምችት — የ<b>${productLabel(code)}</b> ቀሪ ብዛት በቶን። ከሌለ 0 ይፃፉ።`,
-    type: "number",
-  })),
-  ...BAG_SIZES.flatMap((size) =>
-    BAG_STOCK[size].map<AssetStep>((colour) => ({
-      id: bagKey(size, colour),
-      prompt: `🧺 ቀሪ — የ<b>${bagLabel(size, colour)}</b> ከረጢት ብዛት (ቁጥር)። ከሌለ 0 ይፃፉ።`,
-      type: "number",
-    }))
-  ),
 ];
 
 
@@ -363,42 +322,21 @@ const PRODUCTION_STEPS: AssetStep[] = [
 
 /**
  * The opening balance of the month about to start, counted three days before the
- * current month ends. Fifteen figures, so a paste template is offered first.
+ * current month ends.
+ *
+ * One block, like the daily production report — nineteen figures asked one at a
+ * time was nineteen messages once a month, and it is the same person filling in
+ * both. The six bag kinds are listed separately rather than by size: they carry
+ * different unit prices and are packed apart, so a balance per size would value
+ * three products at one number and leave the stock check unable to name which
+ * colour went missing.
  */
 const BASE_BALANCE_STEPS: AssetStep[] = [
   {
-    id: "fill",
-    prompt: "📋 እንዴት ማስገባት ይፈልጋሉ?",
-    type: "choice",
-    choices: [
-      { label: "📋 በአንድ ላይ (ሠንጠረዥ)", value: "paste" },
-      { label: "1️⃣ በደረጃ በደረጃ", value: "steps" },
-    ],
-  },
-  {
     id: "paste",
-    prompt: "📋 የሚከተለውን ቅጂ ሞልተው ይመልሱት። ያልሞሉት መስመር በጥያቄ ይጠየቃል።",
+    prompt: "📋 የሚከተለውን ቅጂ ሞልተው ይመልሱት።",
     type: "paste",
-    when: (d) => d.fill === "paste",
   },
-  ...PRODUCT_ORDER.map<AssetStep>((code) => ({
-    id: brandKey(code),
-    prompt: `📦 የመነሻ ሚዛን — የ<b>${productLabel(code)}</b> ብዛት በቶን። ከሌለ 0 ይፃፉ።`,
-    type: "number",
-  })),
-  ...FINANCE_RAW_MATERIALS.map<AssetStep>((m) => ({
-    id: materialKey(m),
-    prompt: `⛏ የመነሻ ሚዛን — የ<b>${m}</b> ብዛት በቶን። ከሌለ 0 ይፃፉ።`,
-    type: "number",
-  })),
-  // Six kinds, not two sizes: they carry different unit prices and are packed
-  // separately, so an opening balance per size would value three products at one
-  // number and make the stock check unable to name which colour went missing.
-  ...BAG_KINDS.map<AssetStep>(({ size, colour }) => ({
-    id: bagFinanceKey(size, colour),
-    prompt: `🧺 የመነሻ ሚዛን — የ<b>${bagLabel(size, colour)} PP</b> ከረጢት ብዛት (ቁጥር)። ከሌለ 0 ይፃፉ።`,
-    type: "number",
-  })),
 ];
 
 /* ═══════════════════════════ The two paper vouchers ════════════════════════
@@ -1186,13 +1124,29 @@ export function assetPreview(state: AssetFlowState): string {
   }
 
   if (state.kind === "production_daily") {
-    const prod = PRODUCTION_PRODUCTS.map((c) => `  • ${productLabel(c)}: ${qty(Number(d[`${PROD_PREFIX}${c}`]) || 0)}`).join("\n");
+    // Blank and zero are shown differently, and that matters more now than it
+    // did: there is no follow-up question any more, so a line the reporter
+    // skipped in the template goes straight to the review card. Printing it as
+    // "0" would put a measurement nobody took in front of someone about to
+    // approve it. It IS saved as 0 — but only after being seen as blank.
+    const blanks: string[] = [];
+    const cell = (key: string, label: string) => {
+      const v = d[key];
+      if (v === undefined || v === "") {
+        blanks.push(label);
+        return `  • ${label}: —`;
+      }
+      return `  • ${label}: ${qty(Number(v) || 0)}`;
+    };
+
+    const prod = PRODUCTION_PRODUCTS.map((c) => cell(`${PROD_PREFIX}${c}`, productLabel(c))).join("\n");
     // Stock lists every product even at zero: "we have none left" is a real and
     // important answer, unlike a product simply not produced that day.
-    const stock = PRODUCTION_PRODUCTS.map((c) => `  • ${productLabel(c)}: ${qty(Number(d[`${STOCK_PREFIX}${c}`]) || 0)}`).join("\n");
+    const stock = PRODUCTION_PRODUCTS.map((c) => cell(`${STOCK_PREFIX}${c}`, productLabel(c))).join("\n");
     const bags = BAG_SIZES.flatMap((size) =>
-      BAG_STOCK[size].map((colour) => `  • ${bagLabel(size, colour)}: ${qty(Number(d[bagKey(size, colour)]) || 0)}`)
+      BAG_STOCK[size].map((colour) => cell(bagKey(size, colour), bagLabel(size, colour)))
     ).join("\n");
+
     return (
       head +
       `📅 Date: ${esc(d.date)}\n` +
@@ -1200,7 +1154,11 @@ export function assetPreview(state: AssetFlowState): string {
       `🏭 <b>የቀኑ ምርት (ቶን)</b>\n${prod}\n` +
       `  ─────────\n  <b>Total: ${qty(productionTotal(d))}</b>\n\n` +
       `📦 <b>ክምችት (ቶን)</b>\n${stock}\n\n` +
-      `🧺 <b>ቀሪ ከረጢት (ብዛት)</b>\n${bags}\n`
+      `🧺 <b>ቀሪ ከረጢት (ብዛት)</b>\n${bags}\n` +
+      (blanks.length > 0
+        ? `\n⚠️ <b>${blanks.length} መስመር ባዶ ነው</b> — በ0 ይመዘገባል።\n` +
+          `<i>ማስተካከል ከፈለጉ ቅጂውን ሞልተው ድጋሚ ይላኩ።</i>\n`
+        : "")
     );
   }
 
@@ -1255,12 +1213,24 @@ export function assetPreview(state: AssetFlowState): string {
   }
 
   if (state.kind === "base_balance") {
-    const brands = PRODUCT_ORDER.map((c) => `${productLabel(c)}: <b>${qty(Number(d[brandKey(c)]) || 0)}</b> ቶን`);
-    const mats = FINANCE_RAW_MATERIALS.map((m) => `${m}: <b>${qty(Number(d[materialKey(m)]) || 0)}</b> ቶን`);
-    const bags = BAG_KINDS.map(
-      ({ size, colour }) =>
-        `${bagLabel(size, colour)} PP: <b>${qty(Number(d[bagFinanceKey(size, colour)]) || 0)}</b>`
+    // Same rule as the daily production card: a line left blank in the template
+    // is shown as blank, not as a zero somebody might read as a real count.
+    const blanks: string[] = [];
+    const cell = (key: string, label: string, unit = "") => {
+      const v = d[key];
+      if (v === undefined || v === "") {
+        blanks.push(label);
+        return `${label}: —`;
+      }
+      return `${label}: <b>${qty(Number(v) || 0)}</b>${unit}`;
+    };
+
+    const brands = PRODUCT_ORDER.map((c) => cell(brandKey(c), productLabel(c), " ቶን"));
+    const mats = FINANCE_RAW_MATERIALS.map((m) => cell(materialKey(m), m, " ቶን"));
+    const bags = BAG_KINDS.map(({ size, colour }) =>
+      cell(bagFinanceKey(size, colour), `${bagLabel(size, colour)} PP`)
     );
+
     return [
       `📊 <b>የ${nextMonthOf(d)} የመነሻ ሚዛን</b>`,
       "",
@@ -1272,6 +1242,9 @@ export function assetPreview(state: AssetFlowState): string {
       "",
       "<b>ከረጢት</b>",
       ...bags,
+      ...(blanks.length > 0
+        ? ["", `⚠️ <b>${blanks.length} መስመር ባዶ ነው</b> — በ0 ይመዘገባል።`, "<i>ቅጂውን ሞልተው ድጋሚ መላክ ይችላሉ።</i>"]
+        : []),
     ].join("\n");
   }
 

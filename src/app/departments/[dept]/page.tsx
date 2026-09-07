@@ -15,6 +15,7 @@ import FinancePanels from "@/components/panels/FinancePanels";
 import VoucherPanels from "@/components/panels/VoucherPanels";
 import ToolRequestsPanel from "@/components/panels/ToolRequestsPanel";
 import PpBagDamagePanel from "@/components/panels/PpBagDamagePanel";
+import PpBagUsagePanel from "@/components/panels/PpBagUsagePanel";
 import SalesReceiptsPanel from "@/components/panels/SalesReceiptsPanel";
 
 /**
@@ -38,6 +39,10 @@ const PANELS: Record<DepartmentKey, ComponentType[]> = {
     // because the stock check is the question the rest of the tab answers
     // pieces of.
     VoucherPanels,
+    // Consumption sits directly under the vouchers on purpose: goods issued and
+    // bags actually used are the two halves of the same question, and the whole
+    // reason both exist is to be read against each other.
+    PpBagUsagePanel,
     PpBagDamagePanel,
     ToolRequestsPanel,
     BagControlPanel,

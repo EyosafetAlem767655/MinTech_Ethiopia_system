@@ -57,10 +57,30 @@ export function smsGatewayConfigured(): boolean {
  * 404 that looks like an outage.
  */
 export function smsEndpoint(): string {
-  const raw = (envValue("SERVER_URL") || DEFAULT_BASE).trim().replace(/\/+$/, "");
-  if (/\/messages\/send$/.test(raw)) return raw;
-  if (/\/v1$/.test(raw)) return `${raw}/messages/send`;
-  return `${raw}/v1/messages/send`;
+  const raw = (envValue("SERVER_URL") || "").trim();
+
+  // The FIRST url-looking run of characters, not the whole value.
+  //
+  // A variable pasted out of a document arrives as its markdown link —
+  // `https://api.httpsms.com](https://api.httpsms.com` — and concatenating that
+  // produced "Failed to parse URL", which is a message about our string, not
+  // about their API. Stopping at ) ] > " ' or whitespace takes the address out
+  // of every wrapper it tends to arrive in.
+  const found = raw.match(/https?:\/\/[^\s)\]>"'`]+/);
+  let base = (found?.[0] || DEFAULT_BASE).replace(/\/+$/, "");
+
+  // Anything still unparseable falls back rather than failing every send. A
+  // mistyped base is a configuration slip; silently not chasing anybody for
+  // weeks because of it is a much worse outcome than using the default.
+  try {
+    new URL(base);
+  } catch {
+    base = DEFAULT_BASE;
+  }
+
+  if (/\/messages\/send$/.test(base)) return base;
+  if (/\/v1$/.test(base)) return `${base}/messages/send`;
+  return `${base}/v1/messages/send`;
 }
 
 /**

@@ -31,9 +31,12 @@ export const USD_RATE_KEY = "usdRate";
 
 export type FinanceSection = "brands" | "materials" | "bags";
 
-const H_BRANDS = "--- ምርቶች (ቶን) ---";
-const H_MATERIALS = "--- ጥሬ ዕቃ (ቶን) ---";
-const H_BAGS = "--- ከረጢት (ብዛት) ---";
+// English, matching the daily production template. The opening balance is filled
+// in the same way — copy the block back with numbers in it — and one wording
+// across both is one thing to learn rather than two.
+const H_BRANDS = "--- Products(Ton) ---";
+const H_MATERIALS = "--- Raw material(Ton) ---";
+const H_BAGS = "--- PP Bag count ---";
 
 const H_BRANDS_PRICE = "--- ምርቶች (ብር/ቶን) ---";
 const H_MATERIALS_PRICE = "--- ጥሬ ዕቃ (ብር/ቶን) ---";
@@ -119,18 +122,22 @@ function buildLookup() {
 const LOOKUP = buildLookup();
 
 function detectSection(line: string): FinanceSection | undefined {
+  // A line carrying a value is data, never a header — which is what lets the
+  // keyword match below look anywhere in the line rather than only at its start.
+  // "---PP Bag count ---" buries its keyword behind the dashes, and anchoring
+  // missed it.
+  if (/[=:]/.test(line)) return undefined;
+
   const n = norm(line);
-  // Matched on the Amharic word alone, so the dashes, emoji or bracketed unit
-  // can be reworded without invalidating every template already in circulation.
-  if (n.includes(norm("ከረጢት"))) return "bags";
-  if (n.includes(norm("ጥሬ"))) return "materials";
-  // Both spellings: the header reads "ምርቶች" (plural) but the singular "ምርት" is
-  // what someone retyping the template by hand tends to write, and neither
-  // contains the other as a substring.
+  // Bags first: the header names a bag AND a count, and "count" is not a word
+  // any other section uses.
+  if (n.includes(norm("ከረጢት")) || n.includes("bag")) return "bags";
+  if (n.includes(norm("ጥሬ")) || n.includes("raw") || n.includes("material")) return "materials";
+  // Both Amharic spellings: the header reads "ምርቶች" (plural) but the singular
+  // "ምርት" is what someone retyping the template by hand tends to write, and
+  // neither contains the other as a substring.
   if (n.includes(norm("ምርቶ")) || n.includes(norm("ምርት"))) return "brands";
-  if (/^-*\s*(brands?|products?)/i.test(line.trim())) return "brands";
-  if (/^-*\s*(raw|materials?)/i.test(line.trim())) return "materials";
-  if (/^-*\s*bags?/i.test(line.trim())) return "bags";
+  if (n.includes("brand") || n.includes("product")) return "brands";
   return undefined;
 }
 

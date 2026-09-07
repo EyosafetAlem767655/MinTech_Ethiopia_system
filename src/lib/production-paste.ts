@@ -34,9 +34,13 @@ export function bagKey(size: BagSize, colour: string): string {
   return `${BAG_PREFIX}${size}:${colour}`;
 }
 
-const H_PRODUCTION = "--- ምርት (ቶን) ---";
-const H_STOCK = "--- ክምችት (ቶን) ---";
-const H_BAGS = "--- ከረጢት (ብዛት) ---";
+// Deliberately English, and deliberately the wording the plant already uses on
+// its own sheet. This block is filled in by copying it back with numbers in it,
+// and a header nobody recognises is a header people delete — which would leave
+// the parser unable to tell produced tonnage from stock tonnage.
+const H_PRODUCTION = "--- Daily production(Ton) ---";
+const H_STOCK = "--- Stock ---";
+const H_BAGS = "--- PP Bag count ---";
 
 /**
  * The blank template the bot sends.
@@ -99,15 +103,19 @@ function buildLookup(): {
 const LOOKUP = buildLookup();
 
 function detectSection(line: string): Section | undefined {
+  // A line carrying a value is data, never a header. Checking this first is what
+  // lets the keyword match below look ANYWHERE in the line instead of only at
+  // the start — "--- Daily production(Ton) ---" and "---PP Bag count ---" both
+  // bury their keyword behind something else, and anchoring to the start missed
+  // both of them.
+  if (/[=:]/.test(line)) return undefined;
+
   const n = norm(line);
-  // Matched on the Amharic word alone so the surrounding dashes, emoji or
-  // bracketed unit can be reworded without breaking every saved template.
-  if (n.includes(norm("ምርት"))) return "production";
-  if (n.includes(norm("ክምችት"))) return "stock";
-  if (n.includes(norm("ከረጢት"))) return "bags";
-  if (/^-*\s*production/i.test(line.trim())) return "production";
-  if (/^-*\s*stock/i.test(line.trim())) return "stock";
-  if (/^-*\s*bags?/i.test(line.trim())) return "bags";
+  // Bags first: "PP Bag count" would otherwise never be reached, and no other
+  // section name contains the word.
+  if (n.includes(norm("ከረጢት")) || n.includes("bag")) return "bags";
+  if (n.includes(norm("ክምችት")) || n.includes("stock")) return "stock";
+  if (n.includes(norm("ምርት")) || n.includes("production")) return "production";
   return undefined;
 }
 
@@ -166,7 +174,17 @@ export function parseProductionPaste(text: string): ParsedPaste {
     const nk = norm(key);
 
     if (nk === norm("FGR") || nk === norm("FGR No")) {
-      values[FGR_KEY] = value;
+      // Checked here rather than by a step validator. The guided path that used
+      // to enforce the 4-digit shape is gone, so this parser is the only thing
+      // between a mistyped FGR and a saved report — and a wrong FGR is what
+      // makes a day's tonnage impossible to trace back to its batch.
+      // One or two four-digit numbers. Not parsed as a plain number: stripping
+      // the comma would turn "1234, 1235" into 12341235 with nothing to show
+      // anything had gone wrong.
+      const parts = value.split(/[,/;]+/).map((p) => p.trim()).filter(Boolean);
+      const valid = parts.length >= 1 && parts.length <= 2 && parts.every((p) => /^\d{4}$/.test(p));
+      if (valid) values[FGR_KEY] = parts.join(", ");
+      else invalid.push(line);
       continue;
     }
 
