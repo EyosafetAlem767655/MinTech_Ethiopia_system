@@ -446,6 +446,17 @@ function MonthlyTab() {
 
 /* ─────────────────────────────── 3. WHT holders ───────────────────────────── */
 
+/** The gateway's live settings. The key itself is never sent — only its shape. */
+interface SmsDiagnostics {
+  configured: boolean;
+  endpoint: string;
+  keyLength: number;
+  keyTail: string | null;
+  keyWasWrapped: boolean;
+  sender: string | null;
+  senderRaw: string;
+}
+
 interface Holder {
   _id: string;
   company: string;
@@ -475,6 +486,10 @@ function WhtTab() {
   const [notice, setNotice] = useState("");
   const [form, setForm] = useState({ company: "", phone: "", description: "" });
   const [saving, setSaving] = useState(false);
+  /** What the gateway will actually use — key shape, sender, endpoint. */
+  const [sms, setSms] = useState<SmsDiagnostics | null>(null);
+  const [testTo, setTestTo] = useState("");
+  const [testing, setTesting] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -482,10 +497,31 @@ function WhtTab() {
       const d = res.ok ? await res.json() : { rows: [] };
       setRows(Array.isArray(d.rows) ? d.rows : []);
       setSmsConfigured(d.smsConfigured !== false);
+      setSms(d.sms ?? null);
     } catch {
       setRows([]);
     }
   }, []);
+
+  /** One test message, so the gateway is proved before a customer needs it. */
+  const testSms = async () => {
+    setTesting(true);
+    setNotice("");
+    setError("");
+    try {
+      const res = await fetch("/api/finance/wht", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ to: testTo }),
+      });
+      const d = await res.json().catch(() => ({}));
+      setSms(d.sms ?? null);
+      if (d.ok) setNotice(`Queued to ${d.to}. The handset sends it when it next has internet.`);
+      else setError(d.error || "The test message did not go.");
+    } finally {
+      setTesting(false);
+    }
+  };
 
   useEffect(() => {
     load();
@@ -559,6 +595,49 @@ function WhtTab() {
           The SMS gateway is not configured, so nobody is being chased. Set HTTPSMS_API_KEY and
           PHONE_NUMBER on Vercel (PHONE_NUMBER must be the number registered in the httpSMS app).
         </p>
+      )}
+
+      {/* The gateway's own settings, and a way to prove them. httpSMS answers a
+          wrong key with a message that reads as though the header were missing,
+          so the only way to tell a wrong key from a missing one is to see what
+          is actually being sent. */}
+      {sms && (
+        <div className="card space-y-2 p-3">
+          <p className="text-[10px] font-bold uppercase tracking-widest text-stone-400">SMS gateway</p>
+          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px]">
+            <dt className="text-stone-400">API key</dt>
+            <dd className={`tabular-nums ${sms.keyLength > 0 ? "text-stone-700" : "text-red-600 font-bold"}`}>
+              {sms.keyLength > 0 ? `${sms.keyLength} chars · ends “${sms.keyTail}”` : "not set"}
+              {sms.keyWasWrapped && (
+                <span className="ml-1 text-amber-700">· quotes/prefix stripped</span>
+              )}
+            </dd>
+            <dt className="text-stone-400">Sender</dt>
+            <dd className={sms.sender ? "text-stone-700" : "text-red-600 font-bold"}>
+              {sms.sender || `unusable: ${sms.senderRaw || "not set"}`}
+            </dd>
+            <dt className="text-stone-400">Endpoint</dt>
+            <dd className="break-all text-stone-500">{sms.endpoint}</dd>
+          </dl>
+          <div className="flex gap-2">
+            <input
+              value={testTo}
+              onChange={(e) => setTestTo(e.target.value)}
+              placeholder={sms.sender ? `Test number (default ${sms.sender})` : "Test number"}
+              className="min-w-0 flex-1 rounded-lg border border-stone-200 px-2 py-1.5 text-xs"
+            />
+            <button
+              onClick={testSms}
+              disabled={testing}
+              className="shrink-0 rounded-lg bg-clay-700 px-3 py-1.5 text-xs font-bold text-white disabled:bg-stone-200 disabled:text-stone-400"
+            >
+              {testing ? "…" : "Send test"}
+            </button>
+          </div>
+          <p className="text-[10px] text-stone-400">
+            A test never claims a customer&apos;s daily slot, so it cannot stop a real chase going out.
+          </p>
+        </div>
       )}
       {error && <p className="card border-l-4 border-l-red-500 p-3 text-xs font-bold text-red-700">{error}</p>}
       {notice && (

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import sql from "@/lib/sql";
-import { normalisePhone, smsGatewayConfigured } from "@/lib/sms";
+import { normalisePhone, sendSms, smsDiagnostics, smsGatewayConfigured, smsSender } from "@/lib/sms";
 import { chaseHolder } from "@/lib/wht-sms";
 
 export const dynamic = "force-dynamic";
@@ -23,14 +23,42 @@ export async function GET() {
     `;
     return NextResponse.json({
       smsConfigured: smsGatewayConfigured(),
+      // What the gateway will actually use. Shown on the panel so a wrong or
+      // half-pasted key is visible without registering a customer to find out.
+      sms: smsDiagnostics(),
       rows: rows.map((r) => ({ ...r, smsSent: Number(r.smsSent) || 0 })),
     });
   } catch (e) {
     if ((e as { code?: string })?.code === "42P01") {
-      return NextResponse.json({ smsConfigured: smsGatewayConfigured(), rows: [] });
+      return NextResponse.json({ smsConfigured: smsGatewayConfigured(), sms: smsDiagnostics(), rows: [] });
     }
     throw e;
   }
+}
+
+/**
+ * PUT — send one test message, to prove the gateway works before a customer
+ * depends on it.
+ *
+ * Deliberately NOT through `chaseHolder`: that claims a holder's day, and a test
+ * must never be the reason a real customer goes unchased.
+ */
+export async function PUT(req: NextRequest) {
+  const body = (await req.json().catch(() => ({}))) as { to?: string };
+  const to = normalisePhone(String(body.to || "")) || smsSender();
+  if (!to) {
+    return NextResponse.json({ error: "Enter a number to test with, e.g. 0912345678." }, { status: 400 });
+  }
+
+  const res = await sendSms(to, "MinTech Ethiopia: SMS gateway test. No action needed.");
+  return NextResponse.json({
+    ok: res.ok,
+    to,
+    status: res.status ?? null,
+    error: res.error ?? null,
+    messageId: res.messageId ?? null,
+    sms: smsDiagnostics(),
+  });
 }
 
 /** POST — register a holder from the dashboard, the same as the bot flow does. */

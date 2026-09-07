@@ -45,8 +45,69 @@ export interface SmsResult {
   messageId?: string;
 }
 
+/**
+ * The API key, with whatever it was pasted inside taken off.
+ *
+ * `SERVER_URL` arrived here as a markdown link, which is a good indication of
+ * how these values are being copied. A key wrapped in quotes or copied out of
+ * the cURL example on the settings page reaches the header as
+ * `"abc…"` or `x-api-key: abc…`, and httpSMS answers both with the same 401 —
+ * "make sure your API key is set in the [x-api-key] header" — which reads like
+ * the header is missing rather than like the value is wrong.
+ *
+ * Stripped rather than rejected: the intent is unambiguous in every one of these
+ * shapes, and refusing to send over a stray quote helps nobody.
+ */
+export function smsApiKey(): string {
+  let key = envValue("HTTPSMS_API_KEY");
+  // A whole header line, or a curl-style one.
+  key = key.replace(/^\s*(?:-H\s*)?['"`]?\s*x-api-key\s*:\s*/i, "");
+  // Bearer, in case it was assumed to work like one.
+  key = key.replace(/^\s*Bearer\s+/i, "");
+  // Surrounding quotes, backticks or angle brackets.
+  key = key.trim().replace(/^[<'"`]+/, "").replace(/[>'"`]+$/, "");
+  return key.trim();
+}
+
+/** The sender number, normalised. Null when it is unset or unusable. */
+export function smsSender(): string | null {
+  return normalisePhone(envValue("PHONE_NUMBER"));
+}
+
 export function smsGatewayConfigured(): boolean {
-  return Boolean(envValue("HTTPSMS_API_KEY") && envValue("PHONE_NUMBER"));
+  return Boolean(smsApiKey() && envValue("PHONE_NUMBER"));
+}
+
+/**
+ * What the gateway is actually about to use — enough to tell a wrong value from
+ * a missing one, without printing the key.
+ *
+ * "check HTTPSMS_API_KEY" is not an actionable message: it is what the person
+ * who set the key has already checked. "the key is 12 characters and ends d4f1"
+ * is, because a truncated or wrapped paste is visible at a glance.
+ */
+export function smsDiagnostics(): {
+  configured: boolean;
+  endpoint: string;
+  keyLength: number;
+  keyTail: string | null;
+  keyWasWrapped: boolean;
+  sender: string | null;
+  senderRaw: string;
+} {
+  const raw = envValue("HTTPSMS_API_KEY");
+  const key = smsApiKey();
+  return {
+    configured: smsGatewayConfigured(),
+    endpoint: smsEndpoint(),
+    keyLength: key.length,
+    // Last four only. Enough to compare against the httpSMS settings page,
+    // useless to anyone who sees it.
+    keyTail: key ? key.slice(-4) : null,
+    keyWasWrapped: Boolean(raw) && raw !== key,
+    sender: smsSender(),
+    senderRaw: envValue("PHONE_NUMBER"),
+  };
 }
 
 /**
@@ -109,7 +170,7 @@ export function normalisePhone(raw: string): string | null {
  * that the request was accepted.
  */
 export async function sendSms(to: string, message: string): Promise<SmsResult> {
-  const apiKey = envValue("HTTPSMS_API_KEY");
+  const apiKey = smsApiKey();
   const fromRaw = envValue("PHONE_NUMBER");
   if (!apiKey || !fromRaw) {
     return { ok: false, skipped: true, error: "HTTPSMS_API_KEY and PHONE_NUMBER are not set" };
@@ -148,9 +209,17 @@ export async function sendSms(to: string, message: string): Promise<SmsResult> {
     // 401 is the wrong API key, 422 is almost always a `from` that is not the
     // number registered on the handset. Both are worth saying rather than
     // leaving as a bare status code.
+    //
+    // The 401 hint carries the key's SHAPE, not the key. httpSMS answers a
+    // wrong key with "make sure your API key is set in the [x-api-key] header",
+    // which reads as though the header were missing — and "check
+    // HTTPSMS_API_KEY" is not actionable advice for someone who has already
+    // checked it. The length and last four characters make a truncated or
+    // half-pasted value obvious at a glance.
     const hint =
-      res.status === 401
-        ? " (check HTTPSMS_API_KEY)"
+      res.status === 401 || res.status === 403
+        ? ` — the key sent was ${apiKey.length} characters ending "${apiKey.slice(-4)}". ` +
+          `Compare it with the one at httpsms.com/settings; a truncated or partially pasted key gives exactly this error.`
         : res.status === 422
         ? " (is PHONE_NUMBER the number registered in the httpSMS app?)"
         : "";
