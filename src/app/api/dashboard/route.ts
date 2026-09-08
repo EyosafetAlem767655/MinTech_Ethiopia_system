@@ -60,16 +60,19 @@ export async function GET() {
     fetchLatestBrief(),
     sql<{ n: string }[]>`select count(*) as n from damage_claims where status in ('pending','cosign_required')`,
     damageTripwires(),
-    // Guarded: the sales_receipts table may not be migrated yet — don't let a
+    // Guarded: daily_sales_summaries may not be migrated yet — don't let a
     // missing table break the whole brief.
-    sql<{ n: string; grand: string; net: string; wht: string }[]>`
+    //
+    // Withholding is gone from this line, not zeroed by accident: the report is
+    // now the till's payment summary, which has no withholding column. What is
+    // outstanding in WHT receipts is its own panel, fed by wht_holders.
+    sql<{ n: string; grand: string; net: string }[]>`
       select count(*) as n,
-             coalesce(sum(grand_total), 0) as grand,
-             coalesce(sum(net_pay), 0) as net,
-             coalesce(sum(withhold), 0) as wht
-        from sales_receipts
-       where status = 'submitted' and created_at >= ${eatMidnight}
-    `.catch(() => [{ n: "0", grand: "0", net: "0", wht: "0" }]),
+             coalesce(sum(total_payment), 0) as grand,
+             coalesce(sum(net_total), 0) as net
+        from daily_sales_summaries
+       where created_at >= ${eatMidnight}
+    `.catch(() => [{ n: "0", grand: "0", net: "0" }]),
   ]);
   const pendingClaims = Number(pendingClaimsRows[0]?.n) || 0;
   const s = salesTodayRows[0];
@@ -77,7 +80,7 @@ export async function GET() {
     count: Number(s?.n) || 0,
     grandTotal: Number(s?.grand) || 0,
     netPayable: Number(s?.net) || 0,
-    withholding: Number(s?.wht) || 0,
+    withholding: 0,
   };
 
   return NextResponse.json({

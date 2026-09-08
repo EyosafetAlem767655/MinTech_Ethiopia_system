@@ -142,7 +142,7 @@ export async function deleteFile(id: string): Promise<void> {
 /**
  * Delete uploaded images older than `hours` (default 72) — the raw photos in the
  * bucket, one batch at a time. Only the binary + its stored_files metadata row go;
- * the EXTRACTED data (sales_receipts, daily_reports, …) is untouched, so the
+ * the EXTRACTED data (daily_sales_summaries, daily_reports, …) is untouched, so the
  * numbers/text stay forever and only the heavy image is reclaimed. Returns how
  * many files were removed in this batch (0 = nothing left to purge).
  */

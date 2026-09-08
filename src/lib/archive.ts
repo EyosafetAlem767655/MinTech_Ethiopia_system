@@ -89,7 +89,7 @@ const EXTRA_TABLES: ArchiveTable[] = [
   // The error log and the read jobs are operational history, not reports, but
   // they are the record of what went wrong and are worth keeping in the archive.
   { table: "system_errors", dateColumn: "created_at", sheet: "system_errors" },
-  { table: "sales_scan_jobs", dateColumn: "created_at", sheet: "sales_scan_jobs" },
+  { table: "daily_sales_summaries", dateColumn: "date", sheet: "daily_sales_summaries" },
 ];
 
 /**

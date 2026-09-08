@@ -47,7 +47,7 @@ const READABLE_TABLES = {
   delivery_reports: "date",
   purchase_item_reports: "date",
   pp_bag_damage_reports: "date",
-  sales_receipts: "date",
+  daily_sales_summaries: "date",
   damage_claims: "created_at",
   receipts: "created_at",
   purchase_requests: "created_at",
@@ -370,48 +370,36 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<unk
       const days = Math.min(Number(args.days) || 30, 365);
       const limit = Math.min(Number(args.limit) || 50, 200);
       const since = new Date(Date.now() - days * 86400_000);
-      const customer = args.customer ? String(args.customer) : "";
-      const rows = customer
-        ? await sql`
-            select date, customer_name as "customerName", fs_no as "fsNo", att_no as "attNo",
-                   product_ty as "productTy", qty, unit_price as "unitPrice", sub_total as "subTotal",
-                   vat, grand_total as "grandTotal", withhold, net_pay as "netPay",
-                   deposited_bank as "depositedBank", remark, status, reported_by as "reportedBy",
-                   receipt_check as "receiptCheck"
-              from sales_receipts
-             where date >= ${since} and customer_name ilike '%' || ${customer} || '%'
-             order by date desc limit ${limit}`
-        : await sql`
-            select date, customer_name as "customerName", fs_no as "fsNo", att_no as "attNo",
-                   product_ty as "productTy", qty, unit_price as "unitPrice", sub_total as "subTotal",
-                   vat, grand_total as "grandTotal", withhold, net_pay as "netPay",
-                   deposited_bank as "depositedBank", remark, status, reported_by as "reportedBy",
-                   receipt_check as "receiptCheck"
-              from sales_receipts
-             where date >= ${since}
-             order by date desc limit ${limit}`;
+
+      // One row per DAY, off the till's payment summary. It used to be one row
+      // per transaction with a customer, a product and a withholding figure;
+      // none of those exist any more, so a customer filter here would silently
+      // return nothing rather than say it cannot be answered.
+      const rows = await sql`
+        select date, date_label as "dateLabel",
+               cash_payment as "cash", cheque_payment as "cheque", card_payment as "card",
+               credit_payment as "credit", voucher_payment as "voucher",
+               total_payment as "totalPayment", total_refund as "totalRefund",
+               net_total as "netTotal", reported_by as "reportedBy"
+          from daily_sales_summaries
+         where date >= ${since}
+         order by date desc limit ${limit}`;
 
       // Totals alongside the rows: the row list is capped by `limit`, so a model
       // adding up only what it can see would under-report on a busy month.
-      const [totals] = customer
-        ? await sql<{ n: string; grand: string; net: string; wht: string }[]>`
-            select count(*) as n, coalesce(sum(grand_total),0) as grand,
-                   coalesce(sum(net_pay),0) as net, coalesce(sum(withhold),0) as wht
-              from sales_receipts
-             where date >= ${since} and customer_name ilike '%' || ${customer} || '%'`
-        : await sql<{ n: string; grand: string; net: string; wht: string }[]>`
-            select count(*) as n, coalesce(sum(grand_total),0) as grand,
-                   coalesce(sum(net_pay),0) as net, coalesce(sum(withhold),0) as wht
-              from sales_receipts
-             where date >= ${since}`;
+      const [totals] = await sql<{ n: string; grand: string; net: string; refund: string }[]>`
+        select count(*) as n, coalesce(sum(total_payment),0) as grand,
+               coalesce(sum(net_total),0) as net, coalesce(sum(total_refund),0) as refund
+          from daily_sales_summaries
+         where date >= ${since}`;
 
       return {
         days,
         totals: {
-          reports: Number(totals?.n) || 0,
-          grandTotalEtb: Number(totals?.grand) || 0,
-          netPayableEtb: Number(totals?.net) || 0,
-          withholdingEtb: Number(totals?.wht) || 0,
+          days: Number(totals?.n) || 0,
+          grossPaymentsEtb: Number(totals?.grand) || 0,
+          refundsEtb: Number(totals?.refund) || 0,
+          netEtb: Number(totals?.net) || 0,
         },
         rows,
       };
@@ -612,12 +600,10 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<unk
       if (!isReadableTable(table)) return { error: "unknown collection" };
       const orderBy = READABLE_TABLES[table];
 
-      // Sales receipts keep a customer filter; parameterised ILIKE, so nothing
-      // the model writes reaches the query as syntax.
-      const where =
-        table === "sales_receipts" && args.client
-          ? sql`where customer_name ilike '%' || ${String(args.client)} || '%'`
-          : sql``;
+      // No table keeps a customer filter any more: the sales report became one
+      // row per day off the till's payment summary, and it has no customer
+      // column to filter on.
+      const where = sql``;
 
       const safe = SAFE_COLUMNS[table];
       try {
@@ -685,7 +671,8 @@ export async function companyChat(
         "You can query live company data with the provided tools — production, sales, collections, receivables, " +
         "bag-lot control, damage claims and purchase requests. " +
         "There are TWO distinct sales channels and you must not confuse them: `invoices` (credit sales, billed to " +
-        "a client) and the sales team's daily Sales report (`sales_receipts`, filed on the Telegram bot from " +
+        "a client) and the sales team's daily Sales report (`daily_sales_summaries`, one row per day off the " +
+        "till's payment summary, filed on the Telegram bot from " +
         "scanned receipts) — use get_sales_reports for the latter. If a question just says 'sales', check both " +
         "and say which channel each figure came from. " +
         "Staff file structured reports on the Telegram bot every day and you CAN read all of them: " +

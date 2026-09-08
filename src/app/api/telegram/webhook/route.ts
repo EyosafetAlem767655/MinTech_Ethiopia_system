@@ -9,6 +9,7 @@ import {
   classifyIngestion,
   extractVoucherGemini,
   extractReceiptGemini,
+  extractPaymentSummary,
   verifyRequestLegitimacy,
   type GeminiReceipt,
   type IngestionExtraction,
@@ -40,24 +41,11 @@ import { parseFinancePaste } from "@/lib/finance-paste";
 import { backgroundPurchaseReceiptCheck } from "@/lib/finance-receipts";
 import { backgroundVoucherVerify } from "@/lib/voucher-verify";
 import { logError } from "@/lib/errors";
-import { createScanJob, drainScanJobs } from "@/lib/sales-scan";
 import { runAfter } from "@/lib/after";
+import { PAYMENT_METHODS, paymentKey, refundKey } from "@/lib/daily-sales";
+import { applyFlowEdit, describeFlowChanges, editableFields, renderFieldList } from "@/lib/flow-edit";
 import { dailyHeartbeat } from "@/lib/heartbeat";
-import { loadImage, telegramFileId } from "@/lib/images";
-import { applyReceiptEdit, describeChanges, EDITABLE_FIELDS } from "@/lib/receipt-edit";
-import {
-  firstMissingField,
-  salesReviewText,
-  MAX_SALE_DOCUMENTS,
-  PRODUCT_KEYBOARD,
-  SALES_BTN,
-  SALES_MANUAL_KEYBOARD,
-  SALES_NEXT_KEYBOARD,
-  SALES_PHOTOS_KEYBOARD,
-  SALES_REQUIRED_FIELDS,
-  SALES_REVIEW_KEYBOARD,
-  type SalesRequiredField,
-} from "@/lib/sales-flow";
+import { loadImage, loadImages, telegramFileId } from "@/lib/images";
 import { PRODUCT_ORDER, productLabel } from "@/lib/products";
 import { PP_BAG_PHOTO_KIND, processPpDamageReport, ppVerdictMessage } from "@/lib/pp-bag-damage";
 import {
@@ -99,15 +87,6 @@ import {
 import { insertClaimPhotos, processClaimPhoto } from "@/lib/claims";
 import { ingestOpsReport, isOpsReportText } from "@/lib/ops-report";
 import { spreadsheetToText, isSpreadsheetMime } from "@/lib/spreadsheet";
-import {
-  buildSalesReceiptsWorkbook,
-  compareReceipt,
-  computeReceipt,
-  extractSalesReceipt,
-  type ReceiptCheck,
-  type SalesReceiptDraft,
-  type SalesReceiptRow,
-} from "@/lib/receipt-scan";
 
 export const dynamic = "force-dynamic";
 // The sales read now finishes inside this invocation, after the response has
@@ -126,11 +105,21 @@ export const maxDuration = 300;
  * equality against the button label.
  */
 function normaliseChoice(text: string) {
-  return text
-    .trim()
-    .toLowerCase()
-    .replace(/^[\p{Emoji}\p{Extended_Pictographic}\p{S}\p{P}\p{Default_Ignorable_Code_Point}\s]+/u, "")
-    .trim();
+  return (
+    text
+      .trim()
+      .toLowerCase()
+      // Keycap sequences first ("1️⃣"), since the digit is part of the emoji.
+      .replace(/^(?:[0-9#*]️?⃣\s*)+/u, "")
+      // Then the ordinary leading decoration.
+      //
+      // NOT `\p{Emoji}`: that property matches the ASCII digits 0-9. With it in
+      // the class, "3-EL" and "5-EL" both stripped down to "el" — so tapping one
+      // product on the whiteness picker matched whichever of them came first in
+      // PRODUCT_ORDER, and the reading was filed against the wrong brand.
+      .replace(/^[\p{Extended_Pictographic}\p{S}\p{P}\p{Default_Ignorable_Code_Point}\s]+/u, "")
+      .trim()
+  );
 }
 
 /**
@@ -467,63 +456,6 @@ function parseReportDate(v: unknown): Date {
   return isNaN(d.getTime()) ? new Date() : d;
 }
 
-/**
- * Self-heal the sales_receipts schema (migrations 0008 + 0009 + 0010). If a
- * deployment is running ahead of its migrations the table/columns are missing and
- * every sales submission fails with undefined_table (42P01) / undefined_column
- * (42703). Creating it idempotently here lets the feature work without a manual
- * migration step, matching how the session columns already self-heal.
- */
-let _salesSchemaEnsured = false;
-async function ensureSalesReceiptsSchema(): Promise<void> {
-  if (_salesSchemaEnsured) return;
-  await sql`
-    create table if not exists sales_receipts (
-      id             uuid primary key default gen_random_uuid(),
-      date           timestamptz not null default now(),
-      customer_name  text,
-      fs_no          text,
-      att_no         text,
-      product_ty     text,
-      qty            numeric(14,3),
-      unit_price     numeric(14,2),
-      sub_total      numeric(16,2),
-      vat            numeric(16,2),
-      grand_total    numeric(16,2),
-      withhold       numeric(16,2) default 0,
-      net_pay        numeric(16,2),
-      deposited_bank text,
-      status         text not null default 'processed' check (status in ('processed','submitted')),
-      reported_by    text not null,
-      photo_file_ids uuid[] not null default '{}',
-      created_at     timestamptz not null default now(),
-      updated_at     timestamptz not null default now()
-    )
-  `;
-  await sql`create index if not exists sales_receipts_created_idx on sales_receipts (created_at desc)`.catch(() => {});
-  await sql`alter table sales_receipts add column if not exists remark text`.catch(() => {});
-  await sql`alter table sales_receipts add column if not exists receipt_check jsonb`.catch(() => {});
-  // 0023. Receipts are no longer uploaded, so the reference kept is Telegram's
-  // own file id — text, not a uuid, which is why it cannot share the column
-  // above. Self-healed here because the insert path depends on it existing.
-  await sql`alter table sales_receipts add column if not exists tg_file_ids text[] not null default '{}'`.catch(
-    () => {}
-  );
-  _salesSchemaEnsured = true;
-}
-
-/** Persist a verdict onto the row, self-healing the column if the migration lags. */
-async function saveReceiptCheck(receiptId: string, check: ReceiptCheck): Promise<void> {
-  try {
-    await sql`update sales_receipts set receipt_check = ${jsonb(check)}, updated_at = now() where id = ${receiptId}`;
-  } catch (e) {
-    if ((e as { code?: string })?.code === "42703") {
-      await ensureSalesReceiptsSchema();
-      await sql`update sales_receipts set receipt_check = ${jsonb(check)} where id = ${receiptId}`.catch(() => {});
-    }
-  }
-}
-
 /** Fold an LLM `items` array (e.g. [{product,tons}]) into a { key: number } jsonb map. */
 function itemsToMap(items: unknown, keyField: string, valField: string): Record<string, number> {
   const map: Record<string, number> = {};
@@ -817,84 +749,27 @@ const HR_KIND_KEYBOARD = {
 
 /* ─────────────────────────────────── Route ───────────────────────────────── */
 
-/* ───────────────────────── Sales receipt-scan flow ───────────────────────── */
-
-/**
- * Atomically append one stored-file id to receipt_scan.images and return the
- * resulting list.
- *
- * Doing this in SQL rather than in JS is what makes a media group work: the
- * photos arrive as concurrent updates, so a read-modify-write of the whole
- * session object has every instance overwriting the others' additions.
- */
-async function appendReceiptImage(chatId: string, fileId: string): Promise<string[]> {
-  const rows = await sql<{ images: string[] | null }[]>`
-    update telegram_sessions
-       set receipt_scan = jsonb_set(
-             coalesce(receipt_scan, '{}'::jsonb),
-             '{images}',
-             coalesce(receipt_scan -> 'images', '[]'::jsonb) || ${jsonb([fileId])}
-           )
-     where chat_id = ${chatId}
-   returning receipt_scan -> 'images' as images`;
-  const images = rows[0]?.images;
-  return Array.isArray(images) ? images.map(String) : [fileId];
-}
-
-const RECEIPT_BTN = {
-  done: "✅ ጨርሻለሁ",
-  approve: "✅ አጽድቅ",
-  edit: "✏️ አስተካክል",
-  export: "📊 የዛሬውን Excel",
-  submit: "📤 ወደ ዳሽቦርድ አስገባ",
-  again: "🧾 አዲስ ደረሰኝ",
-} as const;
-
-const NORM_RECEIPT = {
-  done: normaliseChoice(RECEIPT_BTN.done),
-  approve: normaliseChoice(RECEIPT_BTN.approve),
-  edit: normaliseChoice(RECEIPT_BTN.edit),
-  export: normaliseChoice(RECEIPT_BTN.export),
-  submit: normaliseChoice(RECEIPT_BTN.submit),
-  again: normaliseChoice(RECEIPT_BTN.again),
-};
-
-const money = (n: number) => Math.round(Number(n) || 0).toLocaleString();
-
-/* ──────────────────────── The day's sales report ────────────────────────────
- *
- * One flow. The guided field-by-field entry and the separate receipt scanner
- * both retired into it: they captured the same row two ways, and a salesperson
- * had to know which button meant which before they could start.
- */
-
-const SALES_DOCS_PROMPT =
-  "📄 የዚህን ሽያጭ ሰነዶች ይላኩ — ዋናው ደረሰኝ፣ የWHT ደረሰኝ፣ የባንክ ደረሰኝ።\n" +
-  "<i>ሁሉም አንድ ሽያጭ ናቸው — በአንድ ረድፍ ይመዘገባሉ።</i>\n" +
-  'ከጨረሱ "✅ ጨርሻለሁ" ይጫኑ።';
-
-const NORM_SALES = {
-  photosDone: normaliseChoice(SALES_BTN.photosDone),
-  approve: normaliseChoice(SALES_BTN.approve),
-  edit: normaliseChoice(SALES_BTN.edit),
-  anotherSale: normaliseChoice(SALES_BTN.anotherSale),
-  finishDay: normaliseChoice(SALES_BTN.finishDay),
-  manual: normaliseChoice(SALES_BTN.manual),
-};
-
-/** Ask for one column the read could not fill. */
-async function askSalesField(chatId: string, field: SalesRequiredField): Promise<void> {
-  const spec = SALES_REQUIRED_FIELDS.find((f) => f.field === field);
-  await sendMessage(chatId, spec?.prompt ?? field, {
-    reply_markup: field === "productTy" ? PRODUCT_KEYBOARD : CHANGE_CANCEL_KEYBOARD,
-  });
-}
-
-
 /* ────────────────────── Guided asset-report flows ──────────────────────────
  * Raw material intake, finished-goods delivery and tool purchase requests. The
  * step tables live in src/lib/asset-flows.ts; only the dispatch is here.
  */
+
+/**
+ * The two buttons on every review card.
+ *
+ * Approve is the end of a flow; edit is the way back into it. Edit used to exist
+ * only on the sales receipt, which is why one wrong digit on a voucher meant
+ * cancelling and retyping the whole thing.
+ */
+const RECEIPT_BTN = {
+  approve: "✅ አጽድቅ",
+  edit: "✏️ አስተካክል",
+} as const;
+
+const NORM_RECEIPT = {
+  approve: normaliseChoice(RECEIPT_BTN.approve),
+  edit: normaliseChoice(RECEIPT_BTN.edit),
+};
 
 const ASSET_FLOW_BY_CAP: Record<string, AssetFlowKind | undefined> = {
   raw_material_received: "raw_material",
@@ -909,6 +784,7 @@ const ASSET_FLOW_BY_CAP: Record<string, AssetFlowKind | undefined> = {
   grv: "grv",
   price_list: "price_list",
   wht_holder: "wht_holder",
+  sales_report: "daily_sales",
 };
 
 /**
@@ -950,7 +826,14 @@ async function captureFlowPhoto(msg: any, kind: AssetFlowKind, fallbackKind?: st
 }
 
 const assetReviewKeyboard = {
-  keyboard: [[{ text: RECEIPT_BTN.approve }], [{ text: NAV_BUTTONS.changeReport }, { text: NAV_BUTTONS.cancel }]],
+  keyboard: [
+    [{ text: RECEIPT_BTN.approve }],
+    // Every flow can be corrected before it is submitted, not just the sales
+    // report. One wrong digit on a voucher used to mean cancelling and retyping
+    // the whole thing.
+    [{ text: RECEIPT_BTN.edit }],
+    [{ text: NAV_BUTTONS.changeReport }, { text: NAV_BUTTONS.cancel }],
+  ],
   resize_keyboard: true,
   one_time_keyboard: false,
 };
@@ -1001,26 +884,6 @@ async function handleCalendarCallback(
   }
 
   const session = await loadSession(chatId, userName);
-
-  /* The sales report picks its date the same way, but has no asset flow behind
-     it — the date belongs to the whole session, not to one step. */
-  if (session.state === "sales_date") {
-    if (cal.month) {
-      await answerCallbackQuery(callbackId, "");
-      await sendMessage(chatId, "📅 ቀኑን ይምረጡ።", {
-        reply_markup: buildCalendar("sales_report", cal.month),
-      });
-      return;
-    }
-    session.state = "sales_docs";
-    session.receiptScan = { saleDate: cal.date!, images: [] };
-    await saveSession(session);
-    await answerCallbackQuery(callbackId, `📅 ${cal.date}`);
-    await sendMessage(chatId, `📅 <b>${cal.date}</b>\n\n${SALES_DOCS_PROMPT}`, {
-      reply_markup: SALES_PHOTOS_KEYBOARD,
-    });
-    return;
-  }
 
   const state = session.assetFlow as AssetFlowState | undefined;
   if (!state || session.state !== "asset_entry") {
@@ -1169,42 +1032,85 @@ async function extractVoucherIntoDraft(
   await askAssetStep(chatId, state);
 }
 
+/**
+ * Read the day's Payment Summary off its photograph and fill the draft.
+ *
+ * Ten figures, and then straight to the review card — not to ten questions. A
+ * read that got nine of them right should cost one correction, not ten answers,
+ * and the generic editor is what makes that true.
+ *
+ * A failed read is not an error the reporter has to deal with: the flow simply
+ * asks for the ten figures by hand instead, which is what the steps are for.
+ */
+async function extractSummaryIntoDraft(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  session: any,
+  chatId: string,
+  state: AssetFlowState
+): Promise<void> {
+  await sendMessage(chatId, "🔎 ደረሰኙን እያነበብኩ ነው…");
+
+  const images = await loadImages((state.photoFileIds || []).slice(0, 2));
+  const read = images.length > 0 ? await extractPaymentSummary(images) : null;
+
+  if (!read || !read.ok) {
+    const reason = read && !read.ok ? read.error : "ፎቶው መነበብ አልቻለም";
+    state.extraction = { checked: false, confidence: 0, notes: "", unmatched: [], filled: [], error: reason };
+    await logError({
+      source: "daily-sales",
+      kind: "payment_summary_read_failed",
+      message: reason,
+      chatId,
+    });
+    state.step = firstUnanswered(state.kind, state.draft);
+    session.assetFlow = { ...state };
+    await persist(session);
+    await sendMessage(chatId, `⚠️ ደረሰኙን ማንበብ አልተቻለም፦ ${escapeHtml(reason)}\n<i>ቁጥሮቹን በጥያቄ እንሞላቸዋለን።</i>`);
+    await askAssetStep(chatId, state);
+    return;
+  }
+
+  const filled: string[] = [];
+  for (const m of PAYMENT_METHODS) {
+    const row = read.data.methods[m];
+    if (!row) continue;
+    // Written even when zero: a method printed as *0.00 is a real reading, and
+    // leaving it blank would send the reporter a question the receipt already
+    // answered.
+    state.draft[paymentKey(m)] = row.payment;
+    state.draft[refundKey(m)] = row.refund;
+    filled.push(paymentKey(m), refundKey(m));
+  }
+  // Kept apart from the computed total, so a disagreement stays visible rather
+  // than being resolved in favour of whichever number was read last.
+  if (read.data.printedTotal) state.draft.printedTotal = read.data.printedTotal;
+
+  state.extraction = {
+    checked: true,
+    confidence: read.data.confidence,
+    notes: read.data.notes,
+    unmatched: [],
+    filled,
+  };
+
+  state.step = firstUnanswered(state.kind, state.draft);
+  session.assetFlow = { ...state };
+  await persist(session);
+
+  await sendMessage(
+    chatId,
+    `✅ ደረሰኙ ተነብቧል (እርግጠኝነት ${read.data.confidence}%)።` +
+      (read.data.notes ? `\n<i>${escapeHtml(read.data.notes)}</i>` : "")
+  );
+  await askAssetStep(chatId, state);
+}
+
 /** Advance past the step just answered and ask the next one. */
 async function advanceAsset(session: any, chatId: string, state: AssetFlowState): Promise<void> {
   state.step = nextStep(state.kind, state.step, state.draft);
   session.assetFlow = { ...state };
   await persist(session);
   await askAssetStep(chatId, state);
-}
-
-/** Short receipt-verdict line for the preview: legibility score + cross-check. */
-function checkLine(c?: ReceiptCheck | null): string {
-  if (!c) return "";
-  // "Could not check" is its own outcome — never presented as a problem with
-  // the receipt, only as a check that did not run.
-  if (!c.checked) return "⏳ ማጣራት አልተሳካም — በእጅ ይጣራል\n";
-
-  const label = c.score >= 75 ? "ግልጽ" : c.score >= 50 ? "ማጣራት ይፈልጋል" : "አጠራጣሪ";
-  const icon = c.score >= 75 ? "🔒" : c.score >= 50 ? "🔎" : "⚠️";
-  let line = `${icon} ንባብ ${c.score}% · ${label}\n`;
-  if (c.mismatches.length > 0) line += `⚠️ ልዩነት: ${c.mismatches.join("; ")}\n`;
-  return line;
-}
-/** Start of today in EAT as a Date, for "today's receipts" queries. */
-function eatDayStartDate(): Date {
-  return new Date(`${eatDateKey()}T00:00:00+03:00`);
-}
-
-async function todaysSalesReceipts(reportedBy: string): Promise<SalesReceiptRow[]> {
-  const rows = await sql`
-    select date, customer_name as "customerName", fs_no as "fsNo", att_no as "attNo",
-           product_ty as "productTy", qty, unit_price as "unitPrice", sub_total as "subTotal",
-           vat, grand_total as "grandTotal", withhold, net_pay as "netPay",
-           deposited_bank as "depositedBank", remark
-      from sales_receipts
-     where reported_by = ${reportedBy} and created_at >= ${eatDayStartDate()}
-     order by created_at asc`;
-  return rows as unknown as SalesReceiptRow[];
 }
 
 function isMongoAccessError(e: unknown) {
@@ -1524,6 +1430,35 @@ export async function POST(req: NextRequest) {
       state.draft = state.draft || {};
 
       if (state.step === "review") {
+        // Correcting anything, before any of it is saved. Every answered field
+        // is offered, including the voucher line items the review card only
+        // summarises — a curated list of "the editable ones" is the thing this
+        // replaces.
+        if (normText === NORM_RECEIPT.edit) {
+          const fields = editableFields(state.kind, state.draft);
+          if (fields.length === 0) {
+            await sendMessage(chatId, "ℹ️ ገና የተሞላ መስክ የለም።", { reply_markup: assetReviewKeyboard });
+            return NextResponse.json({ ok: true });
+          }
+          state.step = "edit";
+          session.assetFlow = { ...state };
+          await persist(session);
+          await sendMessage(chatId, "✏️ የትኛውን ማስተካከል ይፈልጋሉ?");
+          // Several messages when the list is long: a GRV with eight items runs
+          // past Telegram's limit, and a truncated list would hide exactly the
+          // late line items this exists to expose.
+          for (const chunk of renderFieldList(fields)) {
+            await sendMessage(chatId, chunk);
+          }
+          await sendMessage(
+            chatId,
+            `<i>የመስኩን ቁጥር ይጠቀሙ — ለምሳሌ "3 = 45"። በስምም ይቻላል ("Supplier = ABC")፣ ` +
+              `ወይም በተራ ቋንቋ ("ዕቃ 2 ብዛት 12")።</i>`,
+            { reply_markup: CHANGE_CANCEL_KEYBOARD }
+          );
+          return NextResponse.json({ ok: true });
+        }
+
         if (normText === NORM_RECEIPT.approve) {
           let saved;
           try {
@@ -1627,6 +1562,29 @@ export async function POST(req: NextRequest) {
         }
       }
 
+      /* ── Applying a correction to any field ── */
+      if (state.step === "edit") {
+        if (!text) {
+          await sendMessage(chatId, "✏️ ማስተካከያውን በጽሑፍ ይላኩ — ለምሳሌ \"3 = 45\"።", {
+            reply_markup: CHANGE_CANCEL_KEYBOARD,
+          });
+          return NextResponse.json({ ok: true });
+        }
+
+        const result = await applyFlowEdit(state.kind, state.draft, text);
+        state.draft = result.draft;
+        state.step = "review";
+        session.assetFlow = { ...state };
+        await persist(session);
+
+        // Always say what happened. An edit that silently changed nothing is
+        // indistinguishable from one that worked, and that silence is the exact
+        // bug this pattern was written to kill on the sales flow.
+        await sendMessage(chatId, describeFlowChanges(result));
+        await askAssetStep(chatId, state);
+        return NextResponse.json({ ok: true });
+      }
+
       const step = findStep(state.kind, state.step);
       if (!step) {
         // Scratch state referencing a step that no longer exists (a deploy landed
@@ -1716,6 +1674,14 @@ export async function POST(req: NextRequest) {
           // in is standing at the shelf and already knows what they took.
           if (state.kind === "grv" && collected.length > 0) {
             await extractVoucherIntoDraft(session, chatId, state);
+            return NextResponse.json({ ok: true });
+          }
+          // The day's sales, read the same way: the photograph IS the report,
+          // and the ten figures come straight off it. Ten numbers on one image
+          // is a small enough read to do inline, which is why the per-sale job
+          // queue could be removed along with the per-sale flow.
+          if (state.kind === "daily_sales" && collected.length > 0) {
+            await extractSummaryIntoDraft(session, chatId, state);
             return NextResponse.json({ ok: true });
           }
           await advanceAsset(session, chatId, state);
@@ -1844,345 +1810,6 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true });
     }
 
-    /* ══════════════════════════ Sales: the day's report ═══════════════════════
-     *
-     * One flow, replacing the two that overlapped (guided field-by-field entry
-     * and receipt scanning). A day is one session:
-     *
-     *   pick the date → for each sale: send its documents → read in the
-     *   background → fill what the read missed → review → approve → next sale
-     *
-     * The documents of one sale are its main cash-sale receipt, its 3% WHT
-     * receipt and sometimes a bank slip. They describe ONE sale between them and
-     * are merged into ONE row — which is why the photo step collects several and
-     * still produces a single draft.
-     */
-
-    /* ── Collecting one sale's documents ── */
-    if (session.state === "sales_docs" && session.receiptScan) {
-      const rs = session.receiptScan as { saleDate?: string; images?: string[]; count?: number };
-      rs.images = rs.images || [];
-
-      if (hasPhoto(msg)) {
-        if (rs.images.length >= MAX_SALE_DOCUMENTS) {
-          await sendMessage(chatId, `⚠️ ከ${MAX_SALE_DOCUMENTS} ሰነድ በላይ አይቻልም። "${SALES_BTN.photosDone}" ይጫኑ።`, {
-            reply_markup: SALES_PHOTOS_KEYBOARD,
-          });
-          return NextResponse.json({ ok: true });
-        }
-        // Nothing is uploaded. The receipt goes straight from Telegram to the
-        // model, and Telegram's own file id is what is kept — it resolves back
-        // to the same image whenever a read has to be retried, at no storage
-        // cost. A bucket growing by four photographs per sale was paying rent on
-        // pictures nobody opens once the figures are out of them.
-        const ref = telegramFileId(msg);
-        if (!ref) {
-          await sendMessage(chatId, "⚠️ ፎቶውን ማንበብ አልተቻለም። እባክዎ ምስሉን እንደ ፎቶ (እንደ ፋይል ሳይሆን) ይላኩ።", {
-            reply_markup: SALES_PHOTOS_KEYBOARD,
-          });
-          return NextResponse.json({ ok: true });
-        }
-        // Appended in SQL, not by writing the session back: selecting several
-        // photos at once sends them as separate updates that land on separate
-        // serverless instances, each having loaded the same session. Writing the
-        // whole array back lost all but the last.
-        rs.images = await appendReceiptImage(chatId, ref);
-        session.receiptScan = { ...rs };
-        await persist(session);
-        await sendMessage(
-          chatId,
-          `📄 ${rs.images.length}/${MAX_SALE_DOCUMENTS} ሰነድ ተቀብለናል።\n` +
-            `<i>የWHT ደረሰኝ ወይም የባንክ ደረሰኝ ካለ አሁን ይላኩ።</i>\n` +
-            `ከጨረሱ "${SALES_BTN.photosDone}" ይጫኑ።`,
-          { reply_markup: SALES_PHOTOS_KEYBOARD }
-        );
-        return NextResponse.json({ ok: true });
-      }
-
-      if (normText !== NORM_SALES.photosDone) {
-        await sendMessage(chatId, SALES_DOCS_PROMPT, { reply_markup: SALES_PHOTOS_KEYBOARD });
-        return NextResponse.json({ ok: true });
-      }
-
-      // A receipt is mandatory: a sales report without one cannot be checked
-      // against anything.
-      if (rs.images.length === 0) {
-        await sendMessage(chatId, `📷 ቢያንስ አንድ የደረሰኝ ፎቶ ያስፈልጋል፣ ከዚያ "${SALES_BTN.photosDone}" ይጫኑ።`, {
-          reply_markup: SALES_PHOTOS_KEYBOARD,
-        });
-        return NextResponse.json({ ok: true });
-      }
-
-      // The job row is written before the reply so the read survives whatever
-      // happens to this invocation: the scheduled sweep picks up anything left.
-      const jobId = await createScanJob({
-        chatId,
-        reportedBy: submitterName,
-        saleDate: String(rs.saleDate || eatDateKey()),
-        photoFileIds: rs.images,
-      });
-
-      if (!jobId) {
-        await sendMessage(chatId, "⚠️ ማንበቢያ ሥራ መፍጠር አልተቻለም። እባክዎ ድጋሚ ይሞክሩ።", {
-          reply_markup: SALES_PHOTOS_KEYBOARD,
-        });
-        return NextResponse.json({ ok: true });
-      }
-
-      session.state = "sales_reading";
-      session.receiptScan = { ...rs, jobId, images: rs.images, readingSince: Date.now() };
-      await persist(session);
-      await sendMessage(
-        chatId,
-        `✅ ${rs.images.length} ሰነድ ተቀብለናል — በማንበብ ላይ።\n` +
-          `<i>ንባቡ ሲጠናቀቅ እንልክልዎታለን። መጠበቅ አያስፈልግም።</i>`,
-        { reply_markup: SALES_MANUAL_KEYBOARD }
-      );
-      // The read continues in THIS invocation, after the response. It is not
-      // handed to another function over HTTP: that was the previous design, and
-      // an un-awaited self-fetch fired just before returning is not guaranteed
-      // to leave the instance — which is how the flow went silent with no error
-      // recorded anywhere.
-      runAfter(drainScanJobs(1));
-      return NextResponse.json({ ok: true });
-    }
-
-    /* ── The read is in flight ── */
-    if (session.state === "sales_reading") {
-      const rs = (session.receiptScan || {}) as { saleDate?: string; readingSince?: number };
-
-      // The way out. A model outage must never mean the day's sales cannot be
-      // filed — the same prompts a successful read leaves behind are used to ask
-      // for every column instead of only the missing ones.
-      if (normText === NORM_SALES.manual) {
-        const blank = computeReceipt({ date: String(rs.saleDate || eatDateKey()) } as never);
-        session.receiptScan = { saleDate: rs.saleDate, images: [], draft: blank, fillField: firstMissingField(blank) };
-        session.state = "sales_fill";
-        await persist(session);
-        await sendMessage(chatId, "🖐 እሺ — መስኮቹን በጥያቄ እንሞላቸዋለን።");
-        await askSalesField(chatId, firstMissingField(blank) as SalesRequiredField);
-        return NextResponse.json({ ok: true });
-      }
-
-      const waited = rs.readingSince ? Math.round((Date.now() - rs.readingSince) / 1000) : null;
-      await sendMessage(
-        chatId,
-        `⏳ ሰነዶቹ አሁንም እየተነበቡ ነው${waited !== null ? ` (${waited} ሰከንድ)` : ""}።\n` +
-          `<i>ሲጠናቀቅ እንልክልዎታለን። መጠበቅ ካልፈለጉ "${SALES_BTN.manual}" ይጫኑ።</i>`,
-        { reply_markup: SALES_MANUAL_KEYBOARD }
-      );
-      return NextResponse.json({ ok: true });
-    }
-
-    /* ── Filling the columns the read could not ── */
-    if (session.state === "sales_fill" && session.receiptScan?.draft && text) {
-      const rs = session.receiptScan as { draft: SalesReceiptDraft; fillField?: SalesRequiredField };
-      const field = rs.fillField;
-      if (!field) {
-        session.state = "receipt_action";
-        await persist(session);
-        await sendMessage(chatId, salesReviewText(rs.draft), { reply_markup: SALES_REVIEW_KEYBOARD });
-        return NextResponse.json({ ok: true });
-      }
-
-      if (field === "qty" || field === "unitPrice") {
-        const n = parseQty(text.trim());
-        if (n === null || n <= 0) {
-          await sendMessage(chatId, "⚠️ ቁጥር ብቻ ይፃፉ (ለምሳሌ፦ 12.5)።", { reply_markup: CHANGE_CANCEL_KEYBOARD });
-          return NextResponse.json({ ok: true });
-        }
-        rs.draft = computeReceipt({ ...rs.draft, [field]: n } as never);
-      } else if (field === "productTy") {
-        // Matched against the known products so a typo cannot create a brand.
-        const code = PRODUCT_ORDER.find(
-          (c) => normaliseChoice(productLabel(c)) === normText || normaliseChoice(c) === normText
-        );
-        if (!code) {
-          await sendMessage(chatId, "⚠️ ከታች ካሉት ምርቶች አንዱን ይምረጡ።", { reply_markup: PRODUCT_KEYBOARD });
-          return NextResponse.json({ ok: true });
-        }
-        rs.draft = computeReceipt({ ...rs.draft, productTy: productLabel(code) });
-      } else {
-        rs.draft = computeReceipt({ ...rs.draft, [field]: text.trim() } as never);
-      }
-
-      const next = firstMissingField(rs.draft);
-      if (next) {
-        rs.fillField = next;
-        session.receiptScan = rs;
-        await persist(session);
-        await askSalesField(chatId, next);
-        return NextResponse.json({ ok: true });
-      }
-
-      rs.fillField = undefined;
-      session.receiptScan = rs;
-      session.state = "receipt_action";
-      await persist(session);
-      await sendMessage(chatId, salesReviewText(rs.draft), { reply_markup: SALES_REVIEW_KEYBOARD });
-      return NextResponse.json({ ok: true });
-    }
-
-    /* ── Review: approve or correct ── */
-    if (session.state === "receipt_action" && session.receiptScan?.draft) {
-      const rs = session.receiptScan as {
-        saleDate?: string;
-        images: string[];
-        draft: SalesReceiptDraft;
-        confidence?: number;
-        fillField?: SalesRequiredField;
-      };
-
-      // A column the read missed is asked for before anything can be approved —
-      // otherwise a 0 qty reaches the dashboard as a real sale.
-      const missing = firstMissingField(rs.draft);
-      if (missing && normText !== NORM_SALES.edit) {
-        rs.fillField = missing;
-        session.receiptScan = rs;
-        session.state = "sales_fill";
-        await persist(session);
-        await askSalesField(chatId, missing);
-        return NextResponse.json({ ok: true });
-      }
-
-      if (normText === NORM_SALES.edit) {
-        session.state = "receipt_edit";
-        await persist(session);
-        await sendMessage(
-          chatId,
-          `✏️ ምን ማስተካከል ይፈልጋሉ? በተራ ቋንቋ ይፃፉ — ለምሳሌ "ምርቱ 3-EL ነው" ወይም "ብዛት 120"።\n\n` +
-            `<i>በ"መስክ: እሴት" መልኩም መላክ ይችላሉ። መስኮች፦ ${EDITABLE_FIELDS.join(", ")}</i>\n` +
-            `Sub Total፣ VAT እና Grand Total በራሳቸው ይሰላሉ።`,
-          { reply_markup: CHANGE_CANCEL_KEYBOARD }
-        );
-        return NextResponse.json({ ok: true });
-      }
-
-      if (normText === NORM_SALES.approve) {
-        const d = rs.draft;
-        const insertReceipt = () => sql<{ id: string }[]>`
-          insert into sales_receipts (date, customer_name, fs_no, att_no, product_ty, qty, unit_price,
-                                      sub_total, vat, grand_total, withhold, net_pay, deposited_bank, remark,
-                                      status, reported_by, tg_file_ids)
-          values (${parseReportDate(d.date)}, ${d.customerName || null},
-                  ${d.fsNo || null}, ${d.attNo || null},
-                  ${d.productTy || null}, ${d.qty}, ${d.unitPrice}, ${d.subTotal}, ${d.vat}, ${d.grandTotal},
-                  ${d.withhold}, ${d.netPay}, ${d.depositedBank || null}, ${d.remark || null},
-                  'submitted', ${submitterName}, ${rs.images || []})
-          returning id
-        `;
-        let savedId: string | null = null;
-        try {
-          savedId = (await insertReceipt())[0]?.id ?? null;
-        } catch (e) {
-          const code = (e as { code?: string })?.code;
-          if (code !== "42P01" && code !== "42703") throw e;
-          await ensureSalesReceiptsSchema();
-          savedId = (await insertReceipt())[0]?.id ?? null;
-        }
-
-        // The read's own verdict, stored so the dashboard can show how legible
-        // the paperwork was. There is no second AI pass any more: the documents
-        // were read before the row existed, and re-reading the same photos after
-        // approval would pay twice for an answer already in hand.
-        if (savedId && rs.confidence !== undefined) {
-          await saveReceiptCheck(savedId, {
-            checked: true,
-            score: rs.confidence,
-            flags: [],
-            reasoning: "",
-            extracted: {
-              productTy: d.productTy,
-              qty: d.qty,
-              unitPrice: d.unitPrice,
-              grandTotal: d.printedGrandTotal ?? d.grandTotal,
-            },
-            // The printed-total disagreement is shown on the review card BEFORE
-            // approval, so anything saved here was seen and accepted.
-            mismatches: [],
-          }).catch(() => {});
-        }
-        await logActivity({
-          chatId,
-          actor: submitterName,
-          userId: String(user._id),
-          positions: user.positions,
-          audience: "internal",
-          action: "submission",
-          detail: "sales_receipt",
-        });
-
-        // The date carries over: the whole session is one day's report.
-        session.receiptScan = { saleDate: rs.saleDate, images: [] };
-        session.state = "sales_next";
-        await persist(session);
-        await sendMessage(
-          chatId,
-          `✅ ተቀምጧል · Net Pay ${money(d.netPay)} ETB።\n📤 ወደ ዳሽቦርድ ገብቷል።`,
-          { reply_markup: SALES_NEXT_KEYBOARD }
-        );
-        return NextResponse.json({ ok: true });
-      }
-
-      await sendMessage(chatId, salesReviewText(rs.draft, rs.confidence), { reply_markup: SALES_REVIEW_KEYBOARD });
-      return NextResponse.json({ ok: true });
-    }
-
-    /* ── Applying a correction ── */
-    if (session.state === "receipt_edit" && session.receiptScan?.draft && text) {
-      const rs = session.receiptScan as { draft: SalesReceiptDraft };
-
-      const result = await applyReceiptEdit(rs.draft, text);
-      rs.draft = result.draft;
-      session.receiptScan = rs;
-      session.state = "receipt_action";
-      await persist(session);
-
-      // Always say what happened. The old parser returned the draft untouched
-      // when it understood nothing and posted an identical card back, which read
-      // as the edit being ignored — it was.
-      await sendMessage(chatId, describeChanges(result));
-      await sendMessage(chatId, salesReviewText(rs.draft), { reply_markup: SALES_REVIEW_KEYBOARD });
-      return NextResponse.json({ ok: true });
-    }
-
-    /* ── Another sale, or finish the day ── */
-    if (session.state === "sales_next") {
-      const rs = (session.receiptScan || {}) as { saleDate?: string };
-
-      if (normText === NORM_SALES.anotherSale) {
-        session.state = "sales_docs";
-        session.receiptScan = { saleDate: rs.saleDate, images: [] };
-        await persist(session);
-        await sendMessage(chatId, SALES_DOCS_PROMPT, { reply_markup: SALES_PHOTOS_KEYBOARD });
-        return NextResponse.json({ ok: true });
-      }
-
-      if (normText === NORM_SALES.finishDay) {
-        const rows = await todaysSalesReceipts(submitterName);
-        if (rows.length > 0) {
-          const buf = await buildSalesReceiptsWorkbook(rows, `Sales Report ${rs.saleDate || eatDateKey()}`);
-          await sendDocument(
-            chatId,
-            {
-              buffer: buf,
-              filename: `sales-report-${rs.saleDate || eatDateKey()}.xlsx`,
-              contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            },
-            `📊 የ${rs.saleDate || eatDateKey()} የሽያጭ ሪፖርት (${rows.length} ደረሰኝ)`
-          );
-        }
-        session.state = "idle";
-        session.receiptScan = undefined;
-        await persist(session);
-        await sendMessage(chatId, rows.length > 0 ? "✅ ቀኑ ተጠናቋል።" : "ዛሬ ምንም አልተመዘገበም።");
-        await sendRoleMenu(chatId, user);
-        return NextResponse.json({ ok: true });
-      }
-
-      await sendMessage(chatId, "ከታች ካሉት አንዱን ይምረጡ።", { reply_markup: SALES_NEXT_KEYBOARD });
-      return NextResponse.json({ ok: true });
-    }
 
 
     /* ── HR subtype choice ── */
@@ -2250,23 +1877,6 @@ export async function POST(req: NextRequest) {
 
       if (cap.captureMode === "capture") {
         await startCapture(session, chatId, cap);
-        return NextResponse.json({ ok: true });
-      }
-
-      if (cap.captureMode === "sales_report") {
-        // The date is chosen ONCE, from the calendar, and carries through every
-        // sale in the session. Receipts are routinely photographed the next
-        // morning, and a date read off the paper — or defaulted to today —
-        // silently files yesterday's sales under the wrong day.
-        session.state = "sales_date";
-        session.draft = undefined;
-        session.capture = undefined;
-        session.history = [];
-        session.receiptScan = { images: [] };
-        await persist(session);
-        await sendMessage(chatId, `<b>${cap.button}</b>\n\n📅 የሽያጩን ቀን ይምረጡ።`, {
-          reply_markup: buildCalendar("sales_report"),
-        });
         return NextResponse.json({ ok: true });
       }
 

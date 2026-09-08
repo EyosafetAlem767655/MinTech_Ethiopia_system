@@ -16,7 +16,7 @@ import VoucherPanels from "@/components/panels/VoucherPanels";
 import ToolRequestsPanel from "@/components/panels/ToolRequestsPanel";
 import PpBagDamagePanel from "@/components/panels/PpBagDamagePanel";
 import PpBagUsagePanel from "@/components/panels/PpBagUsagePanel";
-import SalesReceiptsPanel from "@/components/panels/SalesReceiptsPanel";
+import DailySalesPanel from "@/components/panels/DailySalesPanel";
 
 /**
  * Detailed reports per department, below the range summary. The company report
@@ -48,7 +48,7 @@ const PANELS: Record<DepartmentKey, ComponentType[]> = {
     BagControlPanel,
     PurchasesPanel,
   ],
-  sales: [SalesReceiptsPanel],
+  sales: [DailySalesPanel],
   // Finance files the goods receiving voucher, so it reads the same panel —
   // one record of a purchase, seen from both departments.
   finance: [FinancePanels, VoucherPanels],

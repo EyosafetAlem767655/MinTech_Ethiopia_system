@@ -22,8 +22,17 @@ import {
 } from "@/lib/products";
 import { upsertOpsDay, opsDateLabel } from "@/lib/ops-report";
 import { runAfter } from "@/lib/after";
+import {
+  computeTotals,
+  METHOD_LABEL,
+  PAYMENT_METHODS,
+  paymentKey,
+  printedMismatch,
+  refundKey,
+  summaryColumns,
+} from "@/lib/daily-sales";
 import { chaseHolder } from "@/lib/wht-sms";
-import { bagKey, productionTemplate, PROD_PREFIX, STOCK_PREFIX } from "@/lib/production-paste";
+import { bagKey, productionTemplate, DELIVERED_PREFIX, PROD_PREFIX, STOCK_PREFIX } from "@/lib/production-paste";
 import {
   BAG_PREFIX,
   BRAND_PREFIX,
@@ -107,6 +116,15 @@ export interface AssetStep {
   id: string;
   /** Amharic question shown to the user. */
   prompt: string;
+  /**
+   * A short name for this field, for the edit list.
+   *
+   * The prompt is a whole sentence; a numbered list of forty sentences is not a
+   * list anyone can correct against. Optional — `stepLabel` derives a decent one
+   * from the prompt when it is absent, and this is set on the families of steps
+   * built in loops, where one line covers ten fields.
+   */
+  label?: string;
   /**
    * "photos" collects several and waits for a done button; "photo" takes one;
    * "paste" sends a fill-in template and reads a whole block back at once.
@@ -238,6 +256,7 @@ const PP_BAG_DAMAGE_STEPS: AssetStep[] = [
       },
       {
         id: k.quantity,
+        label: `ክምር ${i} · ብዛት`,
         prompt: `🔢 ክምር ${i} — በዚህ ፎቶ ላይ ያሉት የተበላሹ ከረጢቶች ብዛት።`,
         type: "number",
         when: asked,
@@ -246,6 +265,7 @@ const PP_BAG_DAMAGE_STEPS: AssetStep[] = [
     if (i < MAX_DAMAGE_PILES) {
       steps.push({
         id: k.more,
+        label: `ክምር ${i} · ሌላ ክምር?`,
         prompt: "➕ ሌላ ክምር አለ?",
         type: "choice",
         choices: [
@@ -312,7 +332,15 @@ const PRODUCTION_STEPS: AssetStep[] = [
   { id: "date", prompt: "📅 የሪፖርቱን ቀን ይምረጡ።", type: "date" },
   {
     id: "paste",
-    prompt: "📋 የሚከተለውን ቅጂ ሞልተው ይመልሱት።",
+    // The example is worth the two extra lines. The block is filled in by
+    // editing it on a phone, and the one thing that makes a line unreadable is
+    // putting the number somewhere other than after the "=". Showing the shape
+    // once costs less than reporting an unreadable line afterwards.
+    prompt:
+      "📋 የሚከተለውን ቅጂ ሞልተው ይመልሱት።\n\n" +
+      "<i>ቁጥሩን ከ = በኋላ ይፃፉ። ለምሳሌ፦</i>\n" +
+      "<code>ETL-15 = 12\n3-EL = 10</code>\n" +
+      "<i>ያልተመረተውን 0 ይፃፉ ወይም ባዶ ይተዉት። የሌለውን መስመር አይሰርዙ።</i>",
     type: "paste",
   },
 ];
@@ -430,12 +458,14 @@ function voucherItemSteps(opts: { kinds: readonly LedgerKind[]; costSkippable: b
     const steps: AssetStep[] = [
       {
         id: k.description,
+        label: `ዕቃ ${i} · Description`,
         prompt: `📝 ዕቃ ${i} — ስሙንና ዝርዝሩን (Description/Specification) ይፃፉ።`,
         type: "text",
         when: asked,
       },
       {
         id: k.stockCode,
+        label: `ዕቃ ${i} · Stock Code`,
         prompt: `🔖 ዕቃ ${i} — የStock Code ቁጥር ይፃፉ።`,
         type: "text",
         skippable: true,
@@ -456,6 +486,7 @@ function voucherItemSteps(opts: { kinds: readonly LedgerKind[]; costSkippable: b
       },
       {
         id: k.unitCost,
+        label: `ዕቃ ${i} · Unit Cost`,
         prompt: `💲 ዕቃ ${i} — የነጠላ ዋጋ (Unit Cost)። ${opts.costSkippable ? 'ካልታወቀ "-" ይላኩ።' : "ካልታወቀ 0 ይፃፉ።"}`,
         type: "number",
         skippable: opts.costSkippable,
@@ -463,6 +494,7 @@ function voucherItemSteps(opts: { kinds: readonly LedgerKind[]; costSkippable: b
       },
       {
         id: k.ledger,
+        label: `ዕቃ ${i} · Stock item`,
         prompt:
           `📦 ዕቃ ${i} — ይህ ከየትኛው የክምችት ዕቃ ነው?\n` +
           `<i>የክምችት ሒሳብ የሚያዘው በዚህ መልስ ብቻ ነው።</i>`,
@@ -472,6 +504,7 @@ function voucherItemSteps(opts: { kinds: readonly LedgerKind[]; costSkippable: b
       },
       {
         id: k.ledgerQty,
+        label: `ዕቃ ${i} · Stock qty`,
         prompt: `🔢 ዕቃ ${i} — በክምችት አሃድ ስንት ነው? <i>(የተፃፈው Qty ተመሳሳይ ከሆነ እሱኑ ይፃፉ)</i>`,
         type: "number",
         when: (d) => {
@@ -650,6 +683,7 @@ const PRICE_LIST_STEPS: AssetStep[] = [
   },
   ...priceListItems().map<AssetStep>((item) => ({
     id: priceKey(item.key),
+    label: item.label,
     prompt: `💲 የ<b>${item.label}</b> የነጠላ ዋጋ (${item.unit})። ካልታወቀ 0 ይፃፉ።`,
     type: "number",
   })),
@@ -721,6 +755,7 @@ const PP_BAG_USED_STEPS: AssetStep[] = [
     const steps: AssetStep[] = [
       {
         id: k.kind,
+        label: `ዕቃ ${i} · ከረጢት`,
         prompt: `🧺 ዕቃ ${i} — የትኛው ከረጢት ዋለ?`,
         type: "choice",
         choices: BAG_KINDS.map(({ size, colour }) => ({
@@ -731,12 +766,14 @@ const PP_BAG_USED_STEPS: AssetStep[] = [
       },
       {
         id: k.reference,
+        label: `ዕቃ ${i} · Reference No.`,
         prompt: `🔢 ዕቃ ${i} — የማጣቀሻ ቁጥር (Reference No.) ይፃፉ።`,
         type: "number",
         when: asked,
       },
       {
         id: k.quantity,
+        label: `ዕቃ ${i} · ብዛት`,
         prompt: `📦 ዕቃ ${i} — የዋለው ብዛት (ቁጥር)።`,
         type: "number",
         when: asked,
@@ -745,6 +782,7 @@ const PP_BAG_USED_STEPS: AssetStep[] = [
     if (i < MAX_USAGE_ITEMS) {
       steps.push({
         id: k.more,
+        label: `ዕቃ ${i} · ሌላ ከረጢት?`,
         prompt: "➕ ሌላ ዓይነት ከረጢት ዋለ?",
         type: "choice",
         choices: [
@@ -877,6 +915,7 @@ const WHITENESS_STEPS: AssetStep[] = [
   { id: "line", prompt: "🏭 የመስመሩን ቁጥር (Line) ይፃፉ።", type: "number" },
   ...WB_SLOTS.map<AssetStep>((slot, i) => ({
     id: slot,
+    label: slot.toUpperCase(),
     prompt:
       `⚪ ${slot.toUpperCase()} — የነጭነት መጠን በ% ይፃፉ።\n` +
       (i === 0
@@ -887,6 +926,51 @@ const WHITENESS_STEPS: AssetStep[] = [
   })),
 ];
 
+
+/* ────────────────────── The day's sales, in one photo ─────────────────────── */
+
+/**
+ * The whole sales report: pick the date, photograph the till's Payment Summary.
+ *
+ * It used to be one report per transaction — photograph the receipts, read them,
+ * fill the gaps, approve, and start again for the next sale. On a busy day that
+ * is the same six steps a dozen times over, which is what was reported as
+ * exhausting. The till already totals the day itself.
+ *
+ * The ten figures are read off the photo and then EDITED on the review card
+ * rather than asked for one by one: a read that got nine of ten right should
+ * cost one correction, not ten questions.
+ */
+const DAILY_SALES_STEPS: AssetStep[] = [
+  { id: "date", prompt: "📅 የሽያጩን ቀን ይምረጡ።", type: "date" },
+  {
+    id: "photos",
+    prompt:
+      `🧾 የቀኑን Payment Summary ፎቶ ይላኩ።\n` +
+      `<i>ፎቶው ተነብቦ ቁጥሮቹ በራሳቸው ይሞላሉ — እርስዎ አርመው ያረጋግጣሉ።</i>\n` +
+      `ከጨረሱ "✅ ጨርሻለሁ" ይጫኑ።`,
+    type: "photos",
+    // The photograph IS the report. Without it there is nothing to read and
+    // nothing to check the typed figures against.
+    required: true,
+  },
+  // Ten money steps, so every figure the read produced is a real answer that the
+  // generic editor can list and correct like any other.
+  ...PAYMENT_METHODS.flatMap<AssetStep>((m) => [
+    {
+      id: paymentKey(m),
+      label: `${METHOD_LABEL[m]} payment`,
+      prompt: `💰 ${METHOD_LABEL[m]} — Payment Amount። ከሌለ 0 ይፃፉ።`,
+      type: "number",
+    },
+    {
+      id: refundKey(m),
+      label: `${METHOD_LABEL[m]} refund`,
+      prompt: `↩️ ${METHOD_LABEL[m]} — Refund Amount። ከሌለ 0 ይፃፉ።`,
+      type: "number",
+    },
+  ]),
+];
 
 const STEPS: Record<AssetFlowKind, AssetStep[]> = {
   raw_material: RAW_MATERIAL_STEPS,
@@ -901,6 +985,7 @@ const STEPS: Record<AssetFlowKind, AssetStep[]> = {
   whiteness_check: WHITENESS_STEPS,
   price_list: PRICE_LIST_STEPS,
   wht_holder: WHT_HOLDER_STEPS,
+  daily_sales: DAILY_SALES_STEPS,
 };
 
 
@@ -936,6 +1021,47 @@ export function firstUnanswered(kind: AssetFlowKind, draft: Record<string, strin
 
 export function stepsFor(kind: AssetFlowKind, draft: Record<string, string | number>): AssetStep[] {
   return STEPS[kind].filter((s) => !s.when || s.when(draft));
+}
+
+/**
+ * A short name for a field, for the edit list.
+ *
+ * Prompts are whole sentences — "📝 ዕቃ 1 — ስሙንና ዝርዝሩን (Description/Specification)
+ * ይፃፉ።" — and forty of those is not a list anyone can correct against. Three
+ * fallbacks, in order of how much they can be trusted:
+ *
+ *  1. an explicit `label`, set on the families built in loops;
+ *  2. the parenthesised English term the prompts already carry, which is what
+ *     the paper form itself calls the field;
+ *  3. the prompt with its emoji and its trailing Amharic verb stripped.
+ */
+export function stepLabel(step: AssetStep): string {
+  if (step.label) return step.label;
+
+  // Only the first line: some prompts carry an <i>…</i> hint underneath.
+  const first = step.prompt.split("\n")[0].replace(/<[^>]+>/g, "").trim();
+
+  /** Strip the leading emoji, the closing punctuation and the trailing verb. */
+  const tidy = (s: string) =>
+    s
+      .replace(/^[^\p{L}\p{N}]+/u, "")
+      .replace(/[።?]\s*$/, "")
+      // "…ይፃፉ", "…ይምረጡ", "…ይላኩ", "…ይጫኑ" — every prompt ends in one of these.
+      .replace(/\s*(ይፃፉ|ይምረጡ|ይላኩ|ይጫኑ)[።?]?\s*$/, "")
+      .trim();
+
+  const paren = first.match(/\(([^)]+)\)/);
+  if (paren) {
+    // "ዕቃ 1 — … (Description/Specification) ይፃፉ።" → "ዕቃ 1 · Description"
+    const term = paren[1].split("/")[0].trim();
+    // Only the part BEFORE the em dash, and only when there is one. Without that
+    // guard a prompt with no dash returns its whole sentence as the "lead" and
+    // the label ends up longer than the prompt it was meant to shorten.
+    const lead = first.includes("—") ? tidy(first.split("—")[0]) : "";
+    return lead && lead !== term ? `${lead} · ${term}` : term;
+  }
+
+  return tidy(first).slice(0, 60) || step.id;
 }
 
 export function findStep(kind: AssetFlowKind, id: string): AssetStep | undefined {
@@ -1143,6 +1269,11 @@ export function assetPreview(state: AssetFlowState): string {
     // Stock lists every product even at zero: "we have none left" is a real and
     // important answer, unlike a product simply not produced that day.
     const stock = PRODUCTION_PRODUCTS.map((c) => cell(`${STOCK_PREFIX}${c}`, productLabel(c))).join("\n");
+    const delivered = PRODUCTION_PRODUCTS.map((c) => cell(`${DELIVERED_PREFIX}${c}`, productLabel(c))).join("\n");
+    const deliveredTotal = PRODUCTION_PRODUCTS.reduce(
+      (a, c) => a + (Number(d[`${DELIVERED_PREFIX}${c}`]) || 0),
+      0
+    );
     const bags = BAG_SIZES.flatMap((size) =>
       BAG_STOCK[size].map((colour) => cell(bagKey(size, colour), bagLabel(size, colour)))
     ).join("\n");
@@ -1153,11 +1284,41 @@ export function assetPreview(state: AssetFlowState): string {
       `🔢 FGR No: ${esc(d.fgrNo) || "—"}\n\n` +
       `🏭 <b>የቀኑ ምርት (ቶን)</b>\n${prod}\n` +
       `  ─────────\n  <b>Total: ${qty(productionTotal(d))}</b>\n\n` +
+      `🚚 <b>Delivered amount (ቶን)</b>\n${delivered}\n` +
+      `  ─────────\n  <b>Total: ${qty(deliveredTotal)}</b>\n\n` +
       `📦 <b>ክምችት (ቶን)</b>\n${stock}\n\n` +
       `🧺 <b>ቀሪ ከረጢት (ብዛት)</b>\n${bags}\n` +
       (blanks.length > 0
         ? `\n⚠️ <b>${blanks.length} መስመር ባዶ ነው</b> — በ0 ይመዘገባል።\n` +
           `<i>ማስተካከል ከፈለጉ ቅጂውን ሞልተው ድጋሚ ይላኩ።</i>\n`
+        : "")
+    );
+  }
+
+  if (state.kind === "daily_sales") {
+    const t = computeTotals(d);
+    const rows = PAYMENT_METHODS.map((m) => {
+      const pay = Number(d[paymentKey(m)]) || 0;
+      const ref = Number(d[refundKey(m)]) || 0;
+      return `  ${METHOD_LABEL[m].padEnd(8)} ${money(pay)}${ref ? `  (↩️ ${money(ref)})` : ""}`;
+    }).join("\n");
+
+    // A printed total that disagrees with the rows above it is the single most
+    // useful thing this read can surface, so it is stated rather than quietly
+    // overwritten in either direction.
+    const mismatch = printedMismatch(d);
+
+    return (
+      head +
+      `📅 Date: ${esc(d.date)}\n\n` +
+      `💳 <b>Payment Summary</b>\n${rows}\n` +
+      `  ─────────\n` +
+      `  <b>Payments: ${money(t.totalPayment)}</b>\n` +
+      (t.totalRefund ? `  <b>Refunds: ${money(t.totalRefund)}</b>\n` : "") +
+      `  <b>Net: ${money(t.netTotal)} ETB</b>\n` +
+      (mismatch
+        ? `\n⚠️ በደረሰኙ ላይ የታተመው ጠቅላላ ${money(mismatch.printed)} ነው — ` +
+          `ከመስመሮቹ ድምር (${money(mismatch.computed)}) ይለያያል።\n`
         : "")
     );
   }
@@ -1473,18 +1634,26 @@ export async function saveAssetReport(
               ${sql.json(jsonMap(d, PROD_PREFIX, PRODUCTION_PRODUCTS))}, 'telegram')
       returning id`;
 
-    // The stock half belongs to the day's ops row, which is where the pasted
-    // ops report has always written it. One number per day per column, whoever
-    // entered it — a second table would let the two disagree with nothing to
-    // reconcile them.
+    // Stock and delivered both belong to the day's ops row, which is where the
+    // pasted ops report has always written them. One number per day per column,
+    // whoever entered it — a second table would let the two disagree with
+    // nothing to reconcile them.
+    //
+    // The delivered amount goes to `delivered`, the column dispatched tonnage
+    // has always used, rather than to a new one. Produced, delivered and left in
+    // stock are three readings of the same ten products on the same day, and
+    // splitting the third off would leave nothing able to check them against
+    // each other.
     const stock = jsonMap(d, STOCK_PREFIX, PRODUCTION_PRODUCTS);
+    const deliveredMap = jsonMap(d, DELIVERED_PREFIX, PRODUCTION_PRODUCTS);
     const bags = bagMap(d);
-    if (Object.keys(stock).length > 0 || Object.keys(bags).length > 0) {
+    if (Object.keys(stock).length > 0 || Object.keys(deliveredMap).length > 0 || Object.keys(bags).length > 0) {
       await upsertOpsDay({
         dateLabel: opsDateLabel(date),
         date,
         reportedBy,
         stock,
+        delivered: deliveredMap,
         bags,
         rawText: `የቀኑ የምርት ሪፖርት · FGR ${String(d.fgrNo || "—")}`,
       });
@@ -1526,6 +1695,55 @@ export async function saveAssetReport(
       });
     }
     return { id: row.id, table: "pp_bag_damage_reports" };
+  }
+
+  if (state.kind === "daily_sales") {
+    const date = reportDate(d.date);
+    const cols = summaryColumns(d);
+    // One row per day, upserted. Two rows for one day would be added together by
+    // every figure on the dashboard, and a correction filed the next morning
+    // would read as a second day's trading.
+    const [row] = await sql<{ id: string }[]>`
+      insert into daily_sales_summaries (
+        date_label, date,
+        cash_payment, cash_refund, cheque_payment, cheque_refund,
+        card_payment, card_refund, credit_payment, credit_refund,
+        voucher_payment, voucher_refund,
+        total_payment, total_refund, net_total, printed_total,
+        tg_file_ids, extraction, reported_by, source
+      )
+      values (
+        ${opsDateLabel(date)}, ${date},
+        ${cols.cash_payment}, ${cols.cash_refund}, ${cols.cheque_payment}, ${cols.cheque_refund},
+        ${cols.card_payment}, ${cols.card_refund}, ${cols.credit_payment}, ${cols.credit_refund},
+        ${cols.voucher_payment}, ${cols.voucher_refund},
+        ${cols.total_payment}, ${cols.total_refund}, ${cols.net_total},
+        ${Number(d.printedTotal) || null},
+        ${state.photoFileIds || []},
+        ${state.extraction ? sql.json({ ...state.extraction }) : null},
+        ${reportedBy}, 'telegram'
+      )
+      on conflict (date_label) do update set
+        cash_payment    = excluded.cash_payment,
+        cash_refund     = excluded.cash_refund,
+        cheque_payment  = excluded.cheque_payment,
+        cheque_refund   = excluded.cheque_refund,
+        card_payment    = excluded.card_payment,
+        card_refund     = excluded.card_refund,
+        credit_payment  = excluded.credit_payment,
+        credit_refund   = excluded.credit_refund,
+        voucher_payment = excluded.voucher_payment,
+        voucher_refund  = excluded.voucher_refund,
+        total_payment   = excluded.total_payment,
+        total_refund    = excluded.total_refund,
+        net_total       = excluded.net_total,
+        printed_total   = excluded.printed_total,
+        tg_file_ids     = excluded.tg_file_ids,
+        extraction      = excluded.extraction,
+        reported_by     = excluded.reported_by,
+        updated_at      = now()
+      returning id`;
+    return { id: row.id, table: "daily_sales_summaries" };
   }
 
   if (state.kind === "pp_bag_used") {

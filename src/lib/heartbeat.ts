@@ -1,7 +1,6 @@
 import sql from "@/lib/sql";
 import { logError } from "@/lib/errors";
 import { chaseHolder, eatToday, type WhtHolder } from "@/lib/wht-sms";
-import { drainScanJobs } from "@/lib/sales-scan";
 
 /**
  * The daily work, without a scheduler.
@@ -37,14 +36,12 @@ export interface HeartbeatResult {
   chased: number;
   alreadyChased: number;
   failed: number;
-  scansRead: number;
 }
 
-const IDLE: HeartbeatResult = { ran: false, chased: 0, alreadyChased: 0, failed: 0, scansRead: 0 };
+const IDLE: HeartbeatResult = { ran: false, chased: 0, alreadyChased: 0, failed: 0 };
 
 /**
- * Chase every outstanding WHT receipt whose day has not been claimed, and read
- * any sales documents left waiting.
+ * Chase every outstanding WHT receipt whose day has not been claimed.
  *
  * `force` skips the in-memory marker — used by the cron route, which should do
  * the work whether or not that particular instance happens to have done it.
@@ -54,7 +51,7 @@ export async function dailyHeartbeat(force = false): Promise<HeartbeatResult> {
   if (!force && lastSweptDay === today) return IDLE;
   lastSweptDay = today;
 
-  const result: HeartbeatResult = { ran: true, chased: 0, alreadyChased: 0, failed: 0, scansRead: 0 };
+  const result: HeartbeatResult = { ran: true, chased: 0, alreadyChased: 0, failed: 0 };
 
   try {
     const holders = await sql<WhtHolder[]>`
@@ -73,14 +70,6 @@ export async function dailyHeartbeat(force = false): Promise<HeartbeatResult> {
       kind: "heartbeat_chase_failed",
       message: e instanceof Error ? e.message : String(e),
     });
-  }
-
-  try {
-    // Sales documents whose read was interrupted. This used to be a five-minute
-    // cron; now any traffic at all picks them up, which in practice is sooner.
-    result.scansRead = (await drainScanJobs(3)).read;
-  } catch {
-    // sales_scan_jobs arrives in 0021, and a chase must not depend on it.
   }
 
   return result;

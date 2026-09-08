@@ -16,8 +16,9 @@ import {
  * context, then `Label=Value` lines are read under it.
  *
  * Sections are not decoration here, they are load-bearing: the same ten product
- * names appear TWICE, once as what was produced and once as what is in stock.
- * Without a section marker the second block would silently overwrite the first.
+ * names appear THREE times — produced, delivered, and in stock. Without a section
+ * marker each block would silently overwrite the one before it, and a day's
+ * output would end up recorded as its closing stock.
  *
  * Pure by design — no `sql`, no network — so the parser is testable on its own
  * and the flow engine stays small.
@@ -27,6 +28,15 @@ import {
 export const FGR_KEY = "fgrNo";
 export const PROD_PREFIX = "prod:";
 export const STOCK_PREFIX = "stock:";
+/**
+ * What was delivered out that day.
+ *
+ * Written to `daily_ops_reports.delivered`, which is where dispatched tonnage
+ * has always lived — not a new table. Produced, delivered and left in stock are
+ * three readings of the same ten products on the same day, and keeping the third
+ * one somewhere else would leave nothing able to check them against each other.
+ */
+export const DELIVERED_PREFIX = "deliver:";
 export const BAG_PREFIX = "bag:";
 
 /** Draft key for one bag cell, e.g. "bag:kg25:Yellow". */
@@ -40,6 +50,7 @@ export function bagKey(size: BagSize, colour: string): string {
 // the parser unable to tell produced tonnage from stock tonnage.
 const H_PRODUCTION = "--- Daily production(Ton) ---";
 const H_STOCK = "--- Stock ---";
+const H_DELIVERED = "--- Delivered amount(Ton) ---";
 const H_BAGS = "--- PP Bag count ---";
 
 /**
@@ -61,6 +72,8 @@ export function productionTemplate(): string {
     products,
     H_STOCK,
     products,
+    H_DELIVERED,
+    products,
     H_BAGS,
     bags,
   ].join("\n");
@@ -68,7 +81,14 @@ export function productionTemplate(): string {
 
 /* ─────────────────────────────── Parsing ──────────────────────────────────── */
 
-type Section = "production" | "stock" | "bags" | null;
+type Section = "production" | "stock" | "delivered" | "bags" | null;
+
+/** Which draft prefix each of the three product tables writes into. */
+const PRODUCT_SECTION_PREFIX: Record<"production" | "stock" | "delivered", string> = {
+  production: PROD_PREFIX,
+  stock: STOCK_PREFIX,
+  delivered: DELIVERED_PREFIX,
+};
 
 /** Loose key match: case, spaces, hyphens and dots are all noise. */
 const norm = (s: string) => s.toLowerCase().replace(/[\s\-_.]/g, "");
@@ -102,6 +122,21 @@ function buildLookup(): {
 
 const LOOKUP = buildLookup();
 
+/**
+ * Lines that are guidance, not data.
+ *
+ * The prompt shows an example of the format ("eg: ETL-15 = 12"), and an example
+ * that gets pasted back with the rest of the block would otherwise be reported
+ * as an unreadable line — a warning about the very thing that was meant to help.
+ * A leading marker or the word "example"/"eg" is enough to tell them apart,
+ * because no product or bag label contains either.
+ */
+function isGuidance(line: string): boolean {
+  if (/^[#>/(]/.test(line)) return true;
+  const key = line.split(/[=:]/)[0];
+  return /^\s*(e\.?g\.?|example|for example|ምሳሌ)\s*$/i.test(key);
+}
+
 function detectSection(line: string): Section | undefined {
   // A line carrying a value is data, never a header. Checking this first is what
   // lets the keyword match below look ANYWHERE in the line instead of only at
@@ -115,6 +150,17 @@ function detectSection(line: string): Section | undefined {
   // section name contains the word.
   if (n.includes(norm("ከረጢት")) || n.includes("bag")) return "bags";
   if (n.includes(norm("ክምችት")) || n.includes("stock")) return "stock";
+  // "ship" and "dispatch" are still accepted alongside "deliver": the section
+  // was called Shipped before it was renamed, and a template someone saved then
+  // has to keep parsing rather than dropping its tonnage into the previous
+  // section.
+  if (
+    n.includes(norm("የተላከ")) ||
+    n.includes("deliver") ||
+    n.includes("ship") ||
+    n.includes("dispatch")
+  )
+    return "delivered";
   if (n.includes(norm("ምርት")) || n.includes("production")) return "production";
   return undefined;
 }
@@ -159,6 +205,7 @@ export function parseProductionPaste(text: string): ParsedPaste {
   for (const rawLine of text.split(/\r?\n/)) {
     const line = rawLine.trim();
     if (!line) continue;
+    if (isGuidance(line)) continue;
 
     const found = detectSection(line);
     if (found) {
@@ -201,7 +248,7 @@ export function parseProductionPaste(text: string): ParsedPaste {
       continue;
     }
 
-    if (section === "production" || section === "stock") {
+    if (section === "production" || section === "stock" || section === "delivered") {
       const code = LOOKUP.products.get(nk);
       if (!code) {
         unknown.push(line);
@@ -209,13 +256,13 @@ export function parseProductionPaste(text: string): ParsedPaste {
       }
       const n = parseNumber(value);
       if (n === null) invalid.push(line);
-      else values[`${section === "production" ? PROD_PREFIX : STOCK_PREFIX}${code}`] = n;
+      else values[`${PRODUCT_SECTION_PREFIX[section]}${code}`] = n;
       continue;
     }
 
-    // A product line before any section header is ambiguous — it could be
-    // either table. Reporting it is honest; guessing would put tonnage in the
-    // wrong column with no way to tell afterwards.
+    // A product line before any section header is ambiguous — it could be any of
+    // the three product tables. Reporting it is honest; guessing would put
+    // tonnage in the wrong column with no way to tell afterwards.
     if (LOOKUP.products.has(nk) || LOOKUP.bags.has(nk)) unknown.push(line);
   }
 

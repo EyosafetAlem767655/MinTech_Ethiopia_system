@@ -695,6 +695,101 @@ export async function extractVoucherGemini(
   }
 }
 
+/* ─────────────────── The day's Payment Summary (Gemini) ─────────────────────
+ *
+ * One photograph replaces the whole sales report. The till prints an end-of-day
+ * summary with five payment methods, each showing an amount taken and an amount
+ * refunded — ten numbers and their total.
+ */
+
+export interface PaymentSummaryRead {
+  /** Keyed by method: { cash: { payment, refund }, … }. */
+  methods: Record<string, { payment: number; refund: number }>;
+  /** The total as PRINTED, kept apart from the sum of the rows above it. */
+  printedTotal: number;
+  printedRefundTotal: number;
+  confidence: number; // 0-100
+  notes: string;
+}
+
+export type PaymentSummaryResult =
+  | { ok: true; data: PaymentSummaryRead }
+  | { ok: false; error: string };
+
+const PAYMENT_SUMMARY_SYSTEM =
+  "You read the Payment Summary printed at the bottom of an Ethiopian point-of-sale end-of-day " +
+  "receipt, and return STRICT JSON only.\n" +
+  "The table has one row per payment method and two money columns: Payment Amount and Refund Amount.\n" +
+  'Return exactly: { "cash": {"payment": number, "refund": number}, "cheque": {…}, "card": {…}, ' +
+  '"credit": {…}, "voucher": {…}, "printedTotal": number, "printedRefundTotal": number, ' +
+  '"confidence": number, "notes": string }.\n' +
+  "Amounts are printed with a leading asterisk and thousands separators, e.g. *1,451,875.00 — return " +
+  "1451875.00, a plain number with no asterisk, commas or currency symbol.\n" +
+  "The method may be spelled VAUCHER, VOUCHER or similar; map it to \"voucher\". Map any of CHEQUE/CHECK " +
+  'to "cheque".\n' +
+  "A row printed as *0.00 is a real zero — return 0, not null.\n" +
+  "If a method is absent from the table entirely, return 0 for both of its columns.\n" +
+  "printedTotal is the total line AS PRINTED. Do NOT add the rows up yourself and do NOT correct it — " +
+  "the figures are added up separately, and a printed total that disagrees with its own rows is exactly " +
+  "what has to be noticed. If no total is printed, return 0.\n" +
+  "confidence is 0-100 for how clearly the table read. If the photo does not show a payment summary at " +
+  'all, return every amount as 0 with confidence 0 and say so in notes.';
+
+function methodRead(v: unknown): { payment: number; refund: number } {
+  const o = (v ?? {}) as Record<string, unknown>;
+  return { payment: receiptNum(o.payment), refund: receiptNum(o.refund) };
+}
+
+/**
+ * Read one photograph of the day's payment summary.
+ *
+ * Bounded by RECEIPT_BUDGET_MS inside geminiGenerate, because this runs in the
+ * Telegram webhook while the reporter waits. Ten numbers off one image is a
+ * small enough read to do inline — which is why the per-sale job queue that the
+ * old multi-document flow needed could be removed with it.
+ */
+export async function extractPaymentSummary(
+  images: { base64: string; contentType: string }[]
+): Promise<PaymentSummaryResult> {
+  if (images.length === 0) return { ok: false, error: "no image to read" };
+
+  const parts: GeminiPart[] = images.slice(0, 2).map((img) => ({
+    inline_data: { mime_type: img.contentType || "image/jpeg", data: img.base64 },
+  }));
+  parts.push({ text: "Read the Payment Summary table." });
+
+  const res = await geminiGenerate([{ role: "user", parts }], {
+    json: true,
+    systemInstruction: PAYMENT_SUMMARY_SYSTEM,
+    errorSource: "daily-sales",
+  });
+  if (!res.ok) return { ok: false, error: res.error || "Gemini call failed" };
+  if (!res.text.trim()) return { ok: false, error: "Gemini returned an empty response" };
+
+  try {
+    const p = extractJson(res.text);
+    return {
+      ok: true,
+      data: {
+        methods: {
+          cash: methodRead(p.cash),
+          cheque: methodRead(p.cheque),
+          card: methodRead(p.card),
+          credit: methodRead(p.credit),
+          voucher: methodRead(p.voucher),
+        },
+        printedTotal: receiptNum(p.printedTotal),
+        printedRefundTotal: receiptNum(p.printedRefundTotal),
+        confidence: Math.max(0, Math.min(100, Math.round(Number(p.confidence) || 0))),
+        notes: String(p.notes || "").trim(),
+      },
+    };
+  } catch (e) {
+    console.error("extractPaymentSummary could not parse the response:", e);
+    return { ok: false, error: "Gemini returned an unreadable response" };
+  }
+}
+
 /* ──────────────────── Damaged-tool photo check (Gemini) ─────────────────────
  * Backs the maintenance branch of a tool purchase request: does the photo
  * actually show the damage being claimed?

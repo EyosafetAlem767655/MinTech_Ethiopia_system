@@ -43,12 +43,6 @@ export type CaptureMode =
   | "capture"
   /** Pasted multi-day operations report. */
   | "ops_paste"
-  /**
-   * The day's sales report: pick the date, then per sale send its documents
-   * (main receipt + WHT receipt + bank slip), which are read in the background
-   * and merged into one row.
-   */
-  | "sales_report"
   /** Guided column-by-column asset report (raw material / delivery / tool request). */
   | "asset_entry";
 
@@ -211,14 +205,14 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
   },
   sales_report: {
     key: "sales_report",
-    // One button. The guided field-by-field entry and the separate scanner both
-    // captured the same row two different ways, and a salesperson had to know
-    // which one to press before they could start.
+    // One photograph, once a day. It used to be one report per transaction —
+    // photograph the receipts, read them, fill the gaps, approve, and start
+    // again for the next sale — which on a busy day is the same six steps a
+    // dozen times over. The till already totals the day itself.
     button: "🧾 የቀኑ የሽያጭ ሪፖርት",
-    captureMode: "sales_report",
+    captureMode: "asset_entry",
     input: "any",
-    question:
-      "🧾 የቀኑን የሽያጭ ሪፖርት እናስገባለን። ቀኑን ከመረጡ በኋላ የእያንዳንዱን ሽያጭ ሰነዶች ይላካሉ።",
+    question: "🧾 ቀኑን ይምረጡ። መቀጠል የቀኑን Payment Summary ፎቶ ይላካሉ።",
   },
   materials: {
     key: "materials",
@@ -385,7 +379,7 @@ export const POSITIONS: Record<PositionKey, Position> = {
     description: "Files the daily sales report together with receipts.",
     capabilities: ["sales_report"],
     dailyRequired: true,
-    submissionTables: ["sales_receipts"],
+    submissionTables: ["daily_sales_summaries"],
   },
   finance: {
     key: "finance",

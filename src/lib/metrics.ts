@@ -25,7 +25,7 @@ export interface DayNumbers {
   tonsSold: number;
   damagedClaimed: number;
   damagedVerified: number;
-  /** Cash sales filed by the sales team through the bot (`sales_receipts`). */
+  /** The day's takings, off the till's payment summary (`daily_sales_summaries`). */
   salesReportedEtb: number;
   salesReportedNetEtb: number;
   salesReportsCount: number;
@@ -88,20 +88,20 @@ export async function getDayNumbers(start: Date, end: Date): Promise<DayNumbers>
   `;
 
   // Kept as its own guarded round trip rather than three more subqueries above:
-  // sales_receipts arrives in a later migration, and a missing table would fail
+  // daily_sales_summaries arrives in a later migration, and a missing table would fail
   // the whole statement — taking the entire dashboard and the morning brief with
   // it, not just the sales line.
   //
   // Bucketed by the receipt's own sale date, not created_at, so a receipt keyed
   // in the next morning still counts against the day it was actually sold.
   const [s] = await sql<{ grand: string; net: string; n: string }[]>`
-    select coalesce(sum(grand_total), 0) as grand,
-           coalesce(sum(net_pay), 0)     as net,
-           count(*)                      as n
-      from sales_receipts
+    select coalesce(sum(total_payment), 0) as grand,
+           coalesce(sum(net_total), 0)     as net,
+           count(*)                        as n
+      from daily_sales_summaries
      where date >= ${start} and date < ${end}
   `.catch((e) => {
-    if ((e as { code?: string })?.code !== "42P01") console.error("getDayNumbers sales_receipts failed:", e);
+    if ((e as { code?: string })?.code !== "42P01") console.error("getDayNumbers daily sales failed:", e);
     return [{ grand: "0", net: "0", n: "0" }];
   });
 
@@ -186,20 +186,19 @@ export async function getDailySeries(days: number, now = new Date()): Promise<Tr
        where r.date >= ${start} and r.date < ${end}
        group by 1
     ),
-    -- Sales = what the sales team filed on the bot. It used to be invoices.amount,
-    -- but nothing has created an invoice since the finance module was retired,
-    -- so that line read flat zero.
+    -- Sales = the gross takings off the till's own payment summary: the five
+    -- payment methods added up. It was one row per transaction before that, and
+    -- invoices.amount before that.
     sales as (
-      select (date at time zone ${EAT})::date as d, sum(grand_total) as n
-        from sales_receipts
+      select (date at time zone ${EAT})::date as d, sum(total_payment) as n
+        from daily_sales_summaries
        where date >= ${start} and date < ${end}
        group by 1
     ),
-    -- Collections = the same reports net of withholding. Payments against an
-    -- invoice no longer exist as a concept.
+    -- Collections = the same days net of refunds. What actually came in.
     coll as (
-      select (date at time zone ${EAT})::date as d, sum(net_pay) as n
-        from sales_receipts
+      select (date at time zone ${EAT})::date as d, sum(net_total) as n
+        from daily_sales_summaries
        where date >= ${start} and date < ${end}
        group by 1
     )
@@ -266,14 +265,14 @@ export async function getBucketedSeries(
       select date_trunc(${bucket}, d) as b, sum(n) as n from prod_day group by 1
     ),
     sales as (
-      select date_trunc(${bucket}, date at time zone ${EAT}) as b, sum(grand_total) as n
-        from sales_receipts
+      select date_trunc(${bucket}, date at time zone ${EAT}) as b, sum(total_payment) as n
+        from daily_sales_summaries
        where date >= ${start} and date < ${end}
        group by 1
     ),
     coll as (
-      select date_trunc(${bucket}, date at time zone ${EAT}) as b, sum(net_pay) as n
-        from sales_receipts
+      select date_trunc(${bucket}, date at time zone ${EAT}) as b, sum(net_total) as n
+        from daily_sales_summaries
        where date >= ${start} and date < ${end}
        group by 1
     )

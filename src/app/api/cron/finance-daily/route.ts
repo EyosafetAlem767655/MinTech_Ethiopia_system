@@ -6,7 +6,6 @@ import { smsGatewayConfigured } from "@/lib/sms";
 import { dailyHeartbeat } from "@/lib/heartbeat";
 import { sendMessage } from "@/lib/telegram";
 import { describeGap, reconcileBags } from "@/lib/stock-reconciliation";
-import { drainScanJobs } from "@/lib/sales-scan";
 import {
   eatDayOfMonth,
   isBaseBalanceReminderWindow,
@@ -219,25 +218,10 @@ export async function GET(req: NextRequest) {
     console.warn("finance-daily: bag reconciliation unavailable", e);
   }
 
-  /* ─────────── 4. Sweep any sales read whose worker never finished ───────── */
-
-  // The webhook finishes its own read after replying and a five-minute cron
-  // drains the rest, so by the time this runs there is normally nothing here.
-  // It is awaited rather than fired off: the previous version asked another
-  // function to do the work over HTTP and returned, which is exactly how reads
-  // went missing.
-  let sweptScans = 0;
-  try {
-    sweptScans = (await drainScanJobs(20)).read;
-  } catch {
-    // sales_scan_jobs arrives in 0021; the WHT chase above must still run.
-  }
-
   return NextResponse.json({
     ok: true,
     date: today,
     bagGaps: gapsFound,
-    sweptScans,
     sms: {
       configured: smsGatewayConfigured(),
       pendingHolders,

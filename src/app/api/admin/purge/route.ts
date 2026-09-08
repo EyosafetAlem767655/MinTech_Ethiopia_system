@@ -39,33 +39,28 @@ async function removeFiles(ids: string[]): Promise<number> {
 }
 
 /**
- * Every sales report, its images and the cached brief.
+ * Every daily sales report, and the cached brief.
+ *
+ * No files to remove: the payment summary is never uploaded, only its Telegram
+ * file id is kept, and Telegram is not ours to sweep. `filesRemoved` stays in
+ * the response as a zero rather than disappearing, so the UI reads the same
+ * either way.
  *
  * The brief row is not incidental. The landing page renders it directly, so
- * leaving it would have the dashboard quoting sales figures whose receipts had
+ * leaving it would have the dashboard quoting sales figures whose reports had
  * just been deleted — the one screen most likely to be looked at right after
  * this runs.
  */
 async function purgeSales() {
-  const rows = await sql<{ ids: string[] | null }[]>`
-    select coalesce(array_agg(f), '{}') as ids
-      from (select unnest(photo_file_ids) as f from sales_receipts) s
-  `.catch(() => []);
-  const fileIds = (rows[0]?.ids ?? []).map(String).filter(Boolean);
-
-  const filesRemoved = await removeFiles(fileIds);
-
-  const deleted = await sql`delete from sales_receipts`.catch(() => ({ count: 0 }));
+  const deleted = await sql`delete from daily_sales_summaries`.catch(() => ({ count: 0 }));
   const briefs = await sql`delete from briefs`.catch(() => ({ count: 0 }));
 
   return {
     scope: "sales" as const,
     receiptsDeleted: (deleted as { count?: number }).count ?? 0,
     briefsDeleted: (briefs as { count?: number }).count ?? 0,
-    filesRemoved,
-    // Rows whose file had already been swept by the 72-hour purge are counted
-    // here, so "5 rows, 3 files" is an expected result rather than a discrepancy.
-    filesReferenced: fileIds.length,
+    filesRemoved: 0,
+    filesReferenced: 0,
   };
 }
 
@@ -98,7 +93,7 @@ async function purgeRequestPhotos() {
 /** GET — what each scope would remove. Nothing is deleted. */
 export async function GET() {
   const [sales, briefs, requests] = await Promise.all([
-    sql<{ n: string }[]>`select count(*) as n from sales_receipts`.catch(() => [{ n: "0" }]),
+    sql<{ n: string }[]>`select count(*) as n from daily_sales_summaries`.catch(() => [{ n: "0" }]),
     sql<{ n: string }[]>`select count(*) as n from briefs`.catch(() => [{ n: "0" }]),
     sql<{ n: string }[]>`
       select count(*) as n from purchase_requests where photo_file_id is not null

@@ -26,7 +26,9 @@ export type AssetFlowKind =
   | "whiteness_check"
   // Finance.
   | "price_list"
-  | "wht_holder";
+  | "wht_holder"
+  // Sales: the whole day in one photograph of the till's payment summary.
+  | "daily_sales";
 
 export const FLOW_TITLE: Record<AssetFlowKind, string> = {
   raw_material: "🚚 የጥሬ ዕቃ ገቢ ሪፖርት",
@@ -41,4 +43,5 @@ export const FLOW_TITLE: Record<AssetFlowKind, string> = {
   whiteness_check: "⚪ የነጭነት ጥራት ምርመራ",
   price_list: "💲 የወሩ የዋጋ ዝርዝር",
   wht_holder: "📄 WHT ደረሰኝ ያዢ",
+  daily_sales: "🧾 የቀኑ የሽያጭ ሪፖርት",
 };

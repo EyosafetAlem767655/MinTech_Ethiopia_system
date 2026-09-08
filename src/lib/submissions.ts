@@ -24,7 +24,7 @@ export const SUBMISSION_COLLECTIONS = [
   "purchase_items",
   "tool_request",
   "pp_bag_damage",
-  "sales_receipt",
+  "daily_sales",
   "damage_claim",
   "expense_receipt",
   "stone_delivery",
@@ -282,27 +282,39 @@ export const SUBMISSIONS: Record<SubmissionCollection, SubmissionSpec> = {
     editableKeys: ["reason", "quantity"],
     photoJoin: { table: "pp_bag_damage_photos", foreignKey: "report_id", fileColumn: "file_id" },
   },
-  sales_receipt: {
-    table: "sales_receipts",
-    label: "Sales report",
+  daily_sales: {
+    table: "daily_sales_summaries",
+    label: "Daily sales",
     icon: "🧾",
     dateColumn: "date",
     authorColumn: "reported_by",
-    searchColumns: ["customer_name", "fs_no", "att_no", "reported_by"],
+    searchColumns: ["date_label", "reported_by"],
     displayFields: [
-      TEXT("customer_name", "Customers Name"),
-      TEXT("fs_no", "Fs No"),
-      TEXT("att_no", "Att.No"),
-      TEXT("product_ty", "Product Ty"),
-      NUM("qty", "Qty"),
-      NUM("grand_total", "Grand Total"),
-      NUM("net_pay", "Net Pay"),
-      TEXT("deposited_bank", "Deposited Bank"),
+      NUM("cash_payment", "Cash"),
+      NUM("cheque_payment", "Cheque"),
+      NUM("card_payment", "Card"),
+      NUM("credit_payment", "Credit"),
+      NUM("voucher_payment", "Voucher"),
+      NUM("total_payment", "Payments"),
+      NUM("total_refund", "Refunds"),
+      NUM("net_total", "Net"),
     ],
-    // The money columns are derived from qty x unit_price on submission, so they
+    // The three totals are derived from the five methods on submission, so they
     // are shown but not editable here — changing one in isolation would leave the
-    // row internally inconsistent.
-    editableKeys: ["customer_name", "fs_no", "att_no", "product_ty", "deposited_bank"],
+    // row disagreeing with its own rows. Correct a method and re-file the day;
+    // the report upserts, so the totals are recomputed.
+    editableKeys: [
+      "cash_payment",
+      "cash_refund",
+      "cheque_payment",
+      "cheque_refund",
+      "card_payment",
+      "card_refund",
+      "credit_payment",
+      "credit_refund",
+      "voucher_payment",
+      "voucher_refund",
+    ],
   },
   damage_claim: {
     table: "damage_claims",

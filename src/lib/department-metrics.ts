@@ -159,7 +159,7 @@ async function departmentKpis(
       // reports are the record now.
       const [r] = await sql<{ n: string; grand: string }[]>`
         select count(*) as n, coalesce(sum(grand_total), 0) as grand
-          from sales_receipts where date >= ${start} and date < ${end}
+          from daily_sales_summaries where date >= ${start} and date < ${end}
       `;
       return [
         { icon: "🤝", label: "Tons dispatched", value: base.tonsSold, suffix: " t", decimals: 2 },
@@ -408,7 +408,7 @@ async function departmentActivityCounts(
     case "sales": {
       const [a] = await sql<{ sales: string; receipts: string }[]>`
         select
-          (select count(*) from sales_receipts where date >= ${start} and date < ${end}) as sales,
+          (select count(*) from daily_sales_summaries where date >= ${start} and date < ${end}) as sales,
           (select count(*) from receipts where created_at >= ${start} and created_at < ${end}) as receipts`;
       const sales = Number(a.sales) || 0;
       const receipts = Number(a.receipts) || 0;

@@ -36,7 +36,7 @@ const SOURCES: Record<string, { who: string; when: string }> = {
   pp_bag_purchases: { who: "reported_by", when: "created_at" },
   wht_holders: { who: "registered_by", when: "created_at" },
   purchase_requests: { who: "requested_by", when: "created_at" },
-  sales_receipts: { who: "reported_by", when: "created_at" },
+  daily_sales_summaries: { who: "reported_by", when: "created_at" },
   receipts: { who: "submitted_by", when: "created_at" },
 };
 
