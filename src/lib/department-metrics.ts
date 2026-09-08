@@ -196,7 +196,10 @@ async function departmentSubmissions(dept: DepartmentKey, start: Date, end: Date
   const daily = sql<
     { id: string; full_name: string; text: string; photo_file_ids: string[]; created_at: Date }[]
   >`
-    select id, full_name, text, photo_file_ids, created_at
+    select id, full_name, text,
+           -- Both columns: uuids for rows filed before 0025, Telegram ids after.
+           -- /api/files serves either, so the panel is unaffected.
+           (photo_file_ids::text[] || tg_file_ids) as photo_file_ids, created_at
       from daily_reports
      where created_at >= ${start} and created_at < ${end}
        and positions && ${positions}::text[]
@@ -241,7 +244,8 @@ async function departmentSubmissions(dept: DepartmentKey, start: Date, end: Date
     case "asset_management": {
       const [materials, purchases, damage] = await Promise.all([
         sql<{ id: string; counted_by: string; raw_text: string; photo_file_ids: string[]; created_at: Date }[]>`
-          select id, counted_by, raw_text, photo_file_ids, created_at
+          select id, counted_by, raw_text,
+                 (photo_file_ids::text[] || tg_file_ids) as photo_file_ids, created_at
             from material_counts where created_at >= ${start} and created_at < ${end} order by created_at desc limit 30`,
         sql<{ id: string; requested_by: string; title: string; amount: string; status: string; created_at: Date }[]>`
           select id, requested_by, title, amount, status, created_at

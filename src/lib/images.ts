@@ -5,10 +5,10 @@ import { downloadTelegramFile } from "@/lib/telegram";
 /**
  * Getting image bytes in front of a model, from wherever they happen to live.
  *
- * Receipts are no longer uploaded to Supabase Storage. A sales receipt, a goods
- * receiving voucher and a store issue voucher are read once, and the numbers on
- * them are the record — keeping the megabytes as well was paying storage rent on
- * a photograph nobody opens again.
+ * Almost nothing is uploaded to Supabase Storage any more. A receipt, a voucher,
+ * a payment summary, a tool request, a daily report — all read once, and the
+ * figures taken off them are the record. Keeping the megabytes as well was
+ * paying storage rent on a photograph nobody opens again.
  *
  * What is kept instead is Telegram's own `file_id`. It stays valid indefinitely
  * and resolves back to the original image on demand, so the paperwork is still
@@ -16,10 +16,10 @@ import { downloadTelegramFile } from "@/lib/telegram";
  * bytes never left Telegram in the first place.
  *
  * Two kinds of reference therefore exist side by side, and they are told apart
- * by shape rather than by a flag: a UUID is a `stored_files` row (every historic
- * row, plus the flows that still store — PP bag damage, whose perceptual hashes
- * are a year-long duplicate check, and the tool request photo). Anything else is
- * a Telegram file id.
+ * by shape rather than by a flag: a UUID is a `stored_files` row — every historic
+ * row, plus PP bag damage, the one flow that still uploads, because its
+ * perceptual hashes are a three-month duplicate check and a photo that was never
+ * stored can never be matched. Anything else is a Telegram file id.
  */
 
 export interface LoadedImage {
@@ -33,8 +33,7 @@ export interface LoadedImage {
  * Telegram sends a photo as several sizes; the last is the largest, which is the
  * one worth reading. An image sent as a document (which is how a phone gallery
  * sometimes uploads) carries its id in a different place, so both are checked —
- * this mirrors `storeIncomingPhoto`, which is still used by the flows that do
- * upload.
+ * this mirrors `storeIncomingPhoto`, which PP bag damage still uses.
  */
 export function telegramFileId(msg: any): string | null {
   const sizes = msg?.photo as { file_id: string }[] | undefined;
@@ -89,7 +88,7 @@ export async function loadImages(refs: (string | null | undefined)[]): Promise<L
  * The image references a row carries, from both of its columns.
  *
  * `photo_file_ids` (uuid[]) holds what was uploaded before this change and what
- * the still-uploading flows write; `tg_file_ids` (text[]) holds Telegram ids.
+ * PP bag damage still writes; `tg_file_ids` (text[]) holds Telegram ids.
  * A row has one or the other, never both — but reading both means one code path
  * serves old rows and new ones.
  */

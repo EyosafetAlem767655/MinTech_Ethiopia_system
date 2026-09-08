@@ -56,9 +56,9 @@ const H_BAGS = "--- PP Bag count ---";
 /**
  * The blank template the bot sends.
  *
- * Values are left empty rather than pre-filled with 0: a blank line means "not
- * answered" and falls through to a question, whereas a 0 the user never looked
- * at would be recorded as a real measurement.
+ * Values are left empty rather than pre-filled with 0 so the block is quick to
+ * fill in on a phone — and a line left empty IS zero, which is what a blank
+ * plainly means on this report: none produced, none in stock, none went out.
  */
 export function productionTemplate(): string {
   const products = PRODUCTION_PRODUCTS.map((c) => `${productLabel(c)}=`).join("\n");
@@ -192,9 +192,9 @@ export interface ParsedPaste {
 /**
  * Read a filled-in template.
  *
- * Blank values are skipped rather than defaulted, so a half-filled paste leaves
- * the rest of the flow to ask about — the user is never forced to start over
- * because they missed a line.
+ * A blank product or bag line records 0. There is nowhere left for it to fall
+ * through to — this report is one block with no follow-up questions — and a
+ * blank here means none, not unknown.
  */
 export function parseProductionPaste(text: string): ParsedPaste {
   const values: Record<string, string | number> = {};
@@ -216,9 +216,30 @@ export function parseProductionPaste(text: string): ParsedPaste {
     const pair = splitPair(line);
     if (!pair) continue;
     const [key, value] = pair;
-    if (!value) continue; // left blank on purpose — ask for it instead
 
     const nk = norm(key);
+
+    // A blank product or bag line is ZERO, not unanswered.
+    //
+    // It used to be skipped, which left the figure missing from the draft, the
+    // review card printing "—" and a warning that N lines were blank — for a
+    // report where a blank plainly means none were produced, none are in stock
+    // or none went out. It is now a real answer, so it also becomes editable
+    // like every other. The FGR is exempt: a blank document number is missing,
+    // not zero.
+    if (!value && nk !== norm("FGR") && nk !== norm("FGR No")) {
+      if (section === "bags") {
+        const bag = LOOKUP.bags.get(nk);
+        if (bag) values[bagKey(bag.size, bag.colour)] = 0;
+        continue;
+      }
+      if (section === "production" || section === "stock" || section === "delivered") {
+        const code = LOOKUP.products.get(nk);
+        if (code) values[`${PRODUCT_SECTION_PREFIX[section]}${code}`] = 0;
+      }
+      continue;
+    }
+    if (!value) continue;
 
     if (nk === norm("FGR") || nk === norm("FGR No")) {
       // Checked here rather than by a step validator. The guided path that used

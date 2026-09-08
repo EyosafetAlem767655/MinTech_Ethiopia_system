@@ -39,7 +39,6 @@ import {
 import { parseProductionPaste } from "@/lib/production-paste";
 import { parseFinancePaste } from "@/lib/finance-paste";
 import { backgroundPurchaseReceiptCheck } from "@/lib/finance-receipts";
-import { backgroundVoucherVerify } from "@/lib/voucher-verify";
 import { logError } from "@/lib/errors";
 import { runAfter } from "@/lib/after";
 import { PAYMENT_METHODS, paymentKey, refundKey } from "@/lib/daily-sales";
@@ -509,7 +508,7 @@ async function saveExtractedRecord(
       const amount = Number(f.amount) || 0;
       const [row] = await sql<{ id: string }[]>`
         insert into receipts (vendor, client, amount, category, receipt_date, tax_invoice_number,
-                              photo_file_id, submitted_by, source, legitimacy, meta)
+                              tg_file_id, submitted_by, source, legitimacy, meta)
         values (${vendor}, ${f.client ? String(f.client) : null}, ${amount},
                 ${f.category ? String(f.category) : null},
                 ${f.receiptDate ? new Date(String(f.receiptDate)) : new Date()},
@@ -543,7 +542,7 @@ async function saveExtractedRecord(
       const prAmount = Number(f.amount) || 0;
       const prJustification = f.justification ? String(f.justification) : null;
       const [pr] = await sql<{ id: string }[]>`
-        insert into purchase_requests (title, amount, requested_by, justification, photo_file_id, source, status, legitimacy)
+        insert into purchase_requests (title, amount, requested_by, justification, tg_file_id, source, status, legitimacy)
         values (${prTitle}, ${prAmount}, ${opts.userName}, ${prJustification}, ${opts.fileId || null},
                 'telegram', 'pending', ${legitimacy ? sql.json(legitimacy as any) : null})
         returning id
@@ -636,12 +635,15 @@ async function saveExtractedRecord(
 /** Writes the free-text capture types: daily report, material count, HR report. */
 async function saveCapture(session: any, user: any): Promise<{ reply: string; ref?: SubmissionRef }> {
   const capture = session.capture || {};
+  // Telegram file ids now, not stored-file uuids — these photos are never
+  // uploaded. They go into `tg_file_ids` rather than `photo_file_ids`, which is
+  // uuid[] with a foreign key to stored_files. See migration 0025.
   const photoFileIds = (capture.photoFileIds || []) as string[];
   const text = String(capture.text || "").trim();
 
   if (capture.capKey === "daily_report") {
     const [row] = await sql<{ id: string }[]>`
-      insert into daily_reports (user_id, full_name, positions, date_key, text, photo_file_ids, source)
+      insert into daily_reports (user_id, full_name, positions, date_key, text, tg_file_ids, source)
       values (${user._id}, ${user.fullName}, ${user.positions}, ${eatDateKey()}, ${text}, ${photoFileIds}, 'telegram')
       returning id
     `;
@@ -651,7 +653,7 @@ async function saveCapture(session: any, user: any): Promise<{ reply: string; re
 
   if (capture.capKey === "materials") {
     const [row] = await sql<{ id: string }[]>`
-      insert into material_counts (user_id, counted_by, date_key, raw_text, photo_file_ids)
+      insert into material_counts (user_id, counted_by, date_key, raw_text, tg_file_ids)
       values (${user._id}, ${user.fullName}, ${eatDateKey()}, ${text}, ${photoFileIds})
       returning id
     `;
@@ -661,7 +663,7 @@ async function saveCapture(session: any, user: any): Promise<{ reply: string; re
   if (capture.capKey === "hr") {
     const kind = (capture.hrKind || "customer_contact") as HrKind;
     const [row] = await sql<{ id: string }[]>`
-      insert into hr_reports (user_id, full_name, kind, text, photo_file_ids)
+      insert into hr_reports (user_id, full_name, kind, text, tg_file_ids)
       values (${user._id}, ${user.fullName}, ${kind}, ${text}, ${photoFileIds})
       returning id
     `;
@@ -799,29 +801,32 @@ const PHOTO_KIND_BY_FLOW: Partial<Record<AssetFlowKind, string>> = {
 };
 
 /**
- * Flows whose photos go straight to the model and are never uploaded.
+ * The ONLY flow whose photos are uploaded to storage.
  *
- * Both vouchers are read once, and the figures taken off them are the record —
- * keeping the megabytes as well was storage rent on a photograph nobody opens
- * again. Telegram's own file id is kept instead: it resolves back to the same
- * image on demand and costs nothing, because the bytes never left Telegram.
+ * An allow-list, not a deny-list, and that direction is the point. It used to
+ * name the flows that skip the upload, which meant every new flow defaulted to
+ * uploading and had to be remembered — it was missed twice, most recently by the
+ * daily sales report, which quietly filled the bucket with payment summaries.
+ * Now a flow has to ask to be stored.
  *
- * PP bag damage is deliberately absent. Its photos are hashed and compared
- * against a year of previous ones, and a photo that was never stored can never
- * be matched — re-submitting last month's damage pile would become undetectable.
- * The tool request photo is absent for the same reason its request row is kept:
- * it is the evidence behind a spending decision.
+ * PP bag damage asks, and is the only one that should. Its photos are hashed and
+ * compared against three months of previous ones, and a photo that was never
+ * stored can never be matched — re-submitting last month's damage pile would
+ * become undetectable. Everything else is read once and represented by its
+ * figures; keeping the megabytes as well was storage rent on a photograph nobody
+ * opens again. Telegram's own file id is kept instead: it resolves back to the
+ * same image on demand and costs nothing, because the bytes never left Telegram.
  */
-const DIRECT_READ_FLOWS = new Set<AssetFlowKind>(["grv", "store_issue"]);
+const STORED_PHOTO_FLOWS = new Set<AssetFlowKind>(["pp_bag_damage"]);
 
 /**
- * One image reference for a flow step — an uploaded `stored_files` uuid, or a
- * Telegram file id for the flows that never upload. Both are resolved by
+ * One image reference for a flow step — an uploaded `stored_files` uuid for the
+ * one flow that stores, a Telegram file id for every other. Both are resolved by
  * `loadImages`, so nothing downstream has to know which it got.
  */
-async function captureFlowPhoto(msg: any, kind: AssetFlowKind, fallbackKind?: string): Promise<string | null> {
-  if (DIRECT_READ_FLOWS.has(kind)) return telegramFileId(msg);
-  const stored = await storeIncomingPhoto(msg, PHOTO_KIND_BY_FLOW[kind] ?? fallbackKind);
+async function captureFlowPhoto(msg: any, kind: AssetFlowKind): Promise<string | null> {
+  if (!STORED_PHOTO_FLOWS.has(kind)) return telegramFileId(msg);
+  const stored = await storeIncomingPhoto(msg, PHOTO_KIND_BY_FLOW[kind] ?? PP_BAG_PHOTO_KIND);
   return stored?.id ?? null;
 }
 
@@ -1481,13 +1486,6 @@ export async function POST(req: NextRequest) {
           const receiptPhotos = receiptFlow ? state.photoFileIds || [] : [];
           const receiptTotal = Number(state.draft.totalAmount) || 0;
           const receiptCurrency = String(state.draft.currency || "ETB");
-          // The store issue voucher is typed first and photographed last, so its
-          // photo is evidence to check the entry against — the reverse of the GRV,
-          // where the photo is the source the entry comes from.
-          const verifyPhotos = state.kind === "store_issue" ? state.photoFileIds || [] : [];
-          const verifyItems = state.kind === "store_issue" ? voucherItems(state.draft) : [];
-          const verifyNo = String(state.draft.sivNo || "") || null;
-
           session.state = "idle";
           session.assetFlow = undefined;
           await persist(session);
@@ -1501,7 +1499,7 @@ export async function POST(req: NextRequest) {
           await sendMessage(
             chatId,
             `✅ ${title} ተመዝግቧል።\n📤 በዳሽቦርዱ ላይ ይታያል።` +
-              (ppPiles.length + receiptPhotos.length + verifyPhotos.length > 0
+              (ppPiles.length + receiptPhotos.length > 0
                 ? "\n🔎 ፎቶዎቹ በጀርባ በኩል እየተጣሩ ነው።"
                 : "")
           );
@@ -1525,17 +1523,6 @@ export async function POST(req: NextRequest) {
             });
             // Silence means the receipt agreed with what was typed. Only a
             // disagreement, or a check that could not run, is worth a message.
-            if (note) await sendMessage(chatId, note).catch(() => {});
-          }
-          if (verifyPhotos.length > 0) {
-            const note = await backgroundVoucherVerify({
-              id: saved.id,
-              fileIds: verifyPhotos,
-              typedItems: verifyItems,
-              voucherNo: verifyNo,
-            });
-            // Silence means the photo agreed with the entry. Only a
-            // disagreement, or a read that could not run, is worth a message.
             if (note) await sendMessage(chatId, note).catch(() => {});
           }
           await sendReportMenu(chatId, userCapabilities(user).map((c) => c.button));
@@ -1641,7 +1628,7 @@ export async function POST(req: NextRequest) {
             });
             return NextResponse.json({ ok: true });
           }
-          const ref = await captureFlowPhoto(msg, state.kind, PP_BAG_PHOTO_KIND);
+          const ref = await captureFlowPhoto(msg, state.kind);
           if (!ref) {
             await sendMessage(chatId, "⚠️ ፎቶውን ማውረድ አልተቻለም። እባክዎ ድጋሚ ይሞክሩ።", { reply_markup: photosKeyboard });
             return NextResponse.json({ ok: true });
@@ -1904,7 +1891,8 @@ export async function POST(req: NextRequest) {
 
     /* ── Free-text/photo capture (daily report, materials, HR) ── */
     if (session.state === "awaiting_capture" && session.capture && user) {
-      const photo = hasPhoto(msg) ? await storeIncomingPhoto(msg) : null;
+      // Straight from Telegram — nothing here is uploaded.
+      const photo = hasPhoto(msg) ? telegramFileId(msg) : null;
       if (hasPhoto(msg) && !photo) {
         await sendMessage(chatId, "⚠️ ፎቶውን ማውረድ አልተቻለም። እባክዎ ድጋሚ ይሞክሩ።", {
           reply_markup: CHANGE_CANCEL_KEYBOARD,
@@ -1913,7 +1901,7 @@ export async function POST(req: NextRequest) {
       }
 
       const capture = { ...session.capture };
-      capture.photoFileIds = [...(capture.photoFileIds || []), ...(photo ? [photo.id] : [])];
+      capture.photoFileIds = [...(capture.photoFileIds || []), ...(photo ? [photo] : [])];
       if (text) capture.text = capture.text ? `${capture.text}\n${text}` : text;
       session.capture = capture;
 
@@ -2051,15 +2039,18 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true });
       }
 
-      const stored = await storeIncomingPhoto(msg);
-      if (!stored) {
+      // Downloaded to be read, never uploaded. What is KEPT is the Telegram
+      // file id, which resolves back to the same image on demand.
+      const tgFileId = telegramFileId(msg);
+      const bytes = tgFileId ? await loadImage(tgFileId) : null;
+      if (!tgFileId || !bytes) {
         await sendMessage(chatId, "⚠️ ፋይሉን ማውረድ አልተቻለም። እባክዎ ድጋሚ ይሞክሩ።");
         return NextResponse.json({ ok: true });
       }
 
       const extraction = await classifyIngestion({
-        imageBase64: stored.buffer.toString("base64"),
-        imageContentType: stored.contentType,
+        imageBase64: bytes.base64,
+        imageContentType: bytes.contentType,
         text: text || undefined,
         priorDraft: {
           docType: session.draft.docType,
@@ -2077,7 +2068,7 @@ export async function POST(req: NextRequest) {
         const capKey = session.draft.capKey || docType;
         const { reply, ref } = await saveExtractedRecord(
           { ...extraction, docType: docType as IngestionExtraction["docType"] },
-          { fileId: stored.id, userName: submitterName }
+          { fileId: tgFileId, userName: submitterName }
         );
         await finalizeSubmission(session, ref, capKey);
         await logActivity({
@@ -2101,7 +2092,7 @@ export async function POST(req: NextRequest) {
         session.draft = {
           ...session.draft,
           docType,
-          fileId: stored.id,
+          fileId: tgFileId,
           extracted: extraction.fields,
           missing: extraction.missing,
         };

@@ -15,6 +15,23 @@ import sql, { first, isUuid, jsonb } from "@/lib/sql";
 // named differently (the name must match EXACTLY, including hyphens).
 export const BUCKET = process.env.STORAGE_BUCKET || "mintech-files";
 
+/** The storage `kind` for PP bag damage photos — the only uploads left. */
+export const PP_BAG_PHOTO_KIND = "pp_bag_damage";
+
+/**
+ * How long a PP bag damage photo is kept, AND how far back duplicates are
+ * searched. One constant for both, on purpose: the duplicate check compares
+ * against stored hashes and the hashes are deleted with their photos, so a
+ * retention longer than the search window keeps images nothing looks at, and a
+ * search window longer than the retention promises a comparison that cannot
+ * happen.
+ *
+ * It lives here rather than in pp-bag-damage.ts because that module imports this
+ * one; the reverse would be a cycle. It is re-exported from there, which is
+ * where it reads as a rule about damage reports rather than about a bucket.
+ */
+export const PP_BAG_RETENTION_DAYS = 90;
+
 let _client: ReturnType<typeof createClient> | null = null;
 
 function client() {
@@ -153,12 +170,11 @@ export async function deleteFile(id: string): Promise<void> {
  * a year; reaping them after 72 hours would make re-submitting an old photo
  * undetectable. They have their own long sweep — purgePpBagPhotos below.
  *
- * Finance receipts are excluded for a different reason: they are the evidence
- * behind a money figure, and an auditor asking about a purchase three months on
- * needs the paper, not just the number that was typed. purgeFinanceReceipts
- * sweeps them on their own retention.
+ * Nothing else is listed because nothing else is uploaded any more: since
+ * migration 0025 every other flow keeps a Telegram file id and the bytes never
+ * reach this bucket. purgeFinanceReceipts is kept for the rows filed before that.
  */
-const LONG_RETENTION_KINDS = ["pp_bag_damage", "finance_receipt"];
+const LONG_RETENTION_KINDS = ["pp_bag_damage"];
 
 export async function purgeOldPhotos(hours = 72, batch = 500): Promise<{ deleted: number }> {
   // Photos of a report sitting in the recycle bin are spared. The report is
@@ -231,7 +247,7 @@ export async function purgeFinanceReceipts(days = 730, batch = 500): Promise<{ d
   return { deleted: rows.length };
 }
 
-export async function purgePpBagPhotos(days = 365, batch = 500): Promise<{ deleted: number }> {
+export async function purgePpBagPhotos(days = PP_BAG_RETENTION_DAYS, batch = 500): Promise<{ deleted: number }> {
   const rows = await sql<{ id: string; storage_path: string }[]>`
     select id, storage_path
       from stored_files

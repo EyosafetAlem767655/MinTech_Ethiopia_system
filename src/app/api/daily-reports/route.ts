@@ -23,7 +23,8 @@ export async function GET(req: NextRequest) {
   const [daily, activeEmployees] = await Promise.all([
     sql`
       select id as _id, full_name as "fullName", positions, date_key as "dateKey",
-             text, photo_file_ids as "photoFileIds", created_at as "createdAt"
+             text, (photo_file_ids::text[] || tg_file_ids) as "photoFileIds",
+             created_at as "createdAt"
         from daily_reports order by created_at desc limit ${limit}
     `,
     sql<{ id: string; full_name: string; positions: string[] }[]>`

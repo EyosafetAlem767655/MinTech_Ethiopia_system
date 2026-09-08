@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   const prs = await sql`
     select id as _id, title, amount, requested_by as "requestedBy", justification,
-           photo_file_id as "photoFileId", source, status,
+           coalesce(photo_file_id::text, tg_file_id) as "photoFileId", source, status,
            decided_by as "decidedBy", decided_at as "decidedAt",
            legitimacy, created_at as "createdAt"
       from purchase_requests

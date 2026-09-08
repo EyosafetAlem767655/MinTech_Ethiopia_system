@@ -449,7 +449,19 @@ export function ledgerUnitOf(key: string): "pcs" | "t" | null {
  * never told is how a bag count silently triples. The prompt shows what was
  * typed so the common case is one keystroke.
  */
-function voucherItemSteps(opts: { kinds: readonly LedgerKind[]; costSkippable: boolean }): AssetStep[] {
+function voucherItemSteps(opts: {
+  kinds: readonly LedgerKind[];
+  costSkippable: boolean;
+  /**
+   * Whether to ask what the line cost.
+   *
+   * False for the store issue voucher. Finance prices every issued item from the
+   * monthly price list, so asking the storekeeper invites a second number that
+   * disagrees with the one the report is actually built from. The GRV still
+   * asks: there the supplier's invoice IS the price.
+   */
+  askUnitCost: boolean;
+}): AssetStep[] {
   return Array.from({ length: MAX_VOUCHER_ITEMS }).flatMap<AssetStep>((_, idx) => {
     const i = idx + 1;
     const k = itemKeys(i);
@@ -484,14 +496,20 @@ function voucherItemSteps(opts: { kinds: readonly LedgerKind[]; costSkippable: b
         type: "number",
         when: asked,
       },
-      {
-        id: k.unitCost,
-        label: `ዕቃ ${i} · Unit Cost`,
-        prompt: `💲 ዕቃ ${i} — የነጠላ ዋጋ (Unit Cost)። ${opts.costSkippable ? 'ካልታወቀ "-" ይላኩ።' : "ካልታወቀ 0 ይፃፉ።"}`,
-        type: "number",
-        skippable: opts.costSkippable,
-        when: asked,
-      },
+      ...(opts.askUnitCost
+        ? [
+            {
+              id: k.unitCost,
+              label: `ዕቃ ${i} · Unit Cost`,
+              prompt: `💲 ዕቃ ${i} — የነጠላ ዋጋ (Unit Cost)። ${
+                opts.costSkippable ? 'ካልታወቀ "-" ይላክ።' : "ካልታወቀ 0 ይጻፉ።"
+              }`,
+              type: "number" as const,
+              skippable: opts.costSkippable,
+              when: asked,
+            },
+          ]
+        : []),
       {
         id: k.ledger,
         label: `ዕቃ ${i} · Stock item`,
@@ -577,7 +595,7 @@ const GRV_STEPS: AssetStep[] = [
     type: "text",
     skippable: true,
   },
-  ...voucherItemSteps({ kinds: ["bag"], costSkippable: false }),
+  ...voucherItemSteps({ kinds: ["bag"], costSkippable: false, askUnitCost: true }),
   {
     id: "currency",
     prompt: "💱 በየትኛው ገንዘብ ተከፍሏል?",
@@ -599,23 +617,22 @@ const GRV_STEPS: AssetStep[] = [
 /**
  * Everything taken out of the warehouse.
  *
- * TYPED FIRST, then photographed — the opposite order to the GRV, deliberately.
+ * TYPED ONLY — no photograph anywhere, unlike the GRV.
  *
  * On a goods receiving voucher the supplier's paper IS the source, and reading
  * it saves the reporter transcribing someone else's document. Here the person is
  * standing in the store with the items in front of them: they know what they
- * issued, and asking them to check an AI's reading of their own handwriting is
- * both slower to correct and far easier to wave through. So the questions come
- * first and the photo comes last, as evidence.
+ * issued. A photo was collected at the end for a while and checked against the
+ * entry, but it asked for a photograph to verify work nobody doubted, and it was
+ * dropped. What is typed is the record.
  *
- * The photo is then compared against what was typed and any disagreement is
- * flagged — see backgroundVoucherVerify. It never rewrites a figure: what the
- * person at the store typed is the record.
+ * Unit cost is not asked either. The store issues goods, finance prices them,
+ * and the monthly report values every issue from its own price list — a figure
+ * typed here could only ever be a second number to disagree with that one.
  *
  * Both bag kinds and raw materials are offered, because this replaced the daily
  * raw-material issue and has to keep filling the Issue column of the monthly
- * report. Unit costs are optional — the store issues goods, finance prices them,
- * and the monthly report values issues from its own price list regardless.
+ * report.
  */
 const STORE_ISSUE_STEPS: AssetStep[] = [
   { id: "date", prompt: "📅 ዕቃው የወጣበትን ቀን ይምረጡ።", type: "date" },
@@ -634,21 +651,14 @@ const STORE_ISSUE_STEPS: AssetStep[] = [
     type: "text",
     skippable: true,
   },
-  ...voucherItemSteps({ kinds: ["bag", "material"], costSkippable: true }),
+  ...voucherItemSteps({ kinds: ["bag", "material"], costSkippable: true, askUnitCost: false }),
   { id: "remarks", prompt: "📝 አስተያየት (Remarks) ካለ ይፃፉ።", type: "text", skippable: true },
   { id: "issuedBy", prompt: "🧑 ያወጣው (Issued by) ማን ነው?", type: "text", skippable: true },
   { id: "approvedBy", prompt: "🧑 ያፀደቀው (Approved by) ማን ነው?", type: "text", skippable: true },
   { id: "receivedBy", prompt: "🧑 የተረከበው (Received by) ማን ነው?", type: "text", skippable: true },
-  // Last, and as evidence rather than input. Optional, because the voucher is
-  // often filled at a bench with no camera to hand — but when a photo is sent it
-  // is read and compared against everything typed above.
-  {
-    id: "photos",
-    prompt:
-      `📷 የቫውቸሩን ፎቶ ይላኩ — እስከ ${MAX_FLOW_PHOTOS} ፎቶ። ከጨረሱ በኋላ "✅ ጨርሻለሁ" ይጫኑ።\n` +
-      `<i>ፎቶው ካስገቡት ጋር ይነጻጸራል። ልዩነት ካለ እንነግርዎታለን። ፎቶ ከሌለ "✅ ጨርሻለሁ" ይጫኑ።</i>`,
-    type: "photos",
-  },
+  // No photo step. It was collected last and checked against the entry, but the
+  // person filling this in is standing at the shelf and already knows what they
+  // took — it asked for a photograph to verify work nobody doubted.
 ];
 
 /* ────────────────────────── Monthly price list (finance) ─────────────────── */
@@ -1035,6 +1045,55 @@ export function stepsFor(kind: AssetFlowKind, draft: Record<string, string | num
  *     the paper form itself calls the field;
  *  3. the prompt with its emoji and its trailing Amharic verb stripped.
  */
+/** Every step a flow declares, `when` guards ignored. */
+export function allStepsFor(kind: AssetFlowKind): AssetStep[] {
+  return STEPS[kind];
+}
+
+/**
+ * A readable name for a draft key that has no step behind it.
+ *
+ * Two kinds of key end up here. The paste-only reports — daily production and
+ * the opening balance — have exactly two steps between them and thirty-odd
+ * figures, none of which the step table knows about. And a handful of keys are
+ * written by an extraction rather than asked for, `unit` on a voucher line being
+ * one. Both were invisible to the editor, which is what "no edit is happening"
+ * looked like from the bot.
+ */
+export function draftKeyLabel(key: string): string {
+  const bag = (rest: string) => {
+    const parsed = parseBagLedgerKey(rest);
+    return parsed ? `${bagLabel(parsed.size, parsed.colour)}` : rest;
+  };
+
+  if (key.startsWith(PROD_PREFIX)) return `ምርት · ${productLabel(key.slice(PROD_PREFIX.length))}`;
+  if (key.startsWith(STOCK_PREFIX)) return `ክምችት · ${productLabel(key.slice(STOCK_PREFIX.length))}`;
+  if (key.startsWith(DELIVERED_PREFIX)) return `Delivered · ${productLabel(key.slice(DELIVERED_PREFIX.length))}`;
+  if (key.startsWith(BRAND_PREFIX)) return `ምርቶች · ${productLabel(key.slice(BRAND_PREFIX.length))}`;
+  if (key.startsWith(MATERIAL_PREFIX)) return `ጥሬ ዕቃ · ${key.slice(MATERIAL_PREFIX.length)}`;
+  // Both paste families namespace bags the same way, so one branch serves both.
+  if (key.startsWith(BAG_PREFIX)) return `ከረጪት · ${bag(key.slice(BAG_PREFIX.length))}`;
+
+  // A voucher line's unit of measure: "unit3" → "ዕቃ 3 · Unit".
+  const item = key.match(/^([a-z]+)(\d+)$/);
+  if (item) {
+    const NAMES: Record<string, string> = {
+      unit: "Unit",
+      desc: "Description",
+      stock: "Stock Code",
+      qty: "Qty",
+      cost: "Unit Cost",
+      class: "Stock item",
+      lqty: "Stock qty",
+      more: "ሴላ ዕቃ?",
+    };
+    const name = NAMES[item[1]];
+    if (name) return `ዕቃ ${item[2]} · ${name}`;
+  }
+
+  return key;
+}
+
 export function stepLabel(step: AssetStep): string {
   if (step.label) return step.label;
 
@@ -1250,20 +1309,11 @@ export function assetPreview(state: AssetFlowState): string {
   }
 
   if (state.kind === "production_daily") {
-    // Blank and zero are shown differently, and that matters more now than it
-    // did: there is no follow-up question any more, so a line the reporter
-    // skipped in the template goes straight to the review card. Printing it as
-    // "0" would put a measurement nobody took in front of someone about to
-    // approve it. It IS saved as 0 — but only after being seen as blank.
-    const blanks: string[] = [];
-    const cell = (key: string, label: string) => {
-      const v = d[key];
-      if (v === undefined || v === "") {
-        blanks.push(label);
-        return `  • ${label}: —`;
-      }
-      return `  • ${label}: ${qty(Number(v) || 0)}`;
-    };
+    // A blank line in the template is a zero, so it is shown as one. The card
+    // used to print "—" and warn that N lines were blank; on a report where a
+    // blank plainly means none produced, none in stock or none dispatched, that
+    // was a warning about the normal case.
+    const cell = (key: string, label: string) => `  • ${label}: ${qty(Number(d[key]) || 0)}`;
 
     const prod = PRODUCTION_PRODUCTS.map((c) => cell(`${PROD_PREFIX}${c}`, productLabel(c))).join("\n");
     // Stock lists every product even at zero: "we have none left" is a real and
@@ -1287,11 +1337,7 @@ export function assetPreview(state: AssetFlowState): string {
       `🚚 <b>Delivered amount (ቶን)</b>\n${delivered}\n` +
       `  ─────────\n  <b>Total: ${qty(deliveredTotal)}</b>\n\n` +
       `📦 <b>ክምችት (ቶን)</b>\n${stock}\n\n` +
-      `🧺 <b>ቀሪ ከረጢት (ብዛት)</b>\n${bags}\n` +
-      (blanks.length > 0
-        ? `\n⚠️ <b>${blanks.length} መስመር ባዶ ነው</b> — በ0 ይመዘገባል።\n` +
-          `<i>ማስተካከል ከፈለጉ ቅጂውን ሞልተው ድጋሚ ይላኩ።</i>\n`
-        : "")
+      `🧺 <b>ቀሪ ከረጢት (ብዛት)</b>\n${bags}\n`
     );
   }
 
@@ -1926,7 +1972,7 @@ export async function saveAssetReport(
   }
 
   const [row] = await sql<{ id: string }[]>`
-    insert into purchase_requests (title, quantity, kind, justification, photo_file_id,
+    insert into purchase_requests (title, quantity, kind, justification, tg_file_id,
                                    requested_by, source, status, legitimacy)
     values (${String(d.title || "")}, ${Number(d.quantity) || null}, ${String(d.kind || "")},
             ${String(d.reason || "") || null}, ${state.photoFileId || null},

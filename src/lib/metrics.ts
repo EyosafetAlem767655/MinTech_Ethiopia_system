@@ -357,7 +357,8 @@ export async function monthOnMonth(now = new Date()) {
 export async function pendingPurchaseRequests() {
   const rows = await sql`
     select id as _id, title, amount, requested_by as "requestedBy", justification,
-           status, legitimacy, photo_file_id as "photoFileId", created_at as "createdAt"
+           status, legitimacy, coalesce(photo_file_id::text, tg_file_id) as "photoFileId",
+           created_at as "createdAt"
       from purchase_requests
      where status in ('pending', 'deferred')
      order by created_at asc

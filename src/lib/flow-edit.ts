@@ -1,8 +1,9 @@
 import { geminiGenerate } from "@/lib/llm";
 import {
+  allStepsFor,
+  draftKeyLabel,
   parseQty,
   stepLabel,
-  stepsFor,
   type AssetFlowKind,
   type AssetStep,
 } from "@/lib/asset-flows";
@@ -58,28 +59,67 @@ export interface FlowEditResult {
 }
 
 /**
- * Every field the reporter has actually answered, in flow order.
+ * Every field the reporter has actually answered.
  *
- * Photo and paste steps are excluded — a photo is replaced by sending another
- * one, and a paste is replaced by pasting again; neither is a value that can be
- * typed over. Everything else is fair game.
+ * This walks THE DRAFT, not the step table, and that is the whole point. Walking
+ * the steps looked right and quietly hid three classes of field:
+ *
+ *  - the 36 figures of the daily production report and the 19 of the opening
+ *    balance, which arrive through one paste step and have no steps of their own
+ *    at all — the editor listed a single field and nothing a correction named
+ *    could match, which is exactly what "no edit is happening" looked like;
+ *  - `unit` on a voucher line, written by an extraction and never asked for;
+ *  - any step whose `when` guard has since gone false while its answer stayed in
+ *    the draft.
+ *
+ * A step is still used wherever one exists — it supplies the label, the choice
+ * list and the validation. A key without one is edited as free text under a
+ * decoded label. Order follows the flow, with the step-less keys after it.
+ *
+ * Photo and paste steps are the only exclusions: a photo is replaced by sending
+ * another one and a paste by pasting again, so neither is a value to type over.
  */
 export function editableFields(
   kind: AssetFlowKind,
   draft: Record<string, string | number>
 ): EditableField[] {
+  const answered = (key: string) => {
+    const v = draft[key];
+    return v !== undefined && v !== "";
+  };
+
   const out: EditableField[] = [];
-  for (const step of stepsFor(kind, draft)) {
-    if (step.type === "photo" || step.type === "photos" || step.type === "paste") continue;
-    const raw = draft[step.id];
-    if (raw === undefined || raw === "") continue;
+  const taken = new Set<string>();
+
+  const push = (step: AssetStep, label: string) => {
+    if (taken.has(step.id)) return;
+    taken.add(step.id);
     out.push({
       index: out.length + 1,
       step,
-      label: stepLabel(step),
-      value: displayValue(step, raw),
+      label,
+      value: displayValue(step, draft[step.id]),
     });
+  };
+
+  // Flow order first, and the UNFILTERED step list: a `when` guard decides what
+  // to ask next, never what may be corrected.
+  for (const step of allStepsFor(kind)) {
+    if (step.type === "photo" || step.type === "photos" || step.type === "paste") continue;
+    if (answered(step.id)) push(step, stepLabel(step));
   }
+
+  // Then everything else the draft holds. `fill` and internal bookkeeping have
+  // no place on the list, but there is no allow-list here on purpose — the
+  // complaint was precisely that a curated list hides things.
+  for (const key of Object.keys(draft)) {
+    if (taken.has(key) || !answered(key)) continue;
+    // Numeric where the value is numeric, so a correction is still checked as a
+    // number rather than stored as text.
+    const numeric = typeof draft[key] === "number" || /^-?\d*\.?\d+$/.test(String(draft[key]));
+    push({ id: key, prompt: key, type: numeric ? "number" : "text" }, draftKeyLabel(key));
+  }
+
   return out;
 }
 

@@ -12,7 +12,7 @@ export async function GET(req: NextRequest) {
     sql`
       select id as _id, vendor, client, amount, category,
              receipt_date as "receiptDate", tax_invoice_number as "taxInvoiceNumber",
-             photo_file_id as "photoFileId", submitted_by as "submittedBy",
+             coalesce(photo_file_id::text, tg_file_id) as "photoFileId", submitted_by as "submittedBy",
              source, legitimacy, created_at as "createdAt"
         from receipts
        where receipt_date >= ${start} and receipt_date < ${end}

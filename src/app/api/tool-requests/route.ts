@@ -5,13 +5,15 @@ export const dynamic = "force-dynamic";
 
 /** GET — tool purchase requests filed from the bot (Asset Management tab). */
 export async function GET() {
-  // quantity / kind arrive in 0013; fall back to the core columns when a
-  // deployment is running ahead of its migrations rather than 500-ing.
+  // quantity / kind arrive in 0013 and tg_file_id in 0025; fall back to the core
+  // columns when a deployment is running ahead of its migrations rather than
+  // 500-ing. The fallback loses the photo of a request filed since 0025, which
+  // is a missing thumbnail rather than a missing request.
   let rows: Record<string, unknown>[];
   try {
     rows = await sql<Record<string, unknown>[]>`
       select id as _id, title, quantity, kind, justification, amount,
-             photo_file_id as "photoFileId", legitimacy, status,
+             coalesce(photo_file_id::text, tg_file_id) as "photoFileId", legitimacy, status,
              requested_by as "requestedBy", created_at as "createdAt"
         from purchase_requests
        order by created_at desc

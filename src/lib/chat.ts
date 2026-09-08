@@ -411,7 +411,8 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<unk
       const who = args.person ? `%${String(args.person)}%` : "%";
       const [daily, hr, materials] = await Promise.all([
         sql`select full_name as "fullName", positions, date_key as "dateKey", text,
-                   array_length(photo_file_ids, 1) as photos, created_at as "createdAt"
+                   array_length(photo_file_ids::text[] || tg_file_ids, 1) as photos,
+                   created_at as "createdAt"
               from daily_reports
              where created_at >= ${since} and full_name ilike ${who}
              order by created_at desc limit ${limit}`,

@@ -1,5 +1,5 @@
 import sql, { first, jsonb } from "@/lib/sql";
-import { getFileBytes } from "@/lib/storage";
+import { getFileBytes, PP_BAG_PHOTO_KIND, PP_BAG_RETENTION_DAYS } from "@/lib/storage";
 import { analyseDamagePhoto, type DamagePhotoCheck } from "@/lib/llm";
 import { perceptualHash, DUPLICATE_THRESHOLD } from "@/lib/phash";
 import { exifSanityCheck } from "@/lib/exif";
@@ -17,11 +17,10 @@ import { exifSanityCheck } from "@/lib/exif";
  * path.
  */
 
-/** The storage `kind` for these uploads. Excluded from the 72h photo purge. */
-export const PP_BAG_PHOTO_KIND = "pp_bag_damage";
-
-/** How far back duplicates are searched, and how long photos are kept. */
-export const PP_BAG_RETENTION_DAYS = 365;
+// Both defined in storage.ts — that module cannot import this one without a
+// cycle — and re-exported here, where they read as rules about damage reports
+// rather than about a bucket.
+export { PP_BAG_PHOTO_KIND, PP_BAG_RETENTION_DAYS };
 
 export interface PpPhotoResult {
   fileId: string;
@@ -46,7 +45,8 @@ export interface PpDamageVerdict {
  * Postgres computes the Hamming distance itself — the 16-char hex hash casts to
  * bit(64), XOR, popcount — so we never pull every prior hash into Node. Scoped to
  * the retention window, which is what makes the promise "compared across the last
- * year" literally true: older hash rows are deleted, so they cannot match.
+ * three months" literally true: older hash rows are deleted, so they cannot
+ * match.
  */
 async function findDuplicate(phash: string, excludeReportId: string): Promise<string | null> {
   const since = new Date(Date.now() - PP_BAG_RETENTION_DAYS * 86400_000);

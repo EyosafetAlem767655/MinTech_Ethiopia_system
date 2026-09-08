@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import sql from "@/lib/sql";
-import { purgeFinanceReceipts, purgeOldPhotos, purgePpBagPhotos } from "@/lib/storage";
+import {
+  purgeFinanceReceipts,
+  purgeOldPhotos,
+  purgePpBagPhotos,
+  PP_BAG_RETENTION_DAYS,
+} from "@/lib/storage";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -19,7 +24,7 @@ export async function GET(req: NextRequest) {
 
   const hours = Math.max(1, Number(req.nextUrl.searchParams.get("hours")) || 72);
   const ppDaysRaw = req.nextUrl.searchParams.get("ppDays");
-  const ppDays = ppDaysRaw === null ? 365 : Math.max(0, Number(ppDaysRaw) || 0);
+  const ppDays = ppDaysRaw === null ? PP_BAG_RETENTION_DAYS : Math.max(0, Number(ppDaysRaw) || 0);
   const finDaysRaw = req.nextUrl.searchParams.get("financeDays");
   const financeDays = finDaysRaw === null ? 730 : Math.max(0, Number(finDaysRaw) || 0);
 
