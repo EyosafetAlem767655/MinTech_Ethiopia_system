@@ -3,7 +3,13 @@ import sql from "@/lib/sql";
 
 export const dynamic = "force-dynamic";
 
-/** GET — the day's payment summary, one row per day, newest first. */
+/**
+ * GET — the day's payment summary, one row per day, newest first.
+ *
+ * The receipt photograph is not part of this, by design. It is never uploaded
+ * and its Telegram id is no longer kept, so there is nothing here to render it
+ * from — the ten figures below are the whole record of the day's trading.
+ */
 export async function GET() {
   try {
     const rows = await sql<Record<string, unknown>[]>`
@@ -15,7 +21,7 @@ export async function GET() {
              voucher_payment as "voucherPayment", voucher_refund as "voucherRefund",
              total_payment as "totalPayment", total_refund as "totalRefund",
              net_total as "netTotal", printed_total as "printedTotal",
-             tg_file_ids as "tgFileIds", extraction, reported_by as "reportedBy",
+             extraction, reported_by as "reportedBy",
              created_at as "createdAt"
         from daily_sales_summaries
        order by date desc

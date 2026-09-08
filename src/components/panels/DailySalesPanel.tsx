@@ -29,7 +29,6 @@ interface Row {
   totalRefund: number;
   netTotal: number;
   printedTotal: number | null;
-  tgFileIds: string[] | null;
   reportedBy: string;
 }
 
@@ -80,8 +79,11 @@ export default function DailySalesPanel() {
                 ))}
                 <th className="p-2 font-bold">Payments</th>
                 <th className="p-2 font-bold">Refunds</th>
+                {/* No receipt column. The photograph is read once in the bot,
+                    checked by the reporter on the edit card, and never kept —
+                    not in the bucket and not as a Telegram id. What survives the
+                    day is the figures on this row. */}
                 <th className="p-2 font-bold">Net</th>
-                <th className="p-2 font-bold">📷</th>
               </tr>
             </thead>
             <tbody>
@@ -117,23 +119,6 @@ export default function DailySalesPanel() {
                     </td>
                     <td className="p-2 tabular-nums text-stone-600">{money(r.totalRefund)}</td>
                     <td className="p-2 font-bold tabular-nums text-clay-900">{money(r.netTotal)}</td>
-                    <td className="p-2 text-center">
-                      {/* /api/files serves a Telegram id as happily as a stored
-                          uuid, so the receipt is viewable without a byte of it
-                          living in storage. */}
-                      {r.tgFileIds?.[0] ? (
-                        <a
-                          href={`/api/files/${r.tgFileIds[0]}`}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-clay-600"
-                        >
-                          view
-                        </a>
-                      ) : (
-                        <span className="text-stone-300">—</span>
-                      )}
-                    </td>
                   </tr>
                 );
               })}
@@ -149,7 +134,6 @@ export default function DailySalesPanel() {
                 <td className="p-2 tabular-nums">{money(sum("totalPayment"))}</td>
                 <td className="p-2 tabular-nums">{money(sum("totalRefund"))}</td>
                 <td className="p-2 tabular-nums text-clay-900">{money(sum("netTotal"))}</td>
-                <td className="p-2" />
               </tr>
             </tfoot>
           </table>

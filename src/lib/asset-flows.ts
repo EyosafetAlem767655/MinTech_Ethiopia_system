@@ -1765,7 +1765,18 @@ export async function saveAssetReport(
         ${cols.voucher_payment}, ${cols.voucher_refund},
         ${cols.total_payment}, ${cols.total_refund}, ${cols.net_total},
         ${Number(d.printedTotal) || null},
-        ${state.photoFileIds || []},
+        -- The payment summary keeps NO reference to its own photograph.
+        --
+        -- It was never uploaded — only Telegram's file id was kept, which cost
+        -- nothing and still resolved back to the image on the dashboard. That
+        -- resolving was the problem: a receipt visible on the webapp reads as a
+        -- receipt filed on the webapp, and the rule for this report is that the
+        -- ten numbers ARE the record. The reporter now checks the read on the
+        -- edit card before approving it, which is where a misread should be
+        -- caught anyway — while the person who took the photo is still looking
+        -- at the till. Written empty rather than omitted so that re-filing a day
+        -- CLEARS whatever an older row was carrying.
+        ${[] as string[]},
         ${state.extraction ? sql.json({ ...state.extraction }) : null},
         ${reportedBy}, 'telegram'
       )
