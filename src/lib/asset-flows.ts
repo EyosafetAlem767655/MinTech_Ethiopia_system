@@ -22,6 +22,7 @@ import {
 } from "@/lib/products";
 import { upsertOpsDay, opsDateLabel } from "@/lib/ops-report";
 import { runAfter } from "@/lib/after";
+import { insertRow } from "@/lib/insert";
 import {
   computeTotals,
   METHOD_LABEL,
@@ -1891,36 +1892,53 @@ export async function saveAssetReport(
     // voucher collide with the first and be refused as a duplicate.
     const voucherNo = String((isGrv ? d.grvNo : d.sivNo) || "").trim() || null;
 
-    const [header] = isGrv
-      ? await sql<{ id: string }[]>`
-          insert into goods_receiving_vouchers
-            (grv_no, date, supplier, supplier_invoice_no, purchase_order_no, receiving_store_no,
-             currency, total_amount, remarks, prepared_by, received_by, approved_by,
-             reported_by, tg_file_ids, extraction, source)
-          values (${voucherNo}, ${date}, ${String(d.supplier || "") || null},
-                  ${String(d.supplierInvoiceNo || "") || null},
-                  ${String(d.purchaseOrderNo || "") || null},
-                  ${String(d.receivingStoreNo || "") || null},
-                  ${d.currency === "USD" ? "USD" : "ETB"},
-                  ${Number(d.totalAmount) || null}, ${String(d.remarks || "") || null},
-                  ${String(d.preparedBy || "") || null}, ${String(d.receivedBy || "") || null},
-                  ${String(d.approvedBy || "") || null},
-                  ${reportedBy}, ${photos}, ${extraction}, 'telegram')
-          returning id`
-      : await sql<{ id: string }[]>`
-          insert into store_issue_vouchers
-            (siv_no, date, issuing_store, issued_to, department_section, store_requisition_no,
-             remarks, issued_by, approved_by, received_by,
-             reported_by, tg_file_ids, extraction, source)
-          values (${voucherNo}, ${date}, ${String(d.issuingStore || "") || null},
-                  ${String(d.issuedTo || "") || null},
-                  ${String(d.departmentSection || "") || null},
-                  ${String(d.requisitionNo || "") || null},
-                  ${String(d.remarks || "") || null},
-                  ${String(d.issuedBy || "") || null}, ${String(d.approvedBy || "") || null},
-                  ${String(d.receivedBy || "") || null},
-                  ${reportedBy}, ${photos}, ${extraction}, 'telegram')
-          returning id`;
+    // Both go through insertRow so that `tg_file_ids` (migration 0023) missing
+    // costs the photo references rather than the whole voucher — a GRV is
+    // twenty typed fields and up to eight line items, and losing that to a
+    // column is not a trade worth making.
+    const header = isGrv
+      ? await insertRow(
+          "goods_receiving_vouchers",
+          {
+            grv_no: voucherNo,
+            date,
+            supplier: String(d.supplier || "") || null,
+            supplier_invoice_no: String(d.supplierInvoiceNo || "") || null,
+            purchase_order_no: String(d.purchaseOrderNo || "") || null,
+            receiving_store_no: String(d.receivingStoreNo || "") || null,
+            currency: d.currency === "USD" ? "USD" : "ETB",
+            total_amount: Number(d.totalAmount) || null,
+            remarks: String(d.remarks || "") || null,
+            prepared_by: String(d.preparedBy || "") || null,
+            received_by: String(d.receivedBy || "") || null,
+            approved_by: String(d.approvedBy || "") || null,
+            reported_by: reportedBy,
+            tg_file_ids: photos,
+            extraction,
+            source: "telegram",
+          },
+          { optional: ["tg_file_ids"], source: "asset-flows" }
+        )
+      : await insertRow(
+          "store_issue_vouchers",
+          {
+            siv_no: voucherNo,
+            date,
+            issuing_store: String(d.issuingStore || "") || null,
+            issued_to: String(d.issuedTo || "") || null,
+            department_section: String(d.departmentSection || "") || null,
+            store_requisition_no: String(d.requisitionNo || "") || null,
+            remarks: String(d.remarks || "") || null,
+            issued_by: String(d.issuedBy || "") || null,
+            approved_by: String(d.approvedBy || "") || null,
+            received_by: String(d.receivedBy || "") || null,
+            reported_by: reportedBy,
+            tg_file_ids: photos,
+            extraction,
+            source: "telegram",
+          },
+          { optional: ["tg_file_ids"], source: "asset-flows" }
+        );
 
     if (items.length > 0) {
       const rows = items.map((it, i) => ({
@@ -1982,13 +2000,23 @@ export async function saveAssetReport(
     return { id: row.id, table: "wht_holders" };
   }
 
-  const [row] = await sql<{ id: string }[]>`
-    insert into purchase_requests (title, quantity, kind, justification, tg_file_id,
-                                   requested_by, source, status, legitimacy)
-    values (${String(d.title || "")}, ${Number(d.quantity) || null}, ${String(d.kind || "")},
-            ${String(d.reason || "") || null}, ${state.photoFileId || null},
-            ${reportedBy}, 'telegram', 'pending',
-            ${state.check ? sql.json({ ...state.check }) : null})
-    returning id`;
+  // insertRow, not a tagged template, so that a database still missing
+  // `tg_file_id` (migration 0025) costs the photo REFERENCE rather than the
+  // whole request. This is the exact insert that was losing tool requests.
+  const row = await insertRow(
+    "purchase_requests",
+    {
+      title: String(d.title || ""),
+      quantity: Number(d.quantity) || null,
+      kind: String(d.kind || ""),
+      justification: String(d.reason || "") || null,
+      tg_file_id: state.photoFileId || null,
+      requested_by: reportedBy,
+      source: "telegram",
+      status: "pending",
+      legitimacy: state.check ? sql.json({ ...state.check }) : null,
+    },
+    { optional: ["tg_file_id"], source: "asset-flows" }
+  );
   return { id: row.id, table: "purchase_requests" };
 }

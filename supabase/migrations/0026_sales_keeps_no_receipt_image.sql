@@ -16,9 +16,21 @@
 -- three-month duplicate check, and a photo that was never stored can never be
 -- matched against a later one. See 0025 and src/lib/storage.ts.
 
-update daily_sales_summaries set tg_file_ids = '{}' where tg_file_ids <> '{}';
+-- Guarded the same way as 0023: this table arrives in 0024, and a file that
+-- fails on its first statement never reaches the ones after it.
+do $$
+begin
+  if to_regclass('public.daily_sales_summaries') is not null then
+    update daily_sales_summaries set tg_file_ids = '{}' where tg_file_ids <> '{}';
+  end if;
+end $$;
 
 -- The column stays. Dropping it would rewrite the table and break the wholesale
 -- export in src/lib/archive.ts, and an always-empty text[] costs a byte a row.
-comment on column daily_sales_summaries.tg_file_ids is
-  'Always empty. The payment summary is read once and never referenced again — see migration 0026.';
+do $$
+begin
+  if to_regclass('public.daily_sales_summaries') is not null then
+    comment on column daily_sales_summaries.tg_file_ids is
+      'Always empty. The payment summary is read once and never referenced again — see migration 0026.';
+  end if;
+end $$;

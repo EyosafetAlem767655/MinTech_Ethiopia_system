@@ -16,8 +16,17 @@
 -- the one column that has to change type rather than gain a sibling. It is a
 -- short-lived work queue — a job lives minutes — so there is nothing here worth
 -- preserving beyond making the cast valid for anything already queued.
-alter table sales_scan_jobs
-  alter column photo_file_ids type text[] using photo_file_ids::text[];
+-- Guarded, because 0024 DROPS this table. Without the guard, running the
+-- migrations in the wrong order — or re-running this one after 0024 — fails on
+-- "relation sales_scan_jobs does not exist" and the rest of the file, which is
+-- where the columns everything now writes to live, never runs.
+do $$
+begin
+  if to_regclass('public.sales_scan_jobs') is not null then
+    alter table sales_scan_jobs
+      alter column photo_file_ids type text[] using photo_file_ids::text[];
+  end if;
+end $$;
 
 /* ──────────────── 2. Telegram ids alongside the stored-file ids ────────────── */
 
@@ -29,6 +38,19 @@ alter table sales_scan_jobs
 -- So the two live side by side: old rows keep their uuids, new rows carry
 -- Telegram ids, and readers concatenate the two before loading. A row has one or
 -- the other, never both.
-alter table sales_receipts          add column if not exists tg_file_ids text[] not null default '{}';
+-- sales_receipts is guarded for the same reason as sales_scan_jobs above: 0024
+-- drops it. `add column if not exists` protects against the COLUMN already
+-- being there, not against the TABLE being gone — and this statement failing
+-- aborts the file, so the two below it, which add the column the voucher
+-- inserts actually write to, never run at all. That is not a hypothetical: it
+-- is how goods_receiving_vouchers ended up without the column.
+do $$
+begin
+  if to_regclass('public.sales_receipts') is not null then
+    alter table sales_receipts add column if not exists tg_file_ids text[] not null default '{}';
+  end if;
+end $$;
+
+-- These two are permanent; nothing later drops them.
 alter table goods_receiving_vouchers add column if not exists tg_file_ids text[] not null default '{}';
 alter table store_issue_vouchers     add column if not exists tg_file_ids text[] not null default '{}';

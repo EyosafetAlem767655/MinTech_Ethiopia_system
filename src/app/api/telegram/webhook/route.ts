@@ -40,6 +40,7 @@ import { parseProductionPaste } from "@/lib/production-paste";
 import { parseFinancePaste } from "@/lib/finance-paste";
 import { backgroundPurchaseReceiptCheck } from "@/lib/finance-receipts";
 import { logError } from "@/lib/errors";
+import { insertRow } from "@/lib/insert";
 import { runAfter } from "@/lib/after";
 import { PAYMENT_METHODS, paymentKey, refundKey } from "@/lib/daily-sales";
 import { applyFlowEdit, describeFlowChanges, editableFields, renderFieldList } from "@/lib/flow-edit";
@@ -506,18 +507,23 @@ async function saveExtractedRecord(
 
       const vendor = String(f.vendor || "Unknown vendor");
       const amount = Number(f.amount) || 0;
-      const [row] = await sql<{ id: string }[]>`
-        insert into receipts (vendor, client, amount, category, receipt_date, tax_invoice_number,
-                              tg_file_id, submitted_by, source, legitimacy, meta)
-        values (${vendor}, ${f.client ? String(f.client) : null}, ${amount},
-                ${f.category ? String(f.category) : null},
-                ${f.receiptDate ? new Date(String(f.receiptDate)) : new Date()},
-                ${f.taxInvoiceNumber ? String(f.taxInvoiceNumber) : null},
-                ${opts.fileId || null}, ${opts.userName}, 'telegram',
-                ${legitimacy ? sql.json(legitimacy as any) : null},
-                ${sql.json({ ...f, ...(opts.meta || {}) })})
-        returning id
-      `;
+      const row = await insertRow(
+        "receipts",
+        {
+          vendor,
+          client: f.client ? String(f.client) : null,
+          amount,
+          category: f.category ? String(f.category) : null,
+          receipt_date: f.receiptDate ? new Date(String(f.receiptDate)) : new Date(),
+          tax_invoice_number: f.taxInvoiceNumber ? String(f.taxInvoiceNumber) : null,
+          tg_file_id: opts.fileId || null,
+          submitted_by: opts.userName,
+          source: "telegram",
+          legitimacy: legitimacy ? sql.json(legitimacy as any) : null,
+          meta: sql.json({ ...f, ...(opts.meta || {}) }),
+        },
+        { optional: ["tg_file_id"], source: "telegram-webhook" }
+      );
       const legitimacyNote = legitimacy ? ` · ተዓማኒነት፦ ${legitimacy.score}%` : "";
       return {
         reply: `🧾 ደረሰኝ ተቀምጧል፦ <b>${vendor}</b> — ${amount.toLocaleString()} ETB${legitimacyNote}`,
@@ -541,12 +547,20 @@ async function saveExtractedRecord(
       const prTitle = String(f.title || "Purchase request");
       const prAmount = Number(f.amount) || 0;
       const prJustification = f.justification ? String(f.justification) : null;
-      const [pr] = await sql<{ id: string }[]>`
-        insert into purchase_requests (title, amount, requested_by, justification, tg_file_id, source, status, legitimacy)
-        values (${prTitle}, ${prAmount}, ${opts.userName}, ${prJustification}, ${opts.fileId || null},
-                'telegram', 'pending', ${legitimacy ? sql.json(legitimacy as any) : null})
-        returning id
-      `;
+      const pr = await insertRow(
+        "purchase_requests",
+        {
+          title: prTitle,
+          amount: prAmount,
+          requested_by: opts.userName,
+          justification: prJustification,
+          tg_file_id: opts.fileId || null,
+          source: "telegram",
+          status: "pending",
+          legitimacy: legitimacy ? sql.json(legitimacy as any) : null,
+        },
+        { optional: ["tg_file_id"], source: "telegram-webhook" }
+      );
       if (process.env.TELEGRAM_CEO_CHAT_ID) {
         await sendPurchaseDecisionRequest(process.env.TELEGRAM_CEO_CHAT_ID, {
           id: pr.id,
@@ -642,31 +656,51 @@ async function saveCapture(session: any, user: any): Promise<{ reply: string; re
   const text = String(capture.text || "").trim();
 
   if (capture.capKey === "daily_report") {
-    const [row] = await sql<{ id: string }[]>`
-      insert into daily_reports (user_id, full_name, positions, date_key, text, tg_file_ids, source)
-      values (${user._id}, ${user.fullName}, ${user.positions}, ${eatDateKey()}, ${text}, ${photoFileIds}, 'telegram')
-      returning id
-    `;
+    const row = await insertRow(
+      "daily_reports",
+      {
+        user_id: user._id,
+        full_name: user.fullName,
+        positions: user.positions,
+        date_key: eatDateKey(),
+        text,
+        tg_file_ids: photoFileIds,
+        source: "telegram",
+      },
+      { optional: ["tg_file_ids"], source: "telegram-webhook" }
+    );
     const photoNote = photoFileIds.length ? ` · ${photoFileIds.length} ፎቶ(ዎች)` : "";
     return { reply: `✅ የቀኑ ሪፖርት ተቀምጧል${photoNote}። አመሰግናለሁ!`, ref: { table: "daily_reports", id: row.id } };
   }
 
   if (capture.capKey === "materials") {
-    const [row] = await sql<{ id: string }[]>`
-      insert into material_counts (user_id, counted_by, date_key, raw_text, tg_file_ids)
-      values (${user._id}, ${user.fullName}, ${eatDateKey()}, ${text}, ${photoFileIds})
-      returning id
-    `;
+    const row = await insertRow(
+      "material_counts",
+      {
+        user_id: user._id,
+        counted_by: user.fullName,
+        date_key: eatDateKey(),
+        raw_text: text,
+        tg_file_ids: photoFileIds,
+      },
+      { optional: ["tg_file_ids"], source: "telegram-webhook" }
+    );
     return { reply: `📦 የዕቃ ቆጠራ ተቀምጧል። አመሰግናለሁ!`, ref: { table: "material_counts", id: row.id } };
   }
 
   if (capture.capKey === "hr") {
     const kind = (capture.hrKind || "customer_contact") as HrKind;
-    const [row] = await sql<{ id: string }[]>`
-      insert into hr_reports (user_id, full_name, kind, text, tg_file_ids)
-      values (${user._id}, ${user.fullName}, ${kind}, ${text}, ${photoFileIds})
-      returning id
-    `;
+    const row = await insertRow(
+      "hr_reports",
+      {
+        user_id: user._id,
+        full_name: user.fullName,
+        kind,
+        text,
+        tg_file_ids: photoFileIds,
+      },
+      { optional: ["tg_file_ids"], source: "telegram-webhook" }
+    );
     return { reply: `👥 ሪፖርት ተቀምጧል፦ <b>${HR_KINDS[kind].button}</b>።`, ref: { table: "hr_reports", id: row.id } };
   }
 
