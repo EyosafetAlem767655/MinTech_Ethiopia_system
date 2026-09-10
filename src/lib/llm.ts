@@ -27,7 +27,22 @@ export const VISION_MODEL = envValue("QWEN_MODEL") || "qwen-vl-max-latest";
 // generateContent REST API (not the OpenAI-compat shim, which can be flaky with
 // AI-Studio keys); this is the same request the google-genai SDK sends.
 export const GEMINI_BASE = envValue("GEMINI_BASE_URL") || "https://generativelanguage.googleapis.com/v1beta";
-export const GEMINI_MODEL = envValue("GEMINI_MODEL") || "gemini-3.5-flash-lite";
+/**
+ * Which Gemini model everything here talks to.
+ *
+ * This was `gemini-2.0-flash` and worked; it was changed to
+ * `gemini-3.5-flash-lite`, which is not a name Google publishes — there is no
+ * 3.5 line, only 1.5, 2.0, 2.5 and 3 — and every Gemini-backed feature has been
+ * failing since. `gemini-2.5-flash` is the conservative replacement: generally
+ * available, reads images, and supports both the forced-JSON responseMimeType
+ * and the function calling that the dashboard chat needs.
+ *
+ * NOTE, before changing this line to fix a failure: the env var WINS. The
+ * `detail.model` recorded on a Gemini error row is the RESOLVED name, so if a
+ * log says one thing and this file says another, GEMINI_MODEL is set in the
+ * deployment and editing the default here changes nothing.
+ */
+export const GEMINI_MODEL = envValue("GEMINI_MODEL") || "gemini-2.5-flash";
 
 /**
  * Hard ceiling for one model call, in ms.
@@ -315,6 +330,27 @@ export interface GeminiCallResult {
  * the "404 means wrong model for this key" diagnosis exist exactly once.
  */
 /**
+ * Google's own explanation for a rejected call, pulled out of the error body.
+ *
+ * The body is `{"error":{"code":400,"message":"…","status":"INVALID_ARGUMENT"}}`
+ * on every failure. The message is the useful half; the status is kept when it
+ * is not already spelled out inside the message. Trimmed hard because this ends
+ * up in an error-log row and, for the receipt reader, in a Telegram reply.
+ */
+function geminiErrorReason(body: string): string {
+  try {
+    const parsed = JSON.parse(body) as { error?: { message?: string; status?: string } };
+    const message = String(parsed.error?.message || "").trim();
+    const status = String(parsed.error?.status || "").trim();
+    if (message) return (status && !message.includes(status) ? `${status}: ${message}` : message).slice(0, 300);
+  } catch {
+    // Not JSON — an HTML error page from a proxy, most likely. Still better
+    // than nothing, so it falls through to the raw text below.
+  }
+  return body.replace(/\s+/g, " ").trim().slice(0, 300);
+}
+
+/**
  * One call, one attempt. `geminiGenerate` below wraps this with the retry.
  *
  * Split so the retry cannot accidentally share an AbortController between
@@ -366,12 +402,25 @@ async function geminiAttempt(
       signal: ctrl.signal,
     });
     if (!res.ok) {
-      const body = (await res.text().catch(() => "")).slice(0, 500);
+      const body = (await res.text().catch(() => "")).slice(0, 2000);
       console.error("Gemini generateContent failed:", res.status, body);
       // 404 here almost always means GEMINI_MODEL is wrong for this key, which
       // is worth saying out loud rather than leaving as a bare status code.
       const hint = res.status === 404 ? ` (model "${GEMINI_MODEL}" not available for this key)` : "";
-      return { ok: false, text: "", calls: [], error: `Gemini HTTP ${res.status}${hint}` };
+      // Google explains every rejection in the response body, and this used to
+      // read it only to throw it away — leaving "Gemini HTTP 400" in the error
+      // log, which says a request was refused but not one word about why. A 400
+      // has a dozen unrelated causes (an unsupported mime type, an oversized
+      // inline image, a generationConfig field the model rejects, a malformed
+      // tool schema), and telling them apart from the status code alone is
+      // guesswork. The reason travels with the error from here on.
+      const reason = geminiErrorReason(body);
+      return {
+        ok: false,
+        text: "",
+        calls: [],
+        error: `Gemini HTTP ${res.status}${hint}${reason ? ` — ${reason}` : ""}`,
+      };
     }
     const data = (await res.json()) as {
       candidates?: {

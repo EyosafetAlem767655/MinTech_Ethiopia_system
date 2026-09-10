@@ -54,9 +54,18 @@ export const PRODUCTION_PRODUCTS = PRODUCT_ORDER;
 export const BAG_SIZES = ["kg25", "kg40"] as const;
 export type BagSize = (typeof BAG_SIZES)[number];
 
+/**
+ * Colours are APPENDED, never inserted.
+ *
+ * BAG_KINDS flattens this in order, and that order is the column order of the
+ * daily bag count, the paste template, the opening balance, the price list and
+ * every voucher's ledger menu. Slotting a new colour into the middle would
+ * renumber the menu — so "3" in a saved habit, or in a half-finished report,
+ * would suddenly mean a different bag.
+ */
 export const BAG_STOCK: Record<BagSize, readonly string[]> = {
-  kg25: ["Yellow", "White", "Beige"],
-  kg40: ["Yellow", "Green", "Beige"],
+  kg25: ["Yellow", "White", "Beige", "Colorless"],
+  kg40: ["Yellow", "Green", "Beige", "Colorless"],
 };
 
 export const BAG_SIZE_LABEL: Record<BagSize, string> = { kg25: "25KG", kg40: "40KG" };
@@ -279,6 +288,9 @@ export const BAG_COLORS: Record<string, string> = {
   White: "#a8a29e",
   Beige: "#d4b896",
   Green: "#16a34a",
+  // Unpigmented PP, which is translucent rather than white. A pale blue reads as
+  // "clear" and, unlike another grey, does not collide with White above.
+  Colorless: "#7cb9d8",
 };
 
 /** Display name for a product code, falling back to the raw code. */

@@ -222,7 +222,8 @@ const tools: OpenAI.Chat.ChatCompletionTool[] = [
         "Production-side reports ROW BY ROW: the daily production grid (production_reports: FGR no " +
         "and tons per product) and the daily operations row (daily_ops_reports), which holds that " +
         "day's CLOSING STOCK per product plus the empty-bag count by size and colour " +
-        "(bags.kg25/kg40 → Yellow/White/Beige/Green), alongside delivered and received. " +
+        "(bags.kg25 → Yellow/White/Beige/Colorless, bags.kg40 → Yellow/Green/Beige/Colorless), " +
+        "alongside delivered and received. " +
         "Use this for questions about output, stock on hand, or bag stock. Also returns the " +
         "monthly stock-status sheet (stock_status_reports), which is HISTORIC only — that report " +
         "was retired and the daily count replaced it, so never present it as current.",

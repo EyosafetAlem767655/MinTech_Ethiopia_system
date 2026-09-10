@@ -1,3 +1,4 @@
+import sharp from "sharp";
 import { isUuid } from "@/lib/sql";
 import { getFileBytes } from "@/lib/storage";
 import { downloadTelegramFile } from "@/lib/telegram";
@@ -53,18 +54,69 @@ function contentTypeFor(path: string): string {
   return "image/jpeg";
 }
 
+/**
+ * Biggest image, in bytes, that is worth sending to a model as-is.
+ *
+ * Gemini rejects a request whose total inline payload is too large with a bare
+ * HTTP 400, and base64 inflates whatever it wraps by a third. A voucher read
+ * sends up to three images, so three of these plus the prompt stays comfortably
+ * inside the limit.
+ *
+ * 2.5MB is far more than any of these reads needs. A receipt, a payment summary
+ * and a voucher are all documents photographed close up — legible at 2000px on
+ * the long edge, and none of the extra pixels a modern phone camera produces
+ * change a digit.
+ */
+const MAX_MODEL_IMAGE_BYTES = 2_500_000;
+
+/**
+ * Shrink an image that is too big to send, leaving everything else untouched.
+ *
+ * This exists because of how the oversized case FAILS. Telegram compresses a
+ * photo sent as a photo, but a phone that uploads from its gallery sends the
+ * original as a document — up to 20MB, which becomes ~27MB of base64 and is
+ * refused outright. The report was then blocked by a photograph that was too
+ * GOOD, which is not a failure anyone would think to look for, and telling a
+ * worker at a plant to go and resize a file is not a fix.
+ *
+ * Failure here is not fatal: an image sharp cannot decode (HEIC without libheif
+ * on the runtime, say) is passed through as it was, which is exactly what
+ * happened before this function existed.
+ */
+export async function fitForModel(buffer: Buffer, contentType: string): Promise<LoadedImage> {
+  const asIs = { base64: buffer.toString("base64"), contentType };
+  // A PDF is not something sharp should touch, and Gemini reads it directly.
+  if (buffer.length <= MAX_MODEL_IMAGE_BYTES || !contentType.startsWith("image/")) return asIs;
+
+  try {
+    const resized = await sharp(buffer)
+      .rotate() // honour EXIF orientation before dropping the metadata
+      .resize(2000, 2000, { fit: "inside", withoutEnlargement: true })
+      .jpeg({ quality: 82 })
+      .toBuffer();
+    // Only take the result if it actually helped — a small image blown up by a
+    // re-encode is a worse thing to send than the original.
+    if (resized.length >= buffer.length) return asIs;
+    return { base64: resized.toString("base64"), contentType: "image/jpeg" };
+  } catch (e) {
+    console.warn("fitForModel: could not resize, sending as-is —", e);
+    return asIs;
+  }
+}
+
 /** Load ONE reference, whichever kind it is. Null when it cannot be resolved. */
 export async function loadImage(ref: string): Promise<LoadedImage | null> {
   if (!ref) return null;
 
   if (isUuid(ref)) {
     const f = await getFileBytes(ref).catch(() => null);
-    return f ? { base64: f.base64, contentType: f.contentType } : null;
+    if (!f) return null;
+    return fitForModel(Buffer.from(f.base64, "base64"), f.contentType);
   }
 
   const dl = await downloadTelegramFile(ref).catch(() => null);
   if (!dl) return null;
-  return { base64: dl.buffer.toString("base64"), contentType: contentTypeFor(dl.path) };
+  return fitForModel(dl.buffer, contentTypeFor(dl.path));
 }
 
 /**
