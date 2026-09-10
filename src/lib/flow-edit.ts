@@ -139,8 +139,21 @@ function displayValue(step: AssetStep, raw: string | number): string {
  * thirty-seven; the 4096-character cap is reachable, and a silently truncated
  * list would hide exactly the late line items this feature exists to expose.
  */
+/**
+ * Escape a value for a Telegram HTML message.
+ *
+ * Telegram REJECTS a message whose HTML it cannot parse, and `call()` in
+ * telegram.ts swallows that rejection — so one "&" or "<" in a value does not
+ * produce an error, it produces SILENCE. An item purchase for `Valve <2">` or
+ * `Nut & bolt` would send no confirmation at all, which reads exactly like the
+ * edit having done nothing.
+ */
+export function escapeHtml(s: string): string {
+  return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 export function renderFieldList(fields: EditableField[], maxChars = 3400): string[] {
-  const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const esc = escapeHtml;
   const lines = fields.map((f) => `<b>${f.index}.</b> ${esc(f.label)}: ${esc(f.value)}`);
 
   const chunks: string[] = [];
@@ -399,7 +412,7 @@ export async function applyFlowEdit(
 export function describeFlowChanges(result: FlowEditResult): string {
   const rejected = result.rejected.length
     ? `\n\n⚠️ <b>${result.rejected.length} መስክ አልተቀበልንም</b>\n` +
-      result.rejected.map((r) => `• ${r.label}: ${r.reason}`).join("\n")
+      result.rejected.map((r) => `• ${escapeHtml(r.label)}: ${escapeHtml(r.reason)}`).join("\n")
     : "";
 
   if (result.error) {
@@ -418,7 +431,7 @@ export function describeFlowChanges(result: FlowEditResult): string {
 
   return (
     `✏️ <b>${result.changes.length} መስክ ተቀይሯል</b>\n` +
-    result.changes.map((c) => `• ${c.label}: ${c.from} → <b>${c.to}</b>`).join("\n") +
+    result.changes.map((c) => `• ${escapeHtml(c.label)}: ${escapeHtml(c.from)} → <b>${escapeHtml(c.to)}</b>`).join("\n") +
     rejected
   );
 }

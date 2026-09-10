@@ -1469,7 +1469,20 @@ export async function POST(req: NextRequest) {
           try {
             saved = await saveAssetReport(state, submitterName);
           } catch (e) {
-            console.error("saveAssetReport failed:", e);
+            // Recorded, not just console.error'd. A submission that will not
+            // save is the worst failure this system has — the reporter is stood
+            // in front of it with the data in their hand — and until now it left
+            // nothing behind but "❌ something went wrong", which says the same
+            // thing about a dead database, a bad edit and a missing column.
+            // Settings → Errors now names the flow and the actual cause.
+            await logError({
+              source: "telegram-webhook",
+              kind: "submission_save_failed",
+              message: e instanceof Error ? e.message : String(e),
+              detail: { flow: state.kind, step: state.step },
+              actor: submitterName,
+              chatId: String(chatId),
+            });
             await sendMessage(chatId, MSG.genericError, { reply_markup: CHANGE_CANCEL_KEYBOARD });
             return NextResponse.json({ ok: true });
           }
@@ -2198,6 +2211,16 @@ export async function POST(req: NextRequest) {
       ok: false,
       detail: e instanceof Error ? e.message.slice(0, 300) : String(e).slice(0, 300),
     }).catch(() => {});
+    // Same reasoning as the save branch above: the generic message is all the
+    // reporter sees, so the cause has to land somewhere a human can read it.
+    await logError({
+      source: "telegram-webhook",
+      kind: "webhook_unhandled",
+      message: e instanceof Error ? e.message : String(e),
+      detail: { stack: e instanceof Error ? e.stack?.slice(0, 1000) : undefined },
+      actor: tgName,
+      chatId: String(chatId),
+    });
     await sendMessage(chatId, isMongoAccessError(e) ? MSG.dbError : MSG.genericError).catch(() => {});
   }
 

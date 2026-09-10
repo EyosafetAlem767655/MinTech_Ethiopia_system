@@ -28,21 +28,96 @@ export const VISION_MODEL = envValue("QWEN_MODEL") || "qwen-vl-max-latest";
 // AI-Studio keys); this is the same request the google-genai SDK sends.
 export const GEMINI_BASE = envValue("GEMINI_BASE_URL") || "https://generativelanguage.googleapis.com/v1beta";
 /**
- * Which Gemini model everything here talks to.
+ * Which Gemini model everything here talks to, and what to do when it goes away.
  *
- * This was `gemini-2.0-flash` and worked; it was changed to
- * `gemini-3.5-flash-lite`, which is not a name Google publishes — there is no
- * 3.5 line, only 1.5, 2.0, 2.5 and 3 — and every Gemini-backed feature has been
- * failing since. `gemini-2.5-flash` is the conservative replacement: generally
- * available, reads images, and supports both the forced-JSON responseMimeType
- * and the function calling that the dashboard chat needs.
+ * A model name has now broken this system twice — first `gemini-3.5-flash-lite`,
+ * which Google does not publish, then `gemini-2.5-flash`, which was retired for
+ * new keys underneath us. Both times every Gemini-backed feature failed at once
+ * and stayed broken until someone edited this line and redeployed. Pinning a
+ * third name would only schedule the third outage.
+ *
+ * So the name below is a STARTING POINT, not a commitment. `resolveGeminiModel`
+ * moves off it when Google says it is gone — Google's 404 names the successor
+ * outright ("Please update your code to use models/X"), and that recommendation
+ * is followed automatically. `GEMINI_FALLBACKS` covers the case where it does
+ * not name one.
  *
  * NOTE, before changing this line to fix a failure: the env var WINS. The
  * `detail.model` recorded on a Gemini error row is the RESOLVED name, so if a
  * log says one thing and this file says another, GEMINI_MODEL is set in the
  * deployment and editing the default here changes nothing.
  */
-export const GEMINI_MODEL = envValue("GEMINI_MODEL") || "gemini-2.5-flash";
+export const GEMINI_MODEL = envValue("GEMINI_MODEL") || "gemini-3.6-flash";
+
+/**
+ * Tried in order when the configured model is refused and Google names no
+ * replacement. Newest first; each has to be able to read an image, answer in
+ * forced JSON, and call a function, because all three are used here.
+ */
+const GEMINI_FALLBACKS = ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-2.0-flash"];
+
+/**
+ * The model actually being used, which may have migrated away from the
+ * configured one.
+ *
+ * Module scope, so a warm serverless instance pays the discovery cost once
+ * rather than on every receipt. A cold instance re-discovers, which is a single
+ * wasted round trip — cheap next to the alternative of every report failing
+ * until someone notices and redeploys.
+ */
+let activeModel = GEMINI_MODEL;
+
+/** Models already found to be unavailable, so they are never tried twice. */
+const deadModels = new Set<string>();
+
+/** Does this failure mean "that model is not there", as opposed to a bad request? */
+function isModelUnavailable(status: number, reason: string): boolean {
+  if (status === 404) return true;
+  // A retired model can also come back as 400. The wording is what distinguishes
+  // it from an ordinary invalid-argument rejection.
+  const r = reason.toLowerCase();
+  return (
+    r.includes("is not found for api version") ||
+    r.includes("no longer available") ||
+    r.includes("is not supported") ||
+    r.includes("does not exist")
+  );
+}
+
+/**
+ * The successor Google names in its own error, if it names one.
+ *
+ * "Please update your code to use models/gemini-3.6-flash for the latest
+ * features" — the replacement is right there in the message, which makes it the
+ * most reliable source available. Anything scraped here still has to survive a
+ * real call before it is kept.
+ */
+function recommendedModel(reason: string): string | null {
+  // Deliberately not the FIRST models/… in the message: that one is the model
+  // that just failed ("This model models/gemini-2.5-flash is no longer …").
+  const named = [...reason.matchAll(/models\/([A-Za-z0-9.\-_]+)/g)].map((m) => m[1]);
+  for (const candidate of named) {
+    if (candidate !== activeModel && !deadModels.has(candidate)) return candidate;
+  }
+  return null;
+}
+
+/**
+ * Every name still worth trying, best first, once `activeModel` is ruled out.
+ *
+ * Google's own recommendation leads because it is the most current thing
+ * available — it comes from the API this minute, not from a list written months
+ * ago. The static names follow as insurance for the case where the error names
+ * no successor.
+ */
+function geminiCandidates(reason: string): string[] {
+  const recommended = recommendedModel(reason);
+  const out = recommended ? [recommended] : [];
+  for (const m of GEMINI_FALLBACKS) {
+    if (!deadModels.has(m) && !out.includes(m)) out.push(m);
+  }
+  return out;
+}
 
 /**
  * Hard ceiling for one model call, in ms.
@@ -320,6 +395,10 @@ export interface GeminiCallResult {
   /** Function calls the model asked for, when tools were supplied. */
   calls: { name: string; args: Record<string, unknown> }[];
   error?: string;
+  /** HTTP status, when the call reached Google and was refused. */
+  status?: number;
+  /** The model this attempt actually used. */
+  model?: string;
 }
 
 /**
@@ -371,10 +450,13 @@ async function geminiAttempt(
     /** e.g. { functionCallingConfig: { mode: "ANY" } } to require a tool call. */
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     toolConfig?: any;
+    /** Override the model for this attempt — used when migrating off a dead one. */
+    model?: string;
   } = {}
 ): Promise<GeminiCallResult> {
+  const model = opts.model || activeModel;
   const key = envValue("GEMINI_API_KEY");
-  if (!key) return { ok: false, text: "", calls: [], error: "GEMINI_API_KEY is not set" };
+  if (!key) return { ok: false, text: "", calls: [], error: "GEMINI_API_KEY is not set", model };
 
   const budget = opts.timeoutMs ?? RECEIPT_BUDGET_MS;
   const ctrl = new AbortController();
@@ -387,7 +469,7 @@ async function geminiAttempt(
     if (opts.json && !opts.tools) generationConfig.responseMimeType = "application/json";
     if (opts.maxOutputTokens) generationConfig.maxOutputTokens = opts.maxOutputTokens;
 
-    const res = await fetch(`${GEMINI_BASE}/models/${GEMINI_MODEL}:generateContent`, {
+    const res = await fetch(`${GEMINI_BASE}/models/${model}:generateContent`, {
       method: "POST",
       // Key goes in the header, not the query string — a key in a URL ends up in
       // every proxy and access log between here and Google.
@@ -404,9 +486,9 @@ async function geminiAttempt(
     if (!res.ok) {
       const body = (await res.text().catch(() => "")).slice(0, 2000);
       console.error("Gemini generateContent failed:", res.status, body);
-      // 404 here almost always means GEMINI_MODEL is wrong for this key, which
-      // is worth saying out loud rather than leaving as a bare status code.
-      const hint = res.status === 404 ? ` (model "${GEMINI_MODEL}" not available for this key)` : "";
+      // 404 here almost always means the model is wrong or gone for this key,
+      // which is worth saying out loud rather than leaving as a bare status code.
+      const hint = res.status === 404 ? ` (model "${model}" not available for this key)` : "";
       // Google explains every rejection in the response body, and this used to
       // read it only to throw it away — leaving "Gemini HTTP 400" in the error
       // log, which says a request was refused but not one word about why. A 400
@@ -420,6 +502,8 @@ async function geminiAttempt(
         text: "",
         calls: [],
         error: `Gemini HTTP ${res.status}${hint}${reason ? ` — ${reason}` : ""}`,
+        status: res.status,
+        model,
       };
     }
     const data = (await res.json()) as {
@@ -458,8 +542,12 @@ async function geminiAttempt(
  * The retry earns its place: a first-attempt timeout is far more often a cold
  * model than a broken one, and the alternative — handing the failure straight
  * back to someone holding a phone full of receipts — is what happened in
- * production. It retries ONCE, only on a timeout or a 5xx; a 401, a 404 or a
- * malformed request will fail identically however many times it is sent.
+ * production. It retries ONCE, only on a timeout or a 5xx; a 401 or a malformed
+ * request will fail identically however many times it is sent.
+ *
+ * A 404 is the exception, and gets a retry of a different shape: the request was
+ * fine, the MODEL was not, so it is re-sent to another model rather than to the
+ * same dead one.
  *
  * Every final failure is recorded through `logError`, which never throws, so
  * this function's contract is unchanged: it returns a result, never rejects.
@@ -469,15 +557,71 @@ export async function geminiGenerate(
   opts: Parameters<typeof geminiAttempt>[1] & { errorSource?: string } = {}
 ): Promise<GeminiCallResult> {
   const source = opts.errorSource || "llm";
-  const first = await geminiAttempt(contents, opts);
+  let first = await geminiAttempt(contents, opts);
   if (first.ok) return first;
+
+  // The model is gone. Move to another one and carry on, rather than failing
+  // every report in the company until somebody edits a constant and redeploys.
+  //
+  // This is not a nicety. It has happened twice: a name that never existed, and
+  // then a name that was retired for new keys underneath a working deployment.
+  // Both times the whole system went down at once, silently, and stayed down.
+  // Google's own 404 names the successor, so the first candidate comes straight
+  // from the message; the static list is only for when it does not.
+  if (isModelUnavailable(first.status || 0, first.error || "")) {
+    const failed = first.model || activeModel;
+    deadModels.add(failed);
+
+    // Every candidate is tried, not just the first. Stopping after one was not
+    // enough: when a fallback list has a stale name sitting ahead of the live
+    // one, a single attempt lands on the stale name and the whole system stays
+    // down — which is the very outage this block exists to prevent.
+    //
+    // Bounded by construction: the list is a handful of names, each is struck
+    // off in `deadModels` as it fails, and a struck-off name is never offered
+    // again for the life of the instance. So the cost is paid once, not per
+    // report.
+    const tried: string[] = [];
+    for (const candidate of geminiCandidates(first.error || "")) {
+      tried.push(candidate);
+      const retried = await geminiAttempt(contents, { ...opts, model: candidate });
+      if (retried.ok) {
+        // Pinned for this instance so the next report does not rediscover it.
+        activeModel = candidate;
+        // Logged loudly: the deployment is running on a model nobody configured,
+        // and GEMINI_MODEL should be set to match before the list runs out. A
+        // silent self-heal is just a deferred outage.
+        void logError({
+          source,
+          kind: "gemini_model_migrated",
+          message: `"${failed}" is unavailable; now using "${candidate}". Set GEMINI_MODEL to it.`,
+          detail: { from: failed, to: candidate, configured: GEMINI_MODEL, tried, reason: first.error },
+        });
+        return retried;
+      }
+      if (isModelUnavailable(retried.status || 0, retried.error || "")) {
+        deadModels.add(candidate);
+        continue;
+      }
+      // The candidate exists but the REQUEST is wrong — an unsupported mime
+      // type, an oversized image. Trying more models cannot fix that, and would
+      // burn the whole list on a fault that has nothing to do with them.
+      return retried;
+    }
+
+    // Nothing answered. Report against the model that was CONFIGURED, since
+    // that is the one whose name has to be corrected.
+    if (tried.length) {
+      first = { ...first, error: `${first.error} · also tried: ${tried.join(", ")}` };
+    }
+  }
 
   if (!isRetryable(first.error || "")) {
     void logError({
       source,
       kind: providerErrorKind("gemini", first.error || ""),
       message: first.error || "Gemini call failed",
-      detail: { model: GEMINI_MODEL, retried: false },
+      detail: { model: first.model || activeModel, configured: GEMINI_MODEL, retried: false },
     });
     return first;
   }
@@ -492,7 +636,7 @@ export async function geminiGenerate(
       source,
       kind: "gemini_retry_succeeded",
       message: `first attempt failed: ${first.error}`,
-      detail: { model: GEMINI_MODEL },
+      detail: { model: second.model || activeModel },
     });
     return second;
   }
@@ -501,7 +645,7 @@ export async function geminiGenerate(
     source,
     kind: providerErrorKind("gemini", second.error || ""),
     message: second.error || "Gemini call failed",
-    detail: { model: GEMINI_MODEL, retried: true, firstError: first.error },
+    detail: { model: second.model || activeModel, configured: GEMINI_MODEL, retried: true, firstError: first.error },
   });
   return second;
 }
