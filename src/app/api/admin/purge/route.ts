@@ -39,11 +39,11 @@ async function removeFiles(ids: string[]): Promise<number> {
 }
 
 /**
- * Every daily sales report, and the cached brief.
+ * Every sales row, and the cached brief.
  *
- * No files to remove: the payment summary is never uploaded, only its Telegram
- * file id is kept, and Telegram is not ours to sweep. `filesRemoved` stays in
- * the response as a zero rather than disappearing, so the UI reads the same
+ * No files to remove: a sale's receipts are read once and never stored or
+ * referenced, so there is nothing in the bucket to sweep. `filesRemoved` stays
+ * in the response as a zero rather than disappearing, so the UI reads the same
  * either way.
  *
  * The brief row is not incidental. The landing page renders it directly, so
@@ -52,7 +52,7 @@ async function removeFiles(ids: string[]): Promise<number> {
  * this runs.
  */
 async function purgeSales() {
-  const deleted = await sql`delete from daily_sales_summaries`.catch(() => ({ count: 0 }));
+  const deleted = await sql`delete from sales_invoices`.catch(() => ({ count: 0 }));
   const briefs = await sql`delete from briefs`.catch(() => ({ count: 0 }));
 
   return {
@@ -93,7 +93,7 @@ async function purgeRequestPhotos() {
 /** GET — what each scope would remove. Nothing is deleted. */
 export async function GET() {
   const [sales, briefs, requests] = await Promise.all([
-    sql<{ n: string }[]>`select count(*) as n from daily_sales_summaries`.catch(() => [{ n: "0" }]),
+    sql<{ n: string }[]>`select count(*) as n from sales_invoices`.catch(() => [{ n: "0" }]),
     sql<{ n: string }[]>`select count(*) as n from briefs`.catch(() => [{ n: "0" }]),
     sql<{ n: string }[]>`
       select count(*) as n from purchase_requests where photo_file_id is not null

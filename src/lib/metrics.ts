@@ -25,7 +25,11 @@ export interface DayNumbers {
   tonsSold: number;
   damagedClaimed: number;
   damagedVerified: number;
-  /** The day's takings, off the till's payment summary (`daily_sales_summaries`). */
+  /**
+   * The day's sales, off the sales team's per-transaction rows (`sales_invoices`).
+   * Reported = everything invoiced (cash + credit); net = the cash part, which is
+   * what actually came in that day.
+   */
   salesReportedEtb: number;
   salesReportedNetEtb: number;
   salesReportsCount: number;
@@ -88,17 +92,17 @@ export async function getDayNumbers(start: Date, end: Date): Promise<DayNumbers>
   `;
 
   // Kept as its own guarded round trip rather than three more subqueries above:
-  // daily_sales_summaries arrives in a later migration, and a missing table would fail
+  // sales_invoices arrives in a later migration, and a missing table would fail
   // the whole statement — taking the entire dashboard and the morning brief with
   // it, not just the sales line.
   //
-  // Bucketed by the receipt's own sale date, not created_at, so a receipt keyed
-  // in the next morning still counts against the day it was actually sold.
+  // Bucketed by the sale's own date, not created_at, so a sale keyed in the
+  // next morning still counts against the day it was actually made.
   const [s] = await sql<{ grand: string; net: string; n: string }[]>`
-    select coalesce(sum(total_payment), 0) as grand,
-           coalesce(sum(net_total), 0)     as net,
-           count(*)                        as n
-      from daily_sales_summaries
+    select coalesce(sum(invoice_cash + invoice_credit), 0) as grand,
+           coalesce(sum(invoice_cash), 0)                  as net,
+           count(*)                                        as n
+      from sales_invoices
      where date >= ${start} and date < ${end}
   `.catch((e) => {
     if ((e as { code?: string })?.code !== "42P01") console.error("getDayNumbers daily sales failed:", e);
@@ -186,19 +190,19 @@ export async function getDailySeries(days: number, now = new Date()): Promise<Tr
        where r.date >= ${start} and r.date < ${end}
        group by 1
     ),
-    -- Sales = the gross takings off the till's own payment summary: the five
-    -- payment methods added up. It was one row per transaction before that, and
-    -- invoices.amount before that.
+    -- Sales = everything invoiced, cash and credit, off the sales team's
+    -- per-transaction rows. It was the till's daily payment summary before that,
+    -- one row per receipt before that, and invoices.amount before that.
     sales as (
-      select (date at time zone ${EAT})::date as d, sum(total_payment) as n
-        from daily_sales_summaries
+      select (date at time zone ${EAT})::date as d, sum(invoice_cash + invoice_credit) as n
+        from sales_invoices
        where date >= ${start} and date < ${end}
        group by 1
     ),
-    -- Collections = the same days net of refunds. What actually came in.
+    -- Collections = the cash part. What actually came in that day.
     coll as (
-      select (date at time zone ${EAT})::date as d, sum(net_total) as n
-        from daily_sales_summaries
+      select (date at time zone ${EAT})::date as d, sum(invoice_cash) as n
+        from sales_invoices
        where date >= ${start} and date < ${end}
        group by 1
     )
@@ -265,14 +269,14 @@ export async function getBucketedSeries(
       select date_trunc(${bucket}, d) as b, sum(n) as n from prod_day group by 1
     ),
     sales as (
-      select date_trunc(${bucket}, date at time zone ${EAT}) as b, sum(total_payment) as n
-        from daily_sales_summaries
+      select date_trunc(${bucket}, date at time zone ${EAT}) as b, sum(invoice_cash + invoice_credit) as n
+        from sales_invoices
        where date >= ${start} and date < ${end}
        group by 1
     ),
     coll as (
-      select date_trunc(${bucket}, date at time zone ${EAT}) as b, sum(net_total) as n
-        from daily_sales_summaries
+      select date_trunc(${bucket}, date at time zone ${EAT}) as b, sum(invoice_cash) as n
+        from sales_invoices
        where date >= ${start} and date < ${end}
        group by 1
     )

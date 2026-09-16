@@ -9,7 +9,7 @@ import {
   classifyIngestion,
   extractVoucherGemini,
   extractReceiptGemini,
-  extractPaymentSummary,
+  extractSalesInvoice,
   verifyRequestLegitimacy,
   type GeminiReceipt,
   type IngestionExtraction,
@@ -42,7 +42,7 @@ import { backgroundPurchaseReceiptCheck } from "@/lib/finance-receipts";
 import { logError } from "@/lib/errors";
 import { insertRow } from "@/lib/insert";
 import { runAfter } from "@/lib/after";
-import { PAYMENT_METHODS, paymentKey, refundKey } from "@/lib/daily-sales";
+import { applySalesExtraction, parseSalesPaste, salesMissing } from "@/lib/sales-invoice";
 import { applyFlowEdit, describeFlowChanges, editableFields, renderFieldList } from "@/lib/flow-edit";
 import { dailyHeartbeat } from "@/lib/heartbeat";
 import { loadImage, loadImages, telegramFileId } from "@/lib/images";
@@ -820,7 +820,7 @@ const ASSET_FLOW_BY_CAP: Record<string, AssetFlowKind | undefined> = {
   grv: "grv",
   price_list: "price_list",
   wht_holder: "wht_holder",
-  sales_report: "daily_sales",
+  sales_report: "sales_invoice",
 };
 
 /**
@@ -944,6 +944,25 @@ async function handleCalendarCallback(
 }
 
 /** Ask the current step, or show the review card when the flow is finished. */
+/**
+ * A choice step's buttons, in rows a phone can show.
+ *
+ * Telegram lays a keyboard row out side by side, so the old single-row layout
+ * was fine for two or three answers and unusable for the bank list, which has
+ * nineteen. Short lists keep one row; anything longer wraps three to a row.
+ */
+function choiceKeyboard(step: { choices?: { label: string }[] }) {
+  const buttons = (step.choices || []).map((c) => ({ text: c.label }));
+  const perRow = buttons.length > 4 ? 3 : buttons.length || 1;
+  const rows: { text: string }[][] = [];
+  for (let i = 0; i < buttons.length; i += perRow) rows.push(buttons.slice(i, i + perRow));
+  return {
+    keyboard: [...rows, [{ text: NAV_BUTTONS.cancel }]],
+    resize_keyboard: true,
+    one_time_keyboard: false,
+  };
+}
+
 async function askAssetStep(chatId: string, state: AssetFlowState): Promise<void> {
   if (state.step === "review") {
     await sendMessage(chatId, `${assetPreview(state)}\n✅ ትክክል ከሆነ "${RECEIPT_BTN.approve}" ይጫኑ።`, {
@@ -961,13 +980,7 @@ async function askAssetStep(chatId: string, state: AssetFlowState): Promise<void
     return;
   }
   if (step.type === "choice") {
-    await sendMessage(chatId, step.prompt, {
-      reply_markup: {
-        keyboard: [(step.choices || []).map((c) => ({ text: c.label })), [{ text: NAV_BUTTONS.cancel }]],
-        resize_keyboard: true,
-        one_time_keyboard: false,
-      },
-    });
+    await sendMessage(chatId, step.prompt, { reply_markup: choiceKeyboard(step) });
     return;
   }
   if (step.type === "photos") {
@@ -979,7 +992,7 @@ async function askAssetStep(chatId: string, state: AssetFlowState): Promise<void
     // The template goes in its own message with no markup so it can be copied
     // cleanly on mobile — a long <pre> block mixed into the instructions is
     // awkward to select, and this is the message the user edits and sends back.
-    await sendMessage(chatId, `<pre>${escapeHtml(pasteTemplate(state.kind))}</pre>`);
+    await sendMessage(chatId, `<pre>${escapeHtml(pasteTemplate(state.kind, state.draft))}</pre>`);
     return;
   }
   const hint = step.skippable ? '\n<i>ከሌለ "-" ይላኩ።</i>' : "";
@@ -1072,75 +1085,64 @@ async function extractVoucherIntoDraft(
 }
 
 /**
- * Read the day's Payment Summary off its photograph and fill the draft.
+ * Read one sale's receipts into the sales sheet's columns, then ask for the rest.
  *
- * Ten figures, and then straight to the review card — not to ten questions. A
- * read that got nine of them right should cost one correction, not ten answers,
- * and the generic editor is what makes that true.
+ * What the model read goes into the draft; what it missed is asked for as ONE
+ * fill-in block listing only the missing lines — not as a march through
+ * sixteen questions. A read that got most of the row right should cost a
+ * two-line paste, and a read that got nothing costs the whole block, which is
+ * still one message. Either way the row ends on the review card to be
+ * corrected, with the machine-read figures marked.
  *
- * A failed read is not an error the reporter has to deal with: the flow simply
- * asks for the ten figures by hand instead, which is what the steps are for.
+ * Fenced the same way as the voucher read: bounded by RECEIPT_BUDGET_MS, every
+ * failure lands in the same place, and nothing is saved here.
  */
-async function extractSummaryIntoDraft(
+async function extractSalesIntoDraft(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   session: any,
   chatId: string,
   state: AssetFlowState
 ): Promise<void> {
-  await sendMessage(chatId, "🔎 ደረሰኙን እያነበብኩ ነው…");
+  await sendMessage(chatId, "🔎 ደረሰኞቹን እያነበብኩ ነው…");
 
-  const images = await loadImages((state.photoFileIds || []).slice(0, 2));
-  const read = images.length > 0 ? await extractPaymentSummary(images) : null;
+  const images = await loadImages((state.photoFileIds || []).slice(0, MAX_FLOW_PHOTOS));
+  const read = images.length > 0 ? await extractSalesInvoice(images) : null;
 
   if (!read || !read.ok) {
-    const reason = read && !read.ok ? read.error : "ፎቶው መነበብ አልቻለም";
+    const reason = read && !read.ok ? read.error : "no photo could be read back";
     state.extraction = { checked: false, confidence: 0, notes: "", unmatched: [], filled: [], error: reason };
-    await logError({
-      source: "daily-sales",
-      kind: "payment_summary_read_failed",
-      message: reason,
-      chatId,
-    });
-    state.step = firstUnanswered(state.kind, state.draft);
-    session.assetFlow = { ...state };
-    await persist(session);
-    await sendMessage(chatId, `⚠️ ደረሰኙን ማንበብ አልተቻለም፦ ${escapeHtml(reason)}\n<i>ቁጥሮቹን በጥያቄ እንሞላቸዋለን።</i>`);
-    await askAssetStep(chatId, state);
-    return;
+    // Logged so an outage shows in Settings → Errors; the reporter is not
+    // blocked by it — the whole sheet is simply asked for by hand.
+    await logError({ source: "sales-invoice", kind: "sales_receipt_read_failed", message: reason, chatId });
+  } else {
+    const { filled } = applySalesExtraction(state.draft, read.data);
+    state.extraction = {
+      checked: true,
+      confidence: read.data.confidence,
+      notes: read.data.notes,
+      unmatched: [],
+      filled,
+    };
   }
 
-  const filled: string[] = [];
-  for (const m of PAYMENT_METHODS) {
-    const row = read.data.methods[m];
-    if (!row) continue;
-    // Written even when zero: a method printed as *0.00 is a real reading, and
-    // leaving it blank would send the reporter a question the receipt already
-    // answered.
-    state.draft[paymentKey(m)] = row.payment;
-    state.draft[refundKey(m)] = row.refund;
-    filled.push(paymentKey(m), refundKey(m));
-  }
-  // Kept apart from the computed total, so a disagreement stays visible rather
-  // than being resolved in favour of whichever number was read last.
-  if (read.data.printedTotal) state.draft.printedTotal = read.data.printedTotal;
-
-  state.extraction = {
-    checked: true,
-    confidence: read.data.confidence,
-    notes: read.data.notes,
-    unmatched: [],
-    filled,
-  };
-
-  state.step = firstUnanswered(state.kind, state.draft);
+  // Straight to the card when the receipts answered everything; otherwise the
+  // fill-in block for what they did not. The paste handler resumes at whatever
+  // the block still leaves blank, one question at a time.
+  const missing = salesMissing(state.draft);
+  state.step = missing.length === 0 ? "review" : "paste";
   session.assetFlow = { ...state };
   await persist(session);
 
-  await sendMessage(
-    chatId,
-    `✅ ደረሰኙ ተነብቧል (እርግጠኝነት ${read.data.confidence}%)።` +
-      (read.data.notes ? `\n<i>${escapeHtml(read.data.notes)}</i>` : "")
-  );
+  if (state.extraction.checked) {
+    await sendMessage(
+      chatId,
+      `✅ ${state.extraction.filled.length} መስክ ከደረሰኙ ተነብቧል (እርግጠኝነት ${state.extraction.confidence}%)።` +
+        (state.extraction.notes ? `\n<i>${escapeHtml(state.extraction.notes)}</i>` : "") +
+        (missing.length > 0 ? `\n<i>${missing.length} መስክ ቀርቷል — ከታች ያለውን ቅጂ ሞልተው ይመልሱት።</i>` : "")
+    );
+  } else {
+    await sendMessage(chatId, "ℹ️ ደረሰኙን ማንበብ አልተቻለም። ቅጹን ሞልተው ይመልሱት።");
+  }
   await askAssetStep(chatId, state);
 }
 
@@ -1582,7 +1584,7 @@ export async function POST(req: NextRequest) {
         // the draft and the card is redrawn. Without this the only way to fix a
         // typo would be to cancel and start the whole report over.
         if (
-          (state.kind === "production_daily" || state.kind === "base_balance") &&
+          (state.kind === "production_daily" || state.kind === "base_balance" || state.kind === "sales_invoice") &&
           /[=:]/.test(text || "") &&
           (text || "").includes("\n")
         ) {
@@ -1710,12 +1712,10 @@ export async function POST(req: NextRequest) {
             await extractVoucherIntoDraft(session, chatId, state);
             return NextResponse.json({ ok: true });
           }
-          // The day's sales, read the same way: the photograph IS the report,
-          // and the ten figures come straight off it. Ten numbers on one image
-          // is a small enough read to do inline, which is why the per-sale job
-          // queue could be removed along with the per-sale flow.
-          if (state.kind === "daily_sales" && collected.length > 0) {
-            await extractSummaryIntoDraft(session, chatId, state);
+          // A sale, read the same way: the receipts are the source, and what
+          // they do not answer is asked for in one block afterwards.
+          if (state.kind === "sales_invoice" && collected.length > 0) {
+            await extractSalesIntoDraft(session, chatId, state);
             return NextResponse.json({ ok: true });
           }
           await advanceAsset(session, chatId, state);
@@ -1744,13 +1744,7 @@ export async function POST(req: NextRequest) {
       } else if (step.type === "choice") {
         const match = step.choices?.find((c) => normaliseChoice(c.label) === normText);
         if (!match) {
-          await sendMessage(chatId, step.prompt, {
-            reply_markup: {
-              keyboard: [(step.choices || []).map((c) => ({ text: c.label })), [{ text: NAV_BUTTONS.cancel }]],
-              resize_keyboard: true,
-              one_time_keyboard: false,
-            },
-          });
+          await sendMessage(chatId, step.prompt, { reply_markup: choiceKeyboard(step) });
           return NextResponse.json({ ok: true });
         }
         state.draft[step.id] = match.value;
@@ -1771,8 +1765,20 @@ export async function POST(req: NextRequest) {
         const parsed =
           state.kind === "production_daily"
             ? parseProductionPaste(val)
-            : parseFinancePaste(val, { usdRate: state.kind === "price_list" });
+            : state.kind === "sales_invoice"
+              ? parseSalesPaste(val)
+              : parseFinancePaste(val, { usdRate: state.kind === "price_list" });
         const filled = Object.keys(parsed.values).length;
+        // The sales block may be answered by "-" instead: the reporter would
+        // rather take the remaining questions one at a time. Nothing is lost —
+        // the questions are exactly the lines the block listed.
+        if (filled === 0 && state.kind === "sales_invoice" && isAssetSkip(val)) {
+          state.step = firstUnanswered(state.kind, state.draft);
+          session.assetFlow = { ...state };
+          await persist(session);
+          await askAssetStep(chatId, state);
+          return NextResponse.json({ ok: true });
+        }
         if (filled === 0) {
           await sendMessage(
             chatId,

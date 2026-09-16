@@ -60,17 +60,18 @@ export async function GET() {
     fetchLatestBrief(),
     sql<{ n: string }[]>`select count(*) as n from damage_claims where status in ('pending','cosign_required')`,
     damageTripwires(),
-    // Guarded: daily_sales_summaries may not be migrated yet — don't let a
-    // missing table break the whole brief.
+    // Guarded: sales_invoices may not be migrated yet — don't let a missing
+    // table break the whole brief.
     //
-    // Withholding is gone from this line, not zeroed by accident: the report is
-    // now the till's payment summary, which has no withholding column. What is
-    // outstanding in WHT receipts is its own panel, fed by wht_holders.
+    // Grand = everything invoiced today (cash + credit); net = the cash part.
+    // Withholding is gone from this line, not zeroed by accident: the sales row
+    // has no withholding column. What is outstanding in WHT receipts is its own
+    // panel, fed by wht_holders.
     sql<{ n: string; grand: string; net: string }[]>`
       select count(*) as n,
-             coalesce(sum(total_payment), 0) as grand,
-             coalesce(sum(net_total), 0) as net
-        from daily_sales_summaries
+             coalesce(sum(invoice_cash + invoice_credit), 0) as grand,
+             coalesce(sum(invoice_cash), 0) as net
+        from sales_invoices
        where created_at >= ${eatMidnight}
     `.catch(() => [{ n: "0", grand: "0", net: "0" }]),
   ]);

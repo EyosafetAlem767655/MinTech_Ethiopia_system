@@ -24,7 +24,7 @@ export const SUBMISSION_COLLECTIONS = [
   "purchase_items",
   "tool_request",
   "pp_bag_damage",
-  "daily_sales",
+  "sales_invoice",
   "damage_claim",
   "expense_receipt",
   "stone_delivery",
@@ -282,39 +282,26 @@ export const SUBMISSIONS: Record<SubmissionCollection, SubmissionSpec> = {
     editableKeys: ["reason", "quantity"],
     photoJoin: { table: "pp_bag_damage_photos", foreignKey: "report_id", fileColumn: "file_id" },
   },
-  daily_sales: {
-    table: "daily_sales_summaries",
-    label: "Daily sales",
+  sales_invoice: {
+    table: "sales_invoices",
+    label: "Sales report",
     icon: "🧾",
     dateColumn: "date",
     authorColumn: "reported_by",
-    searchColumns: ["date_label", "reported_by"],
+    searchColumns: ["customer", "delivery_no", "bank", "reported_by"],
     displayFields: [
-      NUM("cash_payment", "Cash"),
-      NUM("cheque_payment", "Cheque"),
-      NUM("card_payment", "Card"),
-      NUM("credit_payment", "Credit"),
-      NUM("voucher_payment", "Voucher"),
-      NUM("total_payment", "Payments"),
-      NUM("total_refund", "Refunds"),
-      NUM("net_total", "Net"),
+      TEXT("customer", "Deliver to"),
+      NUM("invoice_cash", "Invoice in cash"),
+      NUM("invoice_credit", "Invoice in credit"),
+      NUM("qty", "Invoice qty"),
+      TEXT("delivery_no", "Deli"),
+      TEXT("bank", "Bank"),
+      TEXT("reported_by", "By"),
     ],
-    // The three totals are derived from the five methods on submission, so they
-    // are shown but not editable here — changing one in isolation would leave the
-    // row disagreeing with its own rows. Correct a method and re-file the day;
-    // the report upserts, so the totals are recomputed.
-    editableKeys: [
-      "cash_payment",
-      "cash_refund",
-      "cheque_payment",
-      "cheque_refund",
-      "card_payment",
-      "card_refund",
-      "credit_payment",
-      "credit_refund",
-      "voucher_payment",
-      "voucher_refund",
-    ],
+    // `qty` is the sum of the brand tonnages in `products`, so it is shown but
+    // not editable — changing it alone would leave the row disagreeing with its
+    // own brand lines. A wrong tonnage is corrected by re-filing the sale.
+    editableKeys: ["customer", "invoice_cash", "invoice_credit", "delivery_no", "bank"],
   },
   damage_claim: {
     table: "damage_claims",

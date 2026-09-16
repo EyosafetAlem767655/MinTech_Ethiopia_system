@@ -6,8 +6,12 @@ import {
   BAG_SIZE_LABEL,
   BAG_STOCK,
   FINANCE_RAW_MATERIALS,
+  PRODUCT_ORDER,
   parseBagLedgerKey,
+  productLabel,
 } from "@/lib/products";
+import { BANKS } from "@/lib/banks";
+import type { SalesInvoiceRead } from "@/lib/sales-invoice";
 
 /* ─────────────────────────────── AI providers ──────────────────────────────
  * Text (chat, morning brief, report extraction) → NVIDIA Nemotron-3.
@@ -888,97 +892,104 @@ export async function extractVoucherGemini(
   }
 }
 
-/* ─────────────────── The day's Payment Summary (Gemini) ─────────────────────
+/* ─────────────────── One sale off its receipts (Gemini) ─────────────────────
  *
- * One photograph replaces the whole sales report. The till prints an end-of-day
- * summary with five payment methods, each showing an amount taken and an amount
- * refunded — ten numbers and their total.
+ * The sales report is one row per transaction in the columns of the sales
+ * sheet. The receipts are photographed first and read into that row; whatever
+ * the model could not read is asked for by hand. Like the voucher reader this
+ * is a PREFILL, not a verdict — every figure lands on a review card marked as
+ * machine-read, and the reporter corrects it before anything is saved.
  */
 
-export interface PaymentSummaryRead {
-  /** Keyed by method: { cash: { payment, refund }, … }. */
-  methods: Record<string, { payment: number; refund: number }>;
-  /** The total as PRINTED, kept apart from the sum of the rows above it. */
-  printedTotal: number;
-  printedRefundTotal: number;
-  confidence: number; // 0-100
-  notes: string;
-}
+const SALES_INVOICE_SYSTEM =
+  "You read the paperwork for ONE sale by an Ethiopian producer of ground minerals and return STRICT " +
+  "JSON only.\n" +
+  "The images are the DIFFERENT DOCUMENTS of that one sale — typically the cash-sale or credit-sale " +
+  "invoice, a delivery note, and sometimes a bank deposit slip — or several angles of the same page. " +
+  "They describe ONE sale: merge them into ONE result and NEVER add quantities or totals across images.\n" +
+  'Return exactly: { "customer": string (the buyer / "Deliver to" name as printed), ' +
+  '"invoiceCash": number (ETB invoiced and paid in cash; 0 if this was a credit sale), ' +
+  '"invoiceCredit": number (ETB invoiced on credit / to be paid later; 0 if paid in cash), ' +
+  '"deliveryNo": string (the delivery note number, digits as printed, "" if none), ' +
+  '"products": { "<code>": number } (tonnes sold per product, keyed by CODE), ' +
+  '"bank": string (the bank named on a deposit slip or payment line, "" if none), ' +
+  '"confidence": number (0-100), "notes": string (one short sentence) }.\n' +
+  `Product codes, exactly as keys: ${PRODUCT_ORDER.join(", ")}. On paper they appear as ${PRODUCT_ORDER.map(
+    (c) => `${productLabel(c)} (${c})`
+  ).join(", ")}. Omit products not on the documents. Quantities are in TONNES: a line in kg or in ` +
+  "bags must be converted ONLY if the document itself states the weight; otherwise report the tonnes " +
+  "as printed.\n" +
+  `Banks, exactly as printed on the slip; the system matches them onto this list itself: ${BANKS.join(", ")}.\n` +
+  "Decide cash vs credit from the document: a cash sales invoice / cash receipt is cash; an invoice " +
+  "marked credit, on account, or unpaid is credit. If the paperwork does not say, put the grand total " +
+  "in invoiceCash and say so in notes.\n" +
+  "Read every figure exactly as printed — do NOT calculate, total or correct anything. A printed " +
+  "total that disagrees with its own lines must be reported as printed and mentioned in notes.\n" +
+  'Use "" for text and 0 for numbers that are not visible. If the images are not sales paperwork at ' +
+  "all, return every field empty with confidence 0 and say so in notes.";
 
-export type PaymentSummaryResult =
-  | { ok: true; data: PaymentSummaryRead }
-  | { ok: false; error: string };
-
-const PAYMENT_SUMMARY_SYSTEM =
-  "You read the Payment Summary printed at the bottom of an Ethiopian point-of-sale end-of-day " +
-  "receipt, and return STRICT JSON only.\n" +
-  "The table has one row per payment method and two money columns: Payment Amount and Refund Amount.\n" +
-  'Return exactly: { "cash": {"payment": number, "refund": number}, "cheque": {…}, "card": {…}, ' +
-  '"credit": {…}, "voucher": {…}, "printedTotal": number, "printedRefundTotal": number, ' +
-  '"confidence": number, "notes": string }.\n' +
-  "Amounts are printed with a leading asterisk and thousands separators, e.g. *1,451,875.00 — return " +
-  "1451875.00, a plain number with no asterisk, commas or currency symbol.\n" +
-  "The method may be spelled VAUCHER, VOUCHER or similar; map it to \"voucher\". Map any of CHEQUE/CHECK " +
-  'to "cheque".\n' +
-  "A row printed as *0.00 is a real zero — return 0, not null.\n" +
-  "If a method is absent from the table entirely, return 0 for both of its columns.\n" +
-  "printedTotal is the total line AS PRINTED. Do NOT add the rows up yourself and do NOT correct it — " +
-  "the figures are added up separately, and a printed total that disagrees with its own rows is exactly " +
-  "what has to be noticed. If no total is printed, return 0.\n" +
-  "confidence is 0-100 for how clearly the table read. If the photo does not show a payment summary at " +
-  'all, return every amount as 0 with confidence 0 and say so in notes.';
-
-function methodRead(v: unknown): { payment: number; refund: number } {
-  const o = (v ?? {}) as Record<string, unknown>;
-  return { payment: receiptNum(o.payment), refund: receiptNum(o.refund) };
-}
+export type SalesInvoiceReadResult = { ok: true; data: SalesInvoiceRead } | { ok: false; error: string };
 
 /**
- * Read one photograph of the day's payment summary.
+ * Read one transaction's receipts into the sales sheet's columns.
  *
  * Bounded by RECEIPT_BUDGET_MS inside geminiGenerate, because this runs in the
- * Telegram webhook while the reporter waits. Ten numbers off one image is a
- * small enough read to do inline — which is why the per-sale job queue that the
- * old multi-document flow needed could be removed with it.
+ * Telegram webhook while the reporter waits — the same ceiling the voucher read
+ * runs under. Unknown product codes are dropped here rather than trusted: a key
+ * the model invented must not become a column nothing else knows about.
  */
-export async function extractPaymentSummary(
+export async function extractSalesInvoice(
   images: { base64: string; contentType: string }[]
-): Promise<PaymentSummaryResult> {
+): Promise<SalesInvoiceReadResult> {
   if (images.length === 0) return { ok: false, error: "no image to read" };
 
-  const parts: GeminiPart[] = images.slice(0, 2).map((img) => ({
+  const parts: GeminiPart[] = images.slice(0, 3).map((img) => ({
     inline_data: { mime_type: img.contentType || "image/jpeg", data: img.base64 },
   }));
-  parts.push({ text: "Read the Payment Summary table." });
+  parts.push({ text: "Read this sale's documents into the sales sheet columns." });
 
   const res = await geminiGenerate([{ role: "user", parts }], {
     json: true,
-    systemInstruction: PAYMENT_SUMMARY_SYSTEM,
-    errorSource: "daily-sales",
+    systemInstruction: SALES_INVOICE_SYSTEM,
+    errorSource: "sales-invoice",
   });
   if (!res.ok) return { ok: false, error: res.error || "Gemini call failed" };
   if (!res.text.trim()) return { ok: false, error: "Gemini returned an empty response" };
 
   try {
     const p = extractJson(res.text);
+    // extractJson turns prose into {} rather than throwing. An answer with none
+    // of the asked-for keys is not a read of nothing — it is no read at all, and
+    // must be reported as such so the flow says "could not read" rather than
+    // "0 fields read (confidence 0%)".
+    if (!("customer" in p) && !("products" in p) && !("invoiceCash" in p)) {
+      return { ok: false, error: "Gemini returned an unreadable response" };
+    }
+    const products: Record<string, number> = {};
+    const raw = (p.products ?? {}) as Record<string, unknown>;
+    const known = new Map(PRODUCT_ORDER.map((c) => [c.toLowerCase(), c]));
+    for (const [k, v] of Object.entries(raw)) {
+      // Tolerate the display spelling ("ETL-15") as well as the code.
+      const code = known.get(String(k).toLowerCase()) ?? known.get(String(k).toLowerCase().replace(/[\s\-_.]/g, ""));
+      if (!code) continue;
+      const t = receiptNum(v);
+      if (t > 0) products[code] = t;
+    }
     return {
       ok: true,
       data: {
-        methods: {
-          cash: methodRead(p.cash),
-          cheque: methodRead(p.cheque),
-          card: methodRead(p.card),
-          credit: methodRead(p.credit),
-          voucher: methodRead(p.voucher),
-        },
-        printedTotal: receiptNum(p.printedTotal),
-        printedRefundTotal: receiptNum(p.printedRefundTotal),
+        customer: String(p.customer || "").trim(),
+        invoiceCash: receiptNum(p.invoiceCash),
+        invoiceCredit: receiptNum(p.invoiceCredit),
+        deliveryNo: String(p.deliveryNo || "").trim(),
+        products,
+        bank: String(p.bank || "").trim(),
         confidence: Math.max(0, Math.min(100, Math.round(Number(p.confidence) || 0))),
         notes: String(p.notes || "").trim(),
       },
     };
   } catch (e) {
-    console.error("extractPaymentSummary could not parse the response:", e);
+    console.error("extractSalesInvoice could not parse the response:", e);
     return { ok: false, error: "Gemini returned an unreadable response" };
   }
 }

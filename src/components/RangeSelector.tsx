@@ -2,17 +2,25 @@
 
 import { RANGE_LIST, type RangeKey } from "@/lib/ranges";
 
-/** The global six-window time-range control shared by every department report. */
+/**
+ * The global six-window time-range control shared by every department report.
+ *
+ * `keys` narrows it to a subset, in RANGES order — the sales analytics offer
+ * only the four windows long enough to show a pattern.
+ */
 export default function RangeSelector({
   value,
   onChange,
+  keys,
 }: {
   value: RangeKey;
   onChange: (key: RangeKey) => void;
+  keys?: RangeKey[];
 }) {
+  const list = keys ? RANGE_LIST.filter((r) => keys.includes(r.key)) : RANGE_LIST;
   return (
     <div className="flex gap-1 rounded-full bg-clay-50 p-0.5 overflow-x-auto no-scrollbar">
-      {RANGE_LIST.map((r) => (
+      {list.map((r) => (
         <button
           key={r.key}
           onClick={() => onChange(r.key)}

@@ -47,7 +47,7 @@ const READABLE_TABLES = {
   delivery_reports: "date",
   purchase_item_reports: "date",
   pp_bag_damage_reports: "date",
-  daily_sales_summaries: "date",
+  sales_invoices: "date",
   damage_claims: "created_at",
   receipts: "created_at",
   purchase_requests: "created_at",
@@ -155,12 +155,12 @@ const tools: OpenAI.Chat.ChatCompletionTool[] = [
     function: {
       name: "get_sales_reports",
       description:
-        "Sales reports filed by the sales team on the Telegram bot, with every reported column " +
-        "(date, customer, FS No, Att.No, product, qty, unit price, sub total, VAT, grand total, " +
-        "withholding, net pay, deposited bank) plus each row's AI cross-check verdict. This is the " +
-        "'Sales report' the sales department files daily — it is SEPARATE from the invoices table. " +
-        "Use this for any question about sales reports, receipts scanned by the sales team, cash " +
-        "sales, FS numbers, or which customer bought what.",
+        "Sales filed by the sales team on the Telegram bot, one row per sale, in the columns of the " +
+        "sales sheet: date, customer (Deliver to), invoice in cash (ETB), invoice in credit (ETB), " +
+        "tons (all brands), delivery number, products (tonnes per brand code, e.g. ETL15, 3EL, Talk), " +
+        "and the bank the money went to. This is the 'Sales report' — it is SEPARATE from the " +
+        "invoices table. Use this for any question about sales, which customer bought what, cash " +
+        "versus credit sales, which brand sells most, or which bank takings landed in.",
       parameters: {
         type: "object",
         properties: {
@@ -372,35 +372,35 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<unk
       const limit = Math.min(Number(args.limit) || 50, 200);
       const since = new Date(Date.now() - days * 86400_000);
 
-      // One row per DAY, off the till's payment summary. It used to be one row
-      // per transaction with a customer, a product and a withholding figure;
-      // none of those exist any more, so a customer filter here would silently
-      // return nothing rather than say it cannot be answered.
+      // One row per SALE, in the columns of the sales sheet: who bought, how
+      // much in cash and on credit, which brands and how many tonnes, and the
+      // bank the money went to. A customer filter is optional and matched loosely.
+      const who = args.customer ? `%${String(args.customer)}%` : "%";
       const rows = await sql`
-        select date, date_label as "dateLabel",
-               cash_payment as "cash", cheque_payment as "cheque", card_payment as "card",
-               credit_payment as "credit", voucher_payment as "voucher",
-               total_payment as "totalPayment", total_refund as "totalRefund",
-               net_total as "netTotal", reported_by as "reportedBy"
-          from daily_sales_summaries
-         where date >= ${since}
+        select date, date_label as "dateLabel", customer,
+               invoice_cash as "invoiceCash", invoice_credit as "invoiceCredit",
+               qty as "tons", delivery_no as "deliveryNo", products, bank,
+               reported_by as "reportedBy"
+          from sales_invoices
+         where date >= ${since} and customer ilike ${who}
          order by date desc limit ${limit}`;
 
       // Totals alongside the rows: the row list is capped by `limit`, so a model
       // adding up only what it can see would under-report on a busy month.
-      const [totals] = await sql<{ n: string; grand: string; net: string; refund: string }[]>`
-        select count(*) as n, coalesce(sum(total_payment),0) as grand,
-               coalesce(sum(net_total),0) as net, coalesce(sum(total_refund),0) as refund
-          from daily_sales_summaries
-         where date >= ${since}`;
+      const [totals] = await sql<{ n: string; cash: string; credit: string; tons: string }[]>`
+        select count(*) as n, coalesce(sum(invoice_cash),0) as cash,
+               coalesce(sum(invoice_credit),0) as credit, coalesce(sum(qty),0) as tons
+          from sales_invoices
+         where date >= ${since} and customer ilike ${who}`;
 
       return {
         days,
         totals: {
-          days: Number(totals?.n) || 0,
-          grossPaymentsEtb: Number(totals?.grand) || 0,
-          refundsEtb: Number(totals?.refund) || 0,
-          netEtb: Number(totals?.net) || 0,
+          sales: Number(totals?.n) || 0,
+          cashEtb: Number(totals?.cash) || 0,
+          creditEtb: Number(totals?.credit) || 0,
+          invoicedEtb: (Number(totals?.cash) || 0) + (Number(totals?.credit) || 0),
+          tons: Number(totals?.tons) || 0,
         },
         rows,
       };
@@ -673,9 +673,9 @@ export async function companyChat(
         "You can query live company data with the provided tools — production, sales, collections, receivables, " +
         "bag-lot control, damage claims and purchase requests. " +
         "There are TWO distinct sales channels and you must not confuse them: `invoices` (credit sales, billed to " +
-        "a client) and the sales team's daily Sales report (`daily_sales_summaries`, one row per day off the " +
-        "till's payment summary, filed on the Telegram bot from " +
-        "scanned receipts) — use get_sales_reports for the latter. If a question just says 'sales', check both " +
+        "a client) and the sales team's Sales report (`sales_invoices`, one row per sale with customer, cash " +
+        "and credit amounts, tonnes per brand and bank, filed on the Telegram bot from the sale's " +
+        "receipts) — use get_sales_reports for the latter. If a question just says 'sales', check both " +
         "and say which channel each figure came from. " +
         "Staff file structured reports on the Telegram bot every day and you CAN read all of them: " +
         "use get_daily_submissions for the free-text daily/HR/material-count reports, get_asset_reports " +

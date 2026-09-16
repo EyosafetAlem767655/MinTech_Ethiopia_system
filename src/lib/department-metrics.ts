@@ -156,15 +156,17 @@ async function departmentKpis(
 
     case "sales": {
       // Invoicing went with the old finance module; the sales team's own bot
-      // reports are the record now.
-      const [r] = await sql<{ n: string; grand: string }[]>`
-        select count(*) as n, coalesce(sum(grand_total), 0) as grand
-          from daily_sales_summaries where date >= ${start} and date < ${end}
-      `;
+      // reports — one row per sale — are the record now.
+      const [r] = await sql<{ n: string; grand: string; tons: string }[]>`
+        select count(*) as n,
+               coalesce(sum(invoice_cash + invoice_credit), 0) as grand,
+               coalesce(sum(qty), 0) as tons
+          from sales_invoices where date >= ${start} and date < ${end}
+      `.catch(() => [{ n: "0", grand: "0", tons: "0" }]);
       return [
-        { icon: "🤝", label: "Tons dispatched", value: base.tonsSold, suffix: " t", decimals: 2 },
-        { icon: "🧾", label: "Sales reported", value: Number(r.grand) || 0, prefix: "ETB " },
-        { icon: "📄", label: "Sales reports", value: Number(r.n) || 0 },
+        { icon: "🤝", label: "Tons sold", value: Number(r.tons) || 0, suffix: " t", decimals: 2 },
+        { icon: "🧾", label: "Sales invoiced", value: Number(r.grand) || 0, prefix: "ETB " },
+        { icon: "📄", label: "Sales", value: Number(r.n) || 0 },
       ];
     }
 
@@ -412,14 +414,14 @@ async function departmentActivityCounts(
     case "sales": {
       const [a] = await sql<{ sales: string; receipts: string }[]>`
         select
-          (select count(*) from daily_sales_summaries where date >= ${start} and date < ${end}) as sales,
+          (select count(*) from sales_invoices where date >= ${start} and date < ${end}) as sales,
           (select count(*) from receipts where created_at >= ${start} and created_at < ${end}) as receipts`;
       const sales = Number(a.sales) || 0;
       const receipts = Number(a.receipts) || 0;
       return {
         total: reports + sales + receipts,
         headline: [
-          { icon: "🧾", label: "Sales reports", value: sales },
+          { icon: "🧾", label: "Sales", value: sales },
           { icon: "📄", label: "Receipts", value: receipts },
         ],
       };

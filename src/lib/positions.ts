@@ -205,14 +205,15 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
   },
   sales_report: {
     key: "sales_report",
-    // One photograph, once a day. It used to be one report per transaction —
-    // photograph the receipts, read them, fill the gaps, approve, and start
-    // again for the next sale — which on a busy day is the same six steps a
-    // dozen times over. The till already totals the day itself.
-    button: "🧾 የቀኑ የሽያጭ ሪፖርት",
+    // One row per sale, in the columns of the sales sheet. Receipt-first: the
+    // photos are read, only what they missed is asked for (as one block), and
+    // the whole row is corrected on the review card. It was one Payment Summary
+    // a day for a while, which said how much came in but not from whom or for
+    // what — the questions the sales analytics exist to answer.
+    button: "🧾 የሽያጭ ሪፖርት",
     captureMode: "asset_entry",
     input: "any",
-    question: "🧾 ቀኑን ይምረጡ። መቀጠል የቀኑን Payment Summary ፎቶ ይላካሉ።",
+    question: "🧾 ቀኑን ይምረጡ። መቀጠል የሽያጩን ደረሰኞች ፎቶ ይላካሉ።",
   },
   materials: {
     key: "materials",
@@ -379,7 +380,7 @@ export const POSITIONS: Record<PositionKey, Position> = {
     description: "Files the daily sales report together with receipts.",
     capabilities: ["sales_report"],
     dailyRequired: true,
-    submissionTables: ["daily_sales_summaries"],
+    submissionTables: ["sales_invoices"],
   },
   finance: {
     key: "finance",

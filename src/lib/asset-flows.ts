@@ -24,14 +24,15 @@ import { upsertOpsDay, opsDateLabel } from "@/lib/ops-report";
 import { runAfter } from "@/lib/after";
 import { insertRow } from "@/lib/insert";
 import {
-  computeTotals,
-  METHOD_LABEL,
-  PAYMENT_METHODS,
-  paymentKey,
-  printedMismatch,
-  refundKey,
-  summaryColumns,
-} from "@/lib/daily-sales";
+  SALES_KEYS,
+  SALES_PRODUCT_PREFIX,
+  bankChoices,
+  salesBank,
+  salesProductKey,
+  salesQty,
+  salesTemplate,
+} from "@/lib/sales-invoice";
+import { BANK_OTHER } from "@/lib/banks";
 import { chaseHolder } from "@/lib/wht-sms";
 import { bagKey, productionTemplate, DELIVERED_PREFIX, PROD_PREFIX, STOCK_PREFIX } from "@/lib/production-paste";
 import {
@@ -938,49 +939,76 @@ const WHITENESS_STEPS: AssetStep[] = [
 ];
 
 
-/* ────────────────────── The day's sales, in one photo ─────────────────────── */
+/* ─────────────────────── One sale, receipt-first (sales) ─────────────────── */
 
 /**
- * The whole sales report: pick the date, photograph the till's Payment Summary.
+ * One transaction, in the columns of the sales sheet.
  *
- * It used to be one report per transaction — photograph the receipts, read them,
- * fill the gaps, approve, and start again for the next sale. On a busy day that
- * is the same six steps a dozen times over, which is what was reported as
- * exhausting. The till already totals the day itself.
+ * Receipts first: the photographs are read and whatever the model could read
+ * is already in the draft when the questions start. What it missed is asked
+ * for as ONE fill-in block (the `paste` step, whose template lists only the
+ * missing lines), and anything the block still leaves blank is asked one
+ * question at a time. Every field then sits on the review card to be corrected.
  *
- * The ten figures are read off the photo and then EDITED on the review card
- * rather than asked for one by one: a read that got nine of ten right should
- * cost one correction, not ten questions.
+ * The per-field steps below are what make that work — they carry the label,
+ * the validation and the choice list the editor and the paste parser share —
+ * but the flow only walks them for what the receipts and the block left out.
+ * The total tonnage is not a step: it is the sum of the brand lines.
  */
-const DAILY_SALES_STEPS: AssetStep[] = [
+const SALES_INVOICE_STEPS: AssetStep[] = [
   { id: "date", prompt: "📅 የሽያጩን ቀን ይምረጡ።", type: "date" },
   {
     id: "photos",
     prompt:
-      `🧾 የቀኑን Payment Summary ፎቶ ይላኩ።\n` +
-      `<i>ፎቶው ተነብቦ ቁጥሮቹ በራሳቸው ይሞላሉ — እርስዎ አርመው ያረጋግጣሉ።</i>\n` +
+      `🧾 የዚህን ሽያጭ ደረሰኞች ፎቶ ይላኩ — እስከ ${MAX_FLOW_PHOTOS} ፎቶ (የሽያጭ ደረሰኝ፣ የማድረሻ ወረቀት፣ የባንክ ደረሰኝ)።\n` +
+      `<i>ፎቶዎቹ ተነብበው ቅጹ በራሱ ይሞላል — የቀረውን ብቻ ይጠየቃሉ።</i>\n` +
       `ከጨረሱ "✅ ጨርሻለሁ" ይጫኑ።`,
     type: "photos",
-    // The photograph IS the report. Without it there is nothing to read and
-    // nothing to check the typed figures against.
+    // The receipts ARE the evidence behind every figure on this row. A sale
+    // with no paper is not a sale this report can carry.
     required: true,
   },
-  // Ten money steps, so every figure the read produced is a real answer that the
-  // generic editor can list and correct like any other.
-  ...PAYMENT_METHODS.flatMap<AssetStep>((m) => [
-    {
-      id: paymentKey(m),
-      label: `${METHOD_LABEL[m]} payment`,
-      prompt: `💰 ${METHOD_LABEL[m]} — Payment Amount። ከሌለ 0 ይፃፉ።`,
-      type: "number",
-    },
-    {
-      id: refundKey(m),
-      label: `${METHOD_LABEL[m]} refund`,
-      prompt: `↩️ ${METHOD_LABEL[m]} — Refund Amount። ከሌለ 0 ይፃፉ።`,
-      type: "number",
-    },
-  ]),
+  {
+    id: "paste",
+    prompt:
+      "📋 ከደረሰኙ ያልተነበቡት መስኮች እነዚህ ናቸው። ቅጂውን ሞልተው ይመልሱት።\n" +
+      "<i>ቁጥሩን ከ = በኋላ ይፃፉ። ያልተሸጠውን ብራንድ ባዶ ይተዉት (0 ይሆናል)።</i>",
+    type: "paste",
+  },
+  { id: SALES_KEYS.customer, label: "Deliver to", prompt: "👤 ለማን እንደተሸጠ (Deliver to / የደንበኛ ስም) ይፃፉ።", type: "text" },
+  {
+    id: SALES_KEYS.invoiceCash,
+    label: "Invoice cash",
+    prompt: "💵 በጥሬ ገንዘብ የተቆረጠውን ደረሰኝ መጠን በብር ይፃፉ። ከሌለ 0።",
+    type: "number",
+  },
+  {
+    id: SALES_KEYS.invoiceCredit,
+    label: "Invoice credit",
+    prompt: "🧾 በብድር (credit) የተቆረጠውን ደረሰኝ መጠን በብር ይፃፉ። ከሌለ 0።",
+    type: "number",
+  },
+  { id: SALES_KEYS.deliveryNo, label: "Deli", prompt: "📄 የማድረሻ ቁጥሩን (Deli.) ይፃፉ።", type: "text", skippable: true },
+  ...DELIVERY_PRODUCTS.map<AssetStep>((code) => ({
+    id: salesProductKey(code),
+    label: productLabel(code),
+    prompt: `⚖️ የ<b>${productLabel(code)}</b> የተሸጠ ብዛት በቶን ይፃፉ። ከሌለ 0 ይፃፉ።`,
+    type: "number",
+  })),
+  {
+    id: SALES_KEYS.bank,
+    label: "Bank",
+    prompt: "🏦 ገንዘቡ የገባበትን ባንክ ይምረጡ።",
+    type: "choice",
+    choices: bankChoices(),
+  },
+  {
+    id: SALES_KEYS.bankOther,
+    label: "Bank (other)",
+    prompt: "🏦 የባንኩን ስም ይፃፉ።",
+    type: "text",
+    when: (d) => d[SALES_KEYS.bank] === BANK_OTHER,
+  },
 ];
 
 const STEPS: Record<AssetFlowKind, AssetStep[]> = {
@@ -996,15 +1024,22 @@ const STEPS: Record<AssetFlowKind, AssetStep[]> = {
   whiteness_check: WHITENESS_STEPS,
   price_list: PRICE_LIST_STEPS,
   wht_holder: WHT_HOLDER_STEPS,
-  daily_sales: DAILY_SALES_STEPS,
+  sales_invoice: SALES_INVOICE_STEPS,
 };
 
 
-/** The template text for a paste step. */
-export function pasteTemplate(kind: AssetFlowKind): string {
+/**
+ * The template text for a paste step.
+ *
+ * The sales block depends on the draft: it lists only what the receipts did
+ * not answer, so the same flow sends a two-line block after a good read and the
+ * whole sheet after a failed one.
+ */
+export function pasteTemplate(kind: AssetFlowKind, draft: Record<string, string | number> = {}): string {
   if (kind === "production_daily") return productionTemplate();
   if (kind === "base_balance") return baseBalanceTemplate();
   if (kind === "price_list") return priceListTemplate();
+  if (kind === "sales_invoice") return salesTemplate(draft);
   return "";
 }
 
@@ -1342,31 +1377,34 @@ export function assetPreview(state: AssetFlowState): string {
     );
   }
 
-  if (state.kind === "daily_sales") {
-    const t = computeTotals(d);
-    const rows = PAYMENT_METHODS.map((m) => {
-      const pay = Number(d[paymentKey(m)]) || 0;
-      const ref = Number(d[refundKey(m)]) || 0;
-      return `  ${METHOD_LABEL[m].padEnd(8)} ${money(pay)}${ref ? `  (↩️ ${money(ref)})` : ""}`;
-    }).join("\n");
+  if (state.kind === "sales_invoice") {
+    const ex = state.extraction;
+    const read = new Set(ex?.filled || []);
+    // Figures the model supplied carry a marker, as on the voucher card: a
+    // number nobody typed has to be visibly different from one somebody did.
+    const mark = (key: string) => (read.has(key) ? " 🤖" : "");
 
-    // A printed total that disagrees with the rows above it is the single most
-    // useful thing this read can surface, so it is stated rather than quietly
-    // overwritten in either direction.
-    const mismatch = printedMismatch(d);
+    const brands = DELIVERY_PRODUCTS.filter((c) => Number(d[salesProductKey(c)]) > 0)
+      .map((c) => `  • ${productLabel(c)}: ${qty(Number(d[salesProductKey(c)]))}${mark(salesProductKey(c))}`)
+      .join("\n");
+    const cash = Number(d[SALES_KEYS.invoiceCash]) || 0;
+    const credit = Number(d[SALES_KEYS.invoiceCredit]) || 0;
 
     return (
       head +
-      `📅 Date: ${esc(d.date)}\n\n` +
-      `💳 <b>Payment Summary</b>\n${rows}\n` +
-      `  ─────────\n` +
-      `  <b>Payments: ${money(t.totalPayment)}</b>\n` +
-      (t.totalRefund ? `  <b>Refunds: ${money(t.totalRefund)}</b>\n` : "") +
-      `  <b>Net: ${money(t.netTotal)} ETB</b>\n` +
-      (mismatch
-        ? `\n⚠️ በደረሰኙ ላይ የታተመው ጠቅላላ ${money(mismatch.printed)} ነው — ` +
-          `ከመስመሮቹ ድምር (${money(mismatch.computed)}) ይለያያል።\n`
-        : "")
+      `📅 Date: ${esc(d.date)}\n` +
+      `👤 Deliver to: <b>${esc(d[SALES_KEYS.customer]) || "—"}</b>${mark(SALES_KEYS.customer)}\n` +
+      `💵 Invoice in cash: ${money(cash)} ETB${mark(SALES_KEYS.invoiceCash)}\n` +
+      `🧾 Invoice in credit: ${money(credit)} ETB${mark(SALES_KEYS.invoiceCredit)}\n` +
+      `  <b>ጠቅላላ: ${money(cash + credit)} ETB</b>\n` +
+      `📄 Deli.: ${esc(d[SALES_KEYS.deliveryNo]) || "—"}${mark(SALES_KEYS.deliveryNo)}\n` +
+      `🏦 Bank: <b>${esc(salesBank(d) || "—")}</b>${mark(SALES_KEYS.bank)}\n\n` +
+      `⚖️ <b>ብዛት (ቶን)</b>\n${brands || "  —"}\n` +
+      `  ─────────\n  <b>Invoice qty: ${qty(salesQty(d))}</b>\n` +
+      (ex?.checked
+        ? `\n<i>🤖 ምልክት ያለው ከደረሰኙ የተነበበ ነው (እርግጠኝነት ${ex.confidence}%)። ስህተት ካለ ያስተካክሉ።</i>\n`
+        : "") +
+      (ex && !ex.checked ? "\n<i>ደረሰኙን ማንበብ አልተቻለም — ሁሉንም በእጅ አስገብተዋል።</i>\n" : "")
     );
   }
 
@@ -1744,64 +1782,35 @@ export async function saveAssetReport(
     return { id: row.id, table: "pp_bag_damage_reports" };
   }
 
-  if (state.kind === "daily_sales") {
+  if (state.kind === "sales_invoice") {
     const date = reportDate(d.date);
-    const cols = summaryColumns(d);
-    // One row per day, upserted. Two rows for one day would be added together by
-    // every figure on the dashboard, and a correction filed the next morning
-    // would read as a second day's trading.
-    const [row] = await sql<{ id: string }[]>`
-      insert into daily_sales_summaries (
-        date_label, date,
-        cash_payment, cash_refund, cheque_payment, cheque_refund,
-        card_payment, card_refund, credit_payment, credit_refund,
-        voucher_payment, voucher_refund,
-        total_payment, total_refund, net_total, printed_total,
-        tg_file_ids, extraction, reported_by, source
-      )
-      values (
-        ${opsDateLabel(date)}, ${date},
-        ${cols.cash_payment}, ${cols.cash_refund}, ${cols.cheque_payment}, ${cols.cheque_refund},
-        ${cols.card_payment}, ${cols.card_refund}, ${cols.credit_payment}, ${cols.credit_refund},
-        ${cols.voucher_payment}, ${cols.voucher_refund},
-        ${cols.total_payment}, ${cols.total_refund}, ${cols.net_total},
-        ${Number(d.printedTotal) || null},
-        -- The payment summary keeps NO reference to its own photograph.
-        --
-        -- It was never uploaded — only Telegram's file id was kept, which cost
-        -- nothing and still resolved back to the image on the dashboard. That
-        -- resolving was the problem: a receipt visible on the webapp reads as a
-        -- receipt filed on the webapp, and the rule for this report is that the
-        -- ten numbers ARE the record. The reporter now checks the read on the
-        -- edit card before approving it, which is where a misread should be
-        -- caught anyway — while the person who took the photo is still looking
-        -- at the till. Written empty rather than omitted so that re-filing a day
-        -- CLEARS whatever an older row was carrying.
-        ${[] as string[]},
-        ${state.extraction ? sql.json({ ...state.extraction }) : null},
-        ${reportedBy}, 'telegram'
-      )
-      on conflict (date_label) do update set
-        cash_payment    = excluded.cash_payment,
-        cash_refund     = excluded.cash_refund,
-        cheque_payment  = excluded.cheque_payment,
-        cheque_refund   = excluded.cheque_refund,
-        card_payment    = excluded.card_payment,
-        card_refund     = excluded.card_refund,
-        credit_payment  = excluded.credit_payment,
-        credit_refund   = excluded.credit_refund,
-        voucher_payment = excluded.voucher_payment,
-        voucher_refund  = excluded.voucher_refund,
-        total_payment   = excluded.total_payment,
-        total_refund    = excluded.total_refund,
-        net_total       = excluded.net_total,
-        printed_total   = excluded.printed_total,
-        tg_file_ids     = excluded.tg_file_ids,
-        extraction      = excluded.extraction,
-        reported_by     = excluded.reported_by,
-        updated_at      = now()
-      returning id`;
-    return { id: row.id, table: "daily_sales_summaries" };
+    // One row PER SALE, appended — never upserted on the day. Several sales a
+    // day is the whole point of going back to the transaction, and a correction
+    // to one of them is made in Settings → Submissions, not by re-filing the day.
+    //
+    // The row keeps NO reference to its receipts — not a stored file, not a
+    // Telegram id. They were read once, the figures on this card are the record,
+    // and a receipt that resolves on the dashboard reads as a receipt filed on
+    // the dashboard (the objection behind migration 0026).
+    const row = await insertRow(
+      "sales_invoices",
+      {
+        date,
+        date_label: opsDateLabel(date),
+        customer: String(d[SALES_KEYS.customer] || "").trim(),
+        invoice_cash: Number(d[SALES_KEYS.invoiceCash]) || 0,
+        invoice_credit: Number(d[SALES_KEYS.invoiceCredit]) || 0,
+        qty: salesQty(d),
+        delivery_no: String(d[SALES_KEYS.deliveryNo] || "").trim() || null,
+        products: sql.json(jsonMap(d, SALES_PRODUCT_PREFIX, DELIVERY_PRODUCTS)),
+        bank: salesBank(d),
+        extraction: state.extraction ? sql.json({ ...state.extraction }) : null,
+        reported_by: reportedBy,
+        source: "telegram",
+      },
+      { source: "asset-flows" }
+    );
+    return { id: row.id, table: "sales_invoices" };
   }
 
   if (state.kind === "pp_bag_used") {
