@@ -373,18 +373,34 @@ async function departmentActivityCounts(
   const positions = DEPARTMENTS[dept].positions;
   const n = (rows: { n: string }[]) => Number(rows[0]?.n) || 0;
 
+  // Every count below tolerates a table that is not there yet. These four run
+  // in parallel behind one Brief, so a single missing relation — the sales
+  // table between a deploy and its migration, say — would otherwise 500 the
+  // whole page rather than blank one tile. A zero here is honest: nothing
+  // could have been filed into a table that does not exist.
+  const missing = (e: unknown) => {
+    if ((e as { code?: string })?.code !== "42P01") throw e;
+    console.warn(`departmentActivityCounts(${dept}): a table is not migrated yet; counting 0`);
+  };
+
   const reports = n(
     await sql<{ n: string }[]>`
       select count(*) as n from daily_reports
        where created_at >= ${start} and created_at < ${end}
-         and positions && ${positions}::text[]`
+         and positions && ${positions}::text[]`.catch((e) => {
+      missing(e);
+      return [];
+    })
   );
 
   switch (dept) {
     case "production": {
       const [a] = await sql<{ production: string }[]>`
         select count(*) as production from production_reports
-         where date >= ${start} and date < ${end}`;
+         where date >= ${start} and date < ${end}`.catch((e) => {
+        missing(e);
+        return [{ production: "0" }];
+      });
       const production = Number(a.production) || 0;
       return {
         total: reports + production,
@@ -399,7 +415,10 @@ async function departmentActivityCounts(
         select
           (select count(*) from material_counts   where created_at >= ${start} and created_at < ${end}) as materials,
           (select count(*) from purchase_requests where created_at >= ${start} and created_at < ${end}) as purchases,
-          (select count(*) from damage_claims     where created_at >= ${start} and created_at < ${end}) as damage`;
+          (select count(*) from damage_claims     where created_at >= ${start} and created_at < ${end}) as damage`.catch((e) => {
+        missing(e);
+        return [{ materials: "0", purchases: "0", damage: "0" }];
+      });
       const materials = Number(a.materials) || 0;
       const purchases = Number(a.purchases) || 0;
       const damage = Number(a.damage) || 0;
@@ -415,7 +434,10 @@ async function departmentActivityCounts(
       const [a] = await sql<{ sales: string; receipts: string }[]>`
         select
           (select count(*) from sales_invoices where date >= ${start} and date < ${end}) as sales,
-          (select count(*) from receipts where created_at >= ${start} and created_at < ${end}) as receipts`;
+          (select count(*) from receipts where created_at >= ${start} and created_at < ${end}) as receipts`.catch((e) => {
+        missing(e);
+        return [{ sales: "0", receipts: "0" }];
+      });
       const sales = Number(a.sales) || 0;
       const receipts = Number(a.receipts) || 0;
       return {

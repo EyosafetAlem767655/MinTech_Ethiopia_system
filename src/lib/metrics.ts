@@ -165,64 +165,93 @@ export interface TrendPoint {
   collections: number;
 }
 
+/**
+ * Sales and collections per bucket, keyed by the bucket's date label.
+ *
+ * Its OWN statement, on purpose. These used to be two CTEs inside the production
+ * series query below, and a missing sales table then failed the whole query at
+ * parse time — Postgres resolves every relation before running anything — so
+ * the production trend, the owner dashboard and the Brief all went down with
+ * it. That is exactly what happened when the sales table was replaced ahead of
+ * its migration. Kept apart, a lagging schema blanks the sales line and nothing
+ * else, which is the rule every other reader here already follows.
+ *
+ * Sales = everything invoiced, cash and credit, off the sales team's
+ * per-transaction rows. Collections = the cash part, what actually came in.
+ * `date_trunc('day', …)` gives the same label as the ::date cast the daily
+ * series used, so one helper serves both callers.
+ */
+async function salesByBucket(
+  start: Date,
+  end: Date,
+  bucket: "day" | "week" | "month"
+): Promise<Map<string, { sales: number; collections: number }>> {
+  const rows = await sql<{ date: string; sales: string; collections: string }[]>`
+    select to_char(date_trunc(${bucket}, date at time zone ${EAT}), 'YYYY-MM-DD') as date,
+           sum(invoice_cash + invoice_credit) as sales,
+           sum(invoice_cash)                  as collections
+      from sales_invoices
+     where date >= ${start} and date < ${end}
+     group by 1
+  `.catch((e) => {
+    if ((e as { code?: string })?.code !== "42P01") throw e;
+    console.warn("salesByBucket: sales_invoices not present yet (migration 0027); sales line blank");
+    return [];
+  });
+  return new Map(
+    rows.map((r) => [r.date, { sales: Number(r.sales) || 0, collections: Number(r.collections) || 0 }])
+  );
+}
+
+/** Join the production buckets with the sales map, zero where a side is missing. */
+function mergeSeries(
+  prod: { date: string; production: string }[],
+  sales: Map<string, { sales: number; collections: number }>
+): TrendPoint[] {
+  return prod.map((r) => ({
+    date: r.date,
+    production: Number(r.production) || 0,
+    sales: sales.get(r.date)?.sales ?? 0,
+    collections: sales.get(r.date)?.collections ?? 0,
+  }));
+}
+
 export async function getDailySeries(days: number, now = new Date()): Promise<TrendPoint[]> {
   const end = eatDayStart(now);
   const start = addDays(end, -days);
 
   // generate_series does the zero-fill that used to be a JS Map loop, so a day
   // with no activity is guaranteed to appear as 0 rather than go missing.
-  const rows = await sql<{ date: string; production: string; sales: string; collections: string }[]>`
-    with days as (
-      select generate_series(
-        (${start}::timestamptz at time zone ${EAT})::date,
-        (${end}::timestamptz   at time zone ${EAT})::date - 1,
-        interval '1 day'
-      )::date as d
-    ),
-    prod as (
-      -- Production = daily ops "Delivered" tonnage (sum of the jsonb map),
-      -- bucketed to the EAT calendar day. The report's date is stored at UTC
-      -- midnight of that day, so the EAT conversion lands on the same date.
-      select (r.date at time zone ${EAT})::date as d,
-             sum((e.value)::numeric) as n
-        from daily_ops_reports r
-        cross join lateral jsonb_each_text(r.delivered) as e(key, value)
-       where r.date >= ${start} and r.date < ${end}
-       group by 1
-    ),
-    -- Sales = everything invoiced, cash and credit, off the sales team's
-    -- per-transaction rows. It was the till's daily payment summary before that,
-    -- one row per receipt before that, and invoices.amount before that.
-    sales as (
-      select (date at time zone ${EAT})::date as d, sum(invoice_cash + invoice_credit) as n
-        from sales_invoices
-       where date >= ${start} and date < ${end}
-       group by 1
-    ),
-    -- Collections = the cash part. What actually came in that day.
-    coll as (
-      select (date at time zone ${EAT})::date as d, sum(invoice_cash) as n
-        from sales_invoices
-       where date >= ${start} and date < ${end}
-       group by 1
-    )
-    select to_char(days.d, 'YYYY-MM-DD') as date,
-           coalesce(prod.n,  0) as production,
-           coalesce(sales.n, 0) as sales,
-           coalesce(coll.n,  0) as collections
-      from days
-      left join prod  on prod.d  = days.d
-      left join sales on sales.d = days.d
-      left join coll  on coll.d  = days.d
-     order by days.d
-  `;
+  const [rows, sales] = await Promise.all([
+    sql<{ date: string; production: string }[]>`
+      with days as (
+        select generate_series(
+          (${start}::timestamptz at time zone ${EAT})::date,
+          (${end}::timestamptz   at time zone ${EAT})::date - 1,
+          interval '1 day'
+        )::date as d
+      ),
+      prod as (
+        -- Production = daily ops "Delivered" tonnage (sum of the jsonb map),
+        -- bucketed to the EAT calendar day. The report's date is stored at UTC
+        -- midnight of that day, so the EAT conversion lands on the same date.
+        select (r.date at time zone ${EAT})::date as d,
+               sum((e.value)::numeric) as n
+          from daily_ops_reports r
+          cross join lateral jsonb_each_text(r.delivered) as e(key, value)
+         where r.date >= ${start} and r.date < ${end}
+         group by 1
+      )
+      select to_char(days.d, 'YYYY-MM-DD') as date,
+             coalesce(prod.n, 0) as production
+        from days
+        left join prod on prod.d = days.d
+       order by days.d
+    `,
+    salesByBucket(start, end, "day"),
+  ]);
 
-  return rows.map((r) => ({
-    date: r.date,
-    production: Number(r.production) || 0,
-    sales: Number(r.sales) || 0,
-    collections: Number(r.collections) || 0,
-  }));
+  return mergeSeries(rows, sales);
 }
 
 /**
@@ -240,63 +269,46 @@ export async function getBucketedSeries(
 ): Promise<TrendPoint[]> {
   const step = bucket === "day" ? "1 day" : bucket === "week" ? "1 week" : "1 month";
 
-  const rows = await sql<{ date: string; production: string; sales: string; collections: string }[]>`
-    with buckets as (
-      select generate_series(
-        date_trunc(${bucket}, (${start}::timestamptz at time zone ${EAT})),
-        date_trunc(${bucket}, (${end}::timestamptz   at time zone ${EAT}) - interval '1 second'),
-        ${step}::interval
-      ) as b
-    ),
-    -- Per DAY first, then bucketed: production_reports is the guided flow's own
-    -- table, with historic pasted ops rows falling back to the delivered map. Coalescing
-    -- per day means a day recorded both ways contributes once, not twice.
-    prod_day as (
-      select coalesce(p.d, o.d) as d, coalesce(p.n, o.n) as n
-        from (select (r.date at time zone ${EAT})::date as d, sum((e.value)::numeric) as n
-                from production_reports r
-                cross join lateral jsonb_each_text(r.products) as e(key, value)
-               where r.date >= ${start} and r.date < ${end}
-               group by 1) p
-        full outer join
-             (select (r.date at time zone ${EAT})::date as d, sum((e.value)::numeric) as n
-                from daily_ops_reports r
-                cross join lateral jsonb_each_text(r.delivered) as e(key, value)
-               where r.date >= ${start} and r.date < ${end}
-               group by 1) o on o.d = p.d
-    ),
-    prod as (
-      select date_trunc(${bucket}, d) as b, sum(n) as n from prod_day group by 1
-    ),
-    sales as (
-      select date_trunc(${bucket}, date at time zone ${EAT}) as b, sum(invoice_cash + invoice_credit) as n
-        from sales_invoices
-       where date >= ${start} and date < ${end}
-       group by 1
-    ),
-    coll as (
-      select date_trunc(${bucket}, date at time zone ${EAT}) as b, sum(invoice_cash) as n
-        from sales_invoices
-       where date >= ${start} and date < ${end}
-       group by 1
-    )
-    select to_char(buckets.b, 'YYYY-MM-DD') as date,
-           coalesce(prod.n,  0) as production,
-           coalesce(sales.n, 0) as sales,
-           coalesce(coll.n,  0) as collections
-      from buckets
-      left join prod  on prod.b  = buckets.b
-      left join sales on sales.b = buckets.b
-      left join coll  on coll.b  = buckets.b
-     order by buckets.b
-  `;
+  const [rows, sales] = await Promise.all([
+    sql<{ date: string; production: string }[]>`
+      with buckets as (
+        select generate_series(
+          date_trunc(${bucket}, (${start}::timestamptz at time zone ${EAT})),
+          date_trunc(${bucket}, (${end}::timestamptz   at time zone ${EAT}) - interval '1 second'),
+          ${step}::interval
+        ) as b
+      ),
+      -- Per DAY first, then bucketed: production_reports is the guided flow's own
+      -- table, with historic pasted ops rows falling back to the delivered map. Coalescing
+      -- per day means a day recorded both ways contributes once, not twice.
+      prod_day as (
+        select coalesce(p.d, o.d) as d, coalesce(p.n, o.n) as n
+          from (select (r.date at time zone ${EAT})::date as d, sum((e.value)::numeric) as n
+                  from production_reports r
+                  cross join lateral jsonb_each_text(r.products) as e(key, value)
+                 where r.date >= ${start} and r.date < ${end}
+                 group by 1) p
+          full outer join
+               (select (r.date at time zone ${EAT})::date as d, sum((e.value)::numeric) as n
+                  from daily_ops_reports r
+                  cross join lateral jsonb_each_text(r.delivered) as e(key, value)
+                 where r.date >= ${start} and r.date < ${end}
+                 group by 1) o on o.d = p.d
+      ),
+      prod as (
+        select date_trunc(${bucket}, d) as b, sum(n) as n from prod_day group by 1
+      )
+      select to_char(buckets.b, 'YYYY-MM-DD') as date,
+             coalesce(prod.n, 0) as production
+        from buckets
+        left join prod on prod.b = buckets.b
+       order by buckets.b
+    `,
+    // Sales in its own guarded statement — see salesByBucket.
+    salesByBucket(start, end, bucket),
+  ]);
 
-  return rows.map((r) => ({
-    date: r.date,
-    production: Number(r.production) || 0,
-    sales: Number(r.sales) || 0,
-    collections: Number(r.collections) || 0,
-  }));
+  return mergeSeries(rows, sales);
 }
 
 export function bestAndWorstDays(series: TrendPoint[], key: keyof Omit<TrendPoint, "date">) {

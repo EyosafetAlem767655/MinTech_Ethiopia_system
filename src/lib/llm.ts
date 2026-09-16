@@ -54,11 +54,50 @@ export const GEMINI_BASE = envValue("GEMINI_BASE_URL") || "https://generativelan
 export const GEMINI_MODEL = envValue("GEMINI_MODEL") || "gemini-3.6-flash";
 
 /**
- * Tried in order when the configured model is refused and Google names no
- * replacement. Newest first; each has to be able to read an image, answer in
- * forced JSON, and call a function, because all three are used here.
+ * Tried in order when the configured model is refused, or is too busy to
+ * answer, and Google names no replacement. Newest first; each has to be able
+ * to read an image, answer in forced JSON, and call a function, because all
+ * three are used here.
+ *
+ * Env-overridable (`GEMINI_FALLBACK_MODELS`, comma-separated) because the
+ * names that exist for a given key change under us — see the note above — and
+ * the owner can see in Settings → Errors which of these came back 404. A name
+ * that does not exist costs one call per warm instance and is then struck off.
  */
-const GEMINI_FALLBACKS = ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-2.0-flash"];
+const GEMINI_FALLBACKS = (envValue("GEMINI_FALLBACK_MODELS") || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean)
+  .concat(["gemini-3.6-flash", "gemini-3.6-flash-lite", "gemini-3.6-pro", "gemini-2.5-flash", "gemini-2.0-flash"])
+  .filter((m, i, all) => all.indexOf(m) === i);
+
+/**
+ * Models that answered "high demand" recently, and until when to avoid them.
+ *
+ * A 503 is not a 404. The model is there, it is just full, and Google's own
+ * message says the spike is usually temporary — so a busy model is set aside
+ * for a couple of minutes rather than struck off for the life of the instance.
+ * While it is set aside, calls go straight to the next model instead of paying
+ * a wasted round trip to hear "busy" again first.
+ */
+const busyUntil = new Map<string, number>();
+const BUSY_COOLDOWN_MS = 2 * 60_000;
+
+const isBusy = (model: string) => (busyUntil.get(model) ?? 0) > Date.now();
+
+/** Forget every dead and busy model. Tests only — production instances are short-lived. */
+export function resetGeminiStateForTests(): void {
+  deadModels.clear();
+  busyUntil.clear();
+  activeModel = GEMINI_MODEL;
+}
+
+/** Does this failure mean "come back later", as opposed to "wrong model" or "bad request"? */
+function isModelBusy(status: number, reason: string): boolean {
+  if (status === 503 || status === 429) return true;
+  const r = reason.toLowerCase();
+  return r.includes("high demand") || r.includes("overloaded") || r.includes("resource_exhausted") || r.includes("unavailable");
+}
 
 /**
  * The model actually being used, which may have migrated away from the
@@ -114,13 +153,26 @@ function recommendedModel(reason: string): string | null {
  * ago. The static names follow as insurance for the case where the error names
  * no successor.
  */
-function geminiCandidates(reason: string): string[] {
+function geminiCandidates(reason: string, except: string): string[] {
   const recommended = recommendedModel(reason);
-  const out = recommended ? [recommended] : [];
+  const out = recommended && recommended !== except && !isBusy(recommended) ? [recommended] : [];
   for (const m of GEMINI_FALLBACKS) {
-    if (!deadModels.has(m) && !out.includes(m)) out.push(m);
+    if (m !== except && !deadModels.has(m) && !isBusy(m) && !out.includes(m)) out.push(m);
   }
   return out;
+}
+
+/**
+ * The model to send a fresh call to: the active one, unless it is known to be
+ * busy right now, in which case the first alternative that is not.
+ *
+ * Falls back to the active model when everything is busy — a call has to go
+ * somewhere, and the busy list is a hint about the last two minutes, not a
+ * fact about the next.
+ */
+function preferredModel(): string {
+  if (!isBusy(activeModel)) return activeModel;
+  return geminiCandidates("", activeModel)[0] ?? activeModel;
 }
 
 /**
@@ -561,7 +613,10 @@ export async function geminiGenerate(
   opts: Parameters<typeof geminiAttempt>[1] & { errorSource?: string } = {}
 ): Promise<GeminiCallResult> {
   const source = opts.errorSource || "llm";
-  let first = await geminiAttempt(contents, opts);
+  // A model known to be busy is skipped up front — see preferredModel. An
+  // explicit `opts.model` is always honoured; the migration loops below rely on it.
+  const firstModel = opts.model || preferredModel();
+  let first = await geminiAttempt(contents, { ...opts, model: firstModel });
   if (first.ok) return first;
 
   // The model is gone. Move to another one and carry on, rather than failing
@@ -586,7 +641,7 @@ export async function geminiGenerate(
     // again for the life of the instance. So the cost is paid once, not per
     // report.
     const tried: string[] = [];
-    for (const candidate of geminiCandidates(first.error || "")) {
+    for (const candidate of geminiCandidates(first.error || "", failed)) {
       tried.push(candidate);
       const retried = await geminiAttempt(contents, { ...opts, model: candidate });
       if (retried.ok) {
@@ -620,6 +675,57 @@ export async function geminiGenerate(
     }
   }
 
+  // The model is THERE but full — "high demand", a 503, a 429. Waiting a second
+  // and asking the same full model again (the retry below) is the right move
+  // for a blip and the wrong one for a spike, which is what took the flow
+  // editor down for an afternoon. So the other models are asked first, in the
+  // same order as the migration above, and the busy one is set aside for a
+  // couple of minutes so the next report does not pay to rediscover it. The
+  // active model is NOT changed: this is a detour, not a move.
+  if (isModelBusy(first.status || 0, first.error || "")) {
+    const busy = first.model || activeModel;
+    busyUntil.set(busy, Date.now() + BUSY_COOLDOWN_MS);
+
+    const tried: string[] = [];
+    for (const candidate of geminiCandidates("", busy)) {
+      tried.push(candidate);
+      const retried = await geminiAttempt(contents, { ...opts, model: candidate });
+      if (retried.ok) {
+        // Recorded, not just done: an afternoon spent on the fallback is a
+        // capacity problem the owner should see, and nothing else would show it.
+        void logError({
+          source,
+          kind: "gemini_busy_fallback",
+          message: `"${busy}" is busy (${first.error}); answered by "${candidate}".`,
+          detail: { busy, answeredBy: candidate, tried, configured: GEMINI_MODEL },
+        });
+        return retried;
+      }
+      if (isModelBusy(retried.status || 0, retried.error || "")) {
+        busyUntil.set(candidate, Date.now() + BUSY_COOLDOWN_MS);
+        continue;
+      }
+      if (isModelUnavailable(retried.status || 0, retried.error || "")) {
+        deadModels.add(candidate);
+        continue;
+      }
+      // Anything else is the REQUEST being refused — an oversized image, a bad
+      // schema — and would be refused identically by every remaining model.
+      // Except a 400 that names the model: an unpublished name can come back
+      // as 400 rather than 404, and that one is the candidate's fault.
+      if (retried.status === 400 && /model/i.test(retried.error || "")) {
+        deadModels.add(candidate);
+        continue;
+      }
+      return retried;
+    }
+    if (tried.length) {
+      first = { ...first, error: `${first.error} · also tried: ${tried.join(", ")}` };
+    }
+    // Every alternative was busy or missing: fall through to the same-model
+    // retry below, which is now the last resort rather than the only one.
+  }
+
   if (!isRetryable(first.error || "")) {
     void logError({
       source,
@@ -631,7 +737,7 @@ export async function geminiGenerate(
   }
 
   await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS));
-  const second = await geminiAttempt(contents, opts);
+  const second = await geminiAttempt(contents, { ...opts, model: firstModel });
   if (second.ok) {
     // Worth recording even though the caller succeeded: a model that needs a
     // second attempt every time is a budget problem waiting to become an outage,
