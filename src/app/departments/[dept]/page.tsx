@@ -6,7 +6,6 @@ import type { ComponentType } from "react";
 import DepartmentReport from "@/components/DepartmentReport";
 import { isDepartmentKey, type DepartmentKey } from "@/lib/departments";
 import BagControlPanel from "@/components/panels/BagControlPanel";
-import PurchasesPanel from "@/components/panels/PurchasesPanel";
 import RawMaterialReceivedPanel from "@/components/panels/RawMaterialReceivedPanel";
 import DeliveryReportPanel from "@/components/panels/DeliveryReportPanel";
 import ProductionPanels from "@/components/panels/ProductionPanels";
@@ -45,9 +44,11 @@ const PANELS: Record<DepartmentKey, ComponentType[]> = {
     // reason both exist is to be read against each other.
     PpBagUsagePanel,
     PpBagDamagePanel,
+    // One panel for purchase requests. The older card list that sat under it
+    // showed the same rows with an amount nobody files and an AI verdict in a
+    // shape the bot no longer writes — the check appeared blank there.
     ToolRequestsPanel,
     BagControlPanel,
-    PurchasesPanel,
   ],
   // Analytics first: the question the tab answers, then the sheet it is built from.
   sales: [SalesAnalyticsPanel, SalesInvoicesPanel],

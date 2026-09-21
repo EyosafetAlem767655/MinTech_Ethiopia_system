@@ -14,6 +14,7 @@ export async function GET() {
       select id as _id, title, quantity, kind, justification, amount,
              description, unit, department, notes,
              coalesce(photo_file_id::text, tg_file_id) as "photoFileId", legitimacy, status,
+             decided_by as "decidedBy", decided_at as "decidedAt",
              requested_by as "requestedBy", created_at as "createdAt"
         from purchase_requests
        order by created_at desc
@@ -22,6 +23,7 @@ export async function GET() {
     () => sql<Record<string, unknown>[]>`
       select id as _id, title, quantity, kind, justification, amount,
              coalesce(photo_file_id::text, tg_file_id) as "photoFileId", legitimacy, status,
+             decided_by as "decidedBy", decided_at as "decidedAt",
              requested_by as "requestedBy", created_at as "createdAt"
         from purchase_requests
        order by created_at desc
@@ -30,6 +32,7 @@ export async function GET() {
     () => sql<Record<string, unknown>[]>`
       select id as _id, title, justification, amount,
              photo_file_id as "photoFileId", legitimacy, status,
+             decided_by as "decidedBy", decided_at as "decidedAt",
              requested_by as "requestedBy", created_at as "createdAt"
         from purchase_requests
        order by created_at desc
