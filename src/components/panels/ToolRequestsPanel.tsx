@@ -79,25 +79,44 @@ const OPEN_STATUSES = new Set(["pending", "deferred"]);
 const isPhotoCheck = (l: Legitimacy): l is PhotoCheck => typeof (l as PhotoCheck).checked === "boolean";
 
 /**
- * One reading of either verdict shape: did it run, is it favourable, how sure.
+ * One number for either verdict shape: HOW REAL THE CLAIM LOOKS, 0–100.
  *
- * Both shapes are read because both are in the table. A verdict that never ran
- * is neutral, never red — a Gemini outage must not read as an accusation that
- * the employee faked the damage.
+ * The model answers two things — is the damage real (`plausible`) and how sure
+ * it is (`confidence`). Shown side by side they read wrongly: "100%" beside
+ * "does not match" meant the model was certain the claim was NOT real, and the
+ * badge looked like a perfect score. So the two are folded into one figure on
+ * one scale: a plausible claim scores its confidence, an implausible one scores
+ * the remainder. 100% sure it is real → 100% real; 100% sure it is not → 0% real;
+ * "can't tell" lands in the middle either way, which is what it is.
+ *
+ * The legacy shape already was a 0–100 legitimacy score, so it passes through.
+ *
+ * A verdict that never ran is neutral, never red — a Gemini outage must not
+ * read as an accusation that the employee faked the damage.
  */
-function readVerdict(l: Legitimacy | null): { ran: boolean; good: boolean; pct: number; note: string; flags: string[] } | null {
+function readVerdict(l: Legitimacy | null): { ran: boolean; real: number; note: string; flags: string[] } | null {
   if (!l) return null;
   if (isPhotoCheck(l)) {
-    return { ran: l.checked, good: l.plausible, pct: l.confidence, note: l.observations || "", flags: [] };
+    const c = Math.max(0, Math.min(100, Number(l.confidence) || 0));
+    return { ran: l.checked, real: l.plausible ? c : 100 - c, note: l.observations || "", flags: [] };
   }
-  const score = Number(l.score) || 0;
-  return { ran: true, good: score >= 50, pct: score, note: l.reasoning || "", flags: l.flags || [] };
+  const score = Math.max(0, Math.min(100, Number(l.score) || 0));
+  return { ran: true, real: score, note: l.reasoning || "", flags: l.flags || [] };
 }
 
-function tone(v: { ran: boolean; good: boolean; pct: number }): string {
+/** Plain words for the figure. Four bands, deliberately few. */
+function realLabel(real: number): string {
+  if (real >= 85) return "Real";
+  if (real >= 60) return "Likely real";
+  if (real >= 35) return "Doubtful";
+  return "Not real";
+}
+
+function tone(v: { ran: boolean; real: number }): string {
   if (!v.ran) return "bg-stone-100 text-stone-600";
-  if (!v.good) return "bg-red-100 text-red-800";
-  return v.pct >= 70 ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-800";
+  if (v.real >= 60) return "bg-green-100 text-green-700";
+  if (v.real >= 35) return "bg-amber-100 text-amber-800";
+  return "bg-red-100 text-red-800";
 }
 
 /** The badge in the table. Compact; the pop-up carries the reasoning. */
@@ -121,7 +140,7 @@ function CheckBadge({ row }: { row: Row }) {
   }
   return (
     <span title={v.note} className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${tone(v)}`}>
-      {v.good ? "✅" : "⚠️"} {v.pct}%
+      {v.real}% real · {realLabel(v.real)}
     </span>
   );
 }
@@ -149,18 +168,21 @@ function CheckDetail({ row }: { row: Row }) {
       </div>
     );
   }
-  const bar = !v.good ? "bg-red-500" : v.pct >= 70 ? "bg-green-500" : "bg-amber-400";
-  const label = !v.good ? "Does not match the claim" : v.pct >= 70 ? "Matches the claim" : "Plausible, low confidence";
+  const bar = v.real >= 60 ? "bg-green-500" : v.real >= 35 ? "bg-amber-400" : "bg-red-500";
+  const text = v.real >= 60 ? "text-green-700" : v.real >= 35 ? "text-amber-700" : "text-red-700";
   return (
     <div className="rounded-xl bg-stone-50 p-3">
       <div className="mb-1.5 flex items-center justify-between">
-        <span className={`text-[11px] font-bold ${!v.good ? "text-red-700" : v.pct >= 70 ? "text-green-700" : "text-amber-700"}`}>
-          {v.good ? "✅" : "⚠️"} AI check · {v.pct}% · {label}
+        <span className={`text-[11px] font-bold ${text}`}>
+          AI check · {v.real}% real · {realLabel(v.real)}
         </span>
       </div>
       <div className="h-2 overflow-hidden rounded-full bg-stone-200">
-        <div className={`h-full rounded-full ${bar}`} style={{ width: `${Math.max(0, Math.min(100, v.pct))}%` }} />
+        <div className={`h-full rounded-full ${bar}`} style={{ width: `${v.real}%` }} />
       </div>
+      <p className="mt-1 text-[10px] text-stone-400">
+        How real the damage looks in the photo, from the AI: 100% = clearly real, 0% = clearly not.
+      </p>
       {v.note && <p className="mt-1.5 text-[11px] leading-snug text-stone-600">{v.note}</p>}
       {v.flags.length > 0 && (
         <div className="mt-1.5 flex flex-wrap gap-1">
