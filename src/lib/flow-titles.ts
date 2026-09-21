@@ -33,7 +33,7 @@ export type AssetFlowKind =
 export const FLOW_TITLE: Record<AssetFlowKind, string> = {
   raw_material: "🚚 የጥሬ ዕቃ ገቢ ሪፖርት",
   delivery: "🚛 የማድረሻ ሪፖርት",
-  tool_request: "🔧 የመሣሪያ ግዢ ጥያቄ",
+  tool_request: "🛒 የግዢ ጥያቄ",
   pp_bag_damage: "💔 የPP ከረጢት ብልሽት ሪፖርት",
   production_daily: "🏭 የቀኑ የምርት ሪፖርት",
   base_balance: "📊 የወሩ የመነሻ ሚዛን",

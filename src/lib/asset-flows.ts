@@ -182,30 +182,83 @@ const DELIVERY_STEPS: AssetStep[] = [
   })),
 ];
 
+/** The units a new-tool request can be counted in. */
+export const PURCHASE_UNITS = [
+  { label: "🔩 pcs", value: "pcs" },
+  { label: "📦 pack", value: "pack" },
+];
+
+/** Who is asking: the four departments, or somewhere else. */
+export const PURCHASE_DEPARTMENTS = [
+  { label: "🏭 ምርት (Production)", value: "production" },
+  { label: "📦 የንብረት አስተዳደር (Asset)", value: "asset_management" },
+  { label: "🤝 ሽያጭ (Sales)", value: "sales" },
+  { label: "💵 ፋይናንስ (Finance)", value: "finance" },
+  { label: "👥 የሰው ኃይል (HR)", value: "hr" },
+  { label: "➖ ሌላ (Other)", value: "other" },
+];
+
+/**
+ * A purchase request, one of two shapes chosen up front.
+ *
+ * The KIND is asked first, because everything after it differs. A damaged item
+ * is a claim with evidence: what it is, how many, and a photograph the model
+ * checks against that claim, with its confidence shown on the dashboard. A new
+ * tool is a case to be made: what, described; how many and in what unit; why;
+ * for which department; and anything else worth saying.
+ *
+ * It used to ask name and quantity before the kind, which read as one form with
+ * a branch at the end rather than two requests — and left the new-tool branch
+ * with a single "reason" line to carry the whole case.
+ */
+const isMaintenance = (d: Record<string, string | number>) => d.kind === "maintenance";
+const isNewItem = (d: Record<string, string | number>) => d.kind === "new_item";
+
 const TOOL_REQUEST_STEPS: AssetStep[] = [
-  { id: "title", prompt: "🔧 የመሣሪያውን ስም እና መግለጫ ይፃፉ።", type: "text" },
-  { id: "quantity", prompt: "🔢 ብዛቱን ይፃፉ።", type: "number" },
   {
     id: "kind",
-    prompt: "❓ የጥያቄው ዓይነት ይምረጡ።",
+    label: "Type",
+    prompt: "❓ የግዢ ጥያቄው ምንድን ነው?",
     type: "choice",
     choices: [
-      { label: "🛠 ጥገና (Maintenance)", value: "maintenance" },
-      { label: "🆕 አዲስ ዕቃ (New item)", value: "new_item" },
+      { label: "🛠 የተበላሸ ዕቃ (Damaged item)", value: "maintenance" },
+      { label: "🆕 አዲስ መሣሪያ (New tool)", value: "new_item" },
     ],
   },
+
+  /* ── A. Damaged item ─────────────────────────────────────────────────── */
+  { id: "title", label: "Item", prompt: "🛠 የተበላሸው ዕቃ ምንድን ነው? ስሙን ይፃፉ።", type: "text", when: isMaintenance },
+  { id: "quantity", label: "Qty", prompt: "🔢 ስንት ናቸው? ብዛቱን ይፃፉ።", type: "number", when: isMaintenance },
   {
     id: "photo",
-    prompt: "📷 የተበላሸውን ዕቃ ፎቶ ይላኩ። ፎቶው በAI ይመረመራል።",
+    prompt: "📷 የተበላሸውን ዕቃ ፎቶ ይላኩ። ብልሽቱ በግልጽ እንዲታይ ያድርጉ — ፎቶው በAI በጥንቃቄ ይመረመራል።",
     type: "photo",
-    when: (d) => d.kind === "maintenance",
+    when: isMaintenance,
   },
+
+  /* ── B. New tool ──────────────────────────────────────────────────────── */
+  { id: "title", label: "Tool", prompt: "🆕 የመሣሪያውን ስም ይፃፉ።", type: "text", when: isNewItem },
   {
-    id: "reason",
-    prompt: "📝 አዲስ ዕቃ የሚያስፈልግበትን ምክንያት ይፃፉ።",
+    id: "description",
+    label: "Description",
+    prompt: "📝 መግለጫውን ይፃፉ (ዓይነት፣ መጠን፣ ሞዴል፣ ወዘተ)።",
     type: "text",
-    when: (d) => d.kind === "new_item",
+    when: isNewItem,
   },
+  { id: "quantity", label: "Qty", prompt: "🔢 ብዛቱን ይፃፉ።", type: "number", when: isNewItem },
+  { id: "unit", label: "Unit", prompt: "📏 መለኪያው ምንድን ነው?", type: "choice", choices: PURCHASE_UNITS, when: isNewItem },
+  { id: "reason", label: "Reason", prompt: "❓ የግዢው ምክንያት ምንድን ነው?", type: "text", when: isNewItem },
+  {
+    id: "department",
+    label: "Department",
+    prompt: "🏷 የትኛው ክፍል ነው የሚጠይቀው?",
+    type: "choice",
+    choices: PURCHASE_DEPARTMENTS,
+    when: isNewItem,
+  },
+
+  /* ── Both ─────────────────────────────────────────────────────────────── */
+  { id: "notes", label: "Notes", prompt: "🗒 ተጨማሪ ማስታወሻ ካለ ይፃፉ።", type: "text", skippable: true },
 ];
 
 /** Piles one damage report can carry. The report is weekly, so several. */
@@ -1108,7 +1161,7 @@ export function draftKeyLabel(key: string): string {
   if (key.startsWith(BRAND_PREFIX)) return `ምርቶች · ${productLabel(key.slice(BRAND_PREFIX.length))}`;
   if (key.startsWith(MATERIAL_PREFIX)) return `ጥሬ ዕቃ · ${key.slice(MATERIAL_PREFIX.length)}`;
   // Both paste families namespace bags the same way, so one branch serves both.
-  if (key.startsWith(BAG_PREFIX)) return `ከረጪት · ${bag(key.slice(BAG_PREFIX.length))}`;
+  if (key.startsWith(BAG_PREFIX)) return `ከረጢት · ${bag(key.slice(BAG_PREFIX.length))}`;
 
   // A voucher line's unit of measure: "unit3" → "ዕቃ 3 · Unit".
   const item = key.match(/^([a-z]+)(\d+)$/);
@@ -1121,7 +1174,7 @@ export function draftKeyLabel(key: string): string {
       cost: "Unit Cost",
       class: "Stock item",
       lqty: "Stock qty",
-      more: "ሴላ ዕቃ?",
+      more: "ሌላ ዕቃ?",
     };
     const name = NAMES[item[1]];
     if (name) return `ዕቃ ${item[2]} · ${name}`;
@@ -1159,8 +1212,18 @@ export function stepLabel(step: AssetStep): string {
   return tidy(first).slice(0, 60) || step.id;
 }
 
-export function findStep(kind: AssetFlowKind, id: string): AssetStep | undefined {
-  return STEPS[kind].find((s) => s.id === id);
+/**
+ * The step with this id — for THIS draft, when two branches share one.
+ *
+ * The purchase request asks "title" and "quantity" on both of its branches with
+ * different wording, because the answers land in the same column either way.
+ * Given the draft, the step whose `when` holds is the one being asked; without
+ * it (the editor's label lookup), the first declared stands in.
+ */
+export function findStep(kind: AssetFlowKind, id: string, draft?: Record<string, string | number>): AssetStep | undefined {
+  const matches = STEPS[kind].filter((s) => s.id === id);
+  if (draft) return matches.find((s) => !s.when || s.when(draft)) ?? matches[0];
+  return matches[0];
 }
 
 /** The first step of a flow. */
@@ -1590,23 +1653,33 @@ export function assetPreview(state: AssetFlowState): string {
     ].join("\n");
   }
 
-  const kindLabel = d.kind === "maintenance" ? "🛠 ጥገና" : "🆕 አዲስ ዕቃ";
-  let out =
-    head +
-    `🔧 መሣሪያ: ${esc(d.title)}\n` +
-    `🔢 ብዛት: ${qty(Number(d.quantity) || 0)}\n` +
-    `❓ ዓይነት: ${kindLabel}\n`;
-  if (d.kind === "new_item") out += `📝 ምክንያት: ${esc(d.reason) || "—"}\n`;
+  // The purchase request: two cards, one per kind.
+  const unitLabel = PURCHASE_UNITS.find((u) => u.value === d.unit)?.label.replace(/^\S+\s/, "") || "";
+  const deptLabel = PURCHASE_DEPARTMENTS.find((x) => x.value === d.department)?.label || "—";
+  let out = head;
   if (d.kind === "maintenance") {
-    out += state.photoFileId ? "📷 ፎቶ: ተያይዟል\n" : "📷 ፎቶ: የለም\n";
+    out +=
+      `❓ ዓይነት: 🛠 የተበላሸ ዕቃ\n` +
+      `🔧 ዕቃ: <b>${esc(d.title)}</b>\n` +
+      `🔢 ብዛት: ${qty(Number(d.quantity) || 0)}\n` +
+      (state.photoFileId ? "📷 ፎቶ: ተያይዟል\n" : "📷 ፎቶ: የለም\n");
     const c = state.check;
     if (c) {
       out += c.checked
-        ? `🤖 AI: ${c.plausible ? "ከጥያቄው ጋር ይስማማል" : "አጠራጣሪ"} · ${c.confidence}%\n` +
+        ? `🤖 AI: ${c.plausible ? "ከጥያቄው ጋር ይስማማል" : "አጠራጣሪ"} · <b>${c.confidence}%</b>\n` +
           (c.observations ? `   <i>${esc(c.observations)}</i>\n` : "")
         : "🤖 AI: ማጣራት አልተቻለም — በእጅ ይጣራል\n";
     }
+  } else {
+    out +=
+      `❓ ዓይነት: 🆕 አዲስ መሣሪያ\n` +
+      `🔧 መሣሪያ: <b>${esc(d.title)}</b>\n` +
+      `📝 መግለጫ: ${esc(d.description) || "—"}\n` +
+      `🔢 ብዛት: ${qty(Number(d.quantity) || 0)} ${esc(unitLabel)}\n` +
+      `❓ ምክንያት: ${esc(d.reason) || "—"}\n` +
+      `🏷 ክፍል: ${esc(deptLabel)}\n`;
   }
+  out += `🗒 ማስታወሻ: ${esc(d.notes) || "—"}\n`;
   return out;
 }
 
@@ -2012,6 +2085,10 @@ export async function saveAssetReport(
   // insertRow, not a tagged template, so that a database still missing
   // `tg_file_id` (migration 0025) costs the photo REFERENCE rather than the
   // whole request. This is the exact insert that was losing tool requests.
+  //
+  // The four new-tool columns (0028) are optional for the same reason: a
+  // request filed between the deploy and the migration keeps its title,
+  // quantity, kind and reason — the fields every reader already handles.
   const row = await insertRow(
     "purchase_requests",
     {
@@ -2019,13 +2096,17 @@ export async function saveAssetReport(
       quantity: Number(d.quantity) || null,
       kind: String(d.kind || ""),
       justification: String(d.reason || "") || null,
+      description: String(d.description || "") || null,
+      unit: String(d.unit || "") || null,
+      department: String(d.department || "") || null,
+      notes: String(d.notes || "") || null,
       tg_file_id: state.photoFileId || null,
       requested_by: reportedBy,
       source: "telegram",
       status: "pending",
       legitimacy: state.check ? sql.json({ ...state.check }) : null,
     },
-    { optional: ["tg_file_id"], source: "asset-flows" }
+    { optional: ["tg_file_id", "description", "unit", "department", "notes"], source: "asset-flows" }
   );
   return { id: row.id, table: "purchase_requests" };
 }

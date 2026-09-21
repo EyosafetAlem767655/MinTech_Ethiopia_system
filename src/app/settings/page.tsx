@@ -156,7 +156,10 @@ export default function SettingsPage() {
 interface PurgeCounts {
   sales: { receipts: number; briefs: number };
   request_photos: { photos: number };
+  asset_management: { rows: number; perTable: Record<string, number>; files: number };
 }
+
+type PurgeScope = "sales" | "request_photos" | "asset_management";
 
 /**
  * Permanent, scoped deletion — rows AND the storage objects behind them.
@@ -181,7 +184,7 @@ function DangerZone() {
     if (open) load();
   }, [open, load]);
 
-  const run = async (scope: "sales" | "request_photos") => {
+  const run = async (scope: PurgeScope) => {
     setBusy(scope);
     setResult("");
     try {
@@ -198,7 +201,10 @@ function DangerZone() {
       setResult(
         scope === "sales"
           ? `Removed ${body.receiptsDeleted} sales report(s), ${body.filesRemoved} image(s) and ${body.briefsDeleted} cached brief(s).`
-          : `Removed ${body.filesRemoved} image(s) from ${body.requestsAffected} request(s). The requests themselves are untouched.`
+          : scope === "asset_management"
+            ? `Removed ${body.rowsDeleted} row(s) across ${Object.keys(body.perTable || {}).length} tables, ` +
+              `${body.filesRemoved} image(s) and ${body.binEntriesDeleted} recycle-bin entr(ies).`
+            : `Removed ${body.filesRemoved} image(s) from ${body.requestsAffected} request(s). The requests themselves are untouched.`
       );
       setTyped((t) => ({ ...t, [scope]: "" }));
       await load();
@@ -258,6 +264,22 @@ function DangerZone() {
         onType={(v) => setTyped((t) => ({ ...t, request_photos: v }))}
         busy={busy === "request_photos"}
         onRun={() => run("request_photos")}
+      />
+      <PurgeCard
+        title="Clear the asset management tab"
+        detail={
+          counts
+            ? `${counts.asset_management.rows} row(s): raw material received, deliveries, GRV and store issue vouchers ` +
+              `with their line items, PP bag usage and damage reports (${counts.asset_management.files} image(s)), ` +
+              `purchase requests, bag lots and damage claims — plus their recycle-bin entries. ` +
+              `GRV vouchers are shared with the Finance tab and go too.`
+            : "…"
+        }
+        scope="asset_management"
+        typed={typed.asset_management || ""}
+        onType={(v) => setTyped((t) => ({ ...t, asset_management: v }))}
+        busy={busy === "asset_management"}
+        onRun={() => run("asset_management")}
       />
     </section>
   );

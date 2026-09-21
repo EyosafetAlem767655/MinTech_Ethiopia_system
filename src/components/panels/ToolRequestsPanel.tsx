@@ -25,6 +25,11 @@ interface Row {
   quantity: number | null;
   kind: "maintenance" | "new_item" | null;
   justification: string | null;
+  /** New-tool requests only (0028); absent on older rows and older schemas. */
+  description?: string | null;
+  unit?: string | null;
+  department?: string | null;
+  notes?: string | null;
   photoFileId: string | null;
   legitimacy: PhotoCheck | null;
   status: string;
@@ -80,6 +85,15 @@ function PhotoBadge({ check, kind }: { check: PhotoCheck | null; kind: Row["kind
 
 const OPEN_STATUSES = new Set(["pending", "deferred"]);
 
+const DEPARTMENT_LABEL: Record<string, string> = {
+  production: "Production",
+  asset_management: "Asset",
+  sales: "Sales",
+  finance: "Finance",
+  hr: "HR",
+  other: "Other",
+};
+
 export default function ToolRequestsPanel() {
   const [rows, setRows] = useState<Row[] | null>(null);
   const [busy, setBusy] = useState<Record<string, boolean>>({});
@@ -128,7 +142,7 @@ export default function ToolRequestsPanel() {
   return (
     <section className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2 px-1">
-        <h2 className="font-display text-lg font-bold">🔧 Tool purchase requests</h2>
+        <h2 className="font-display text-lg font-bold">🛒 Purchase requests</h2>
         {open > 0 && (
           <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-bold text-amber-800">
             {open} awaiting decision
@@ -139,17 +153,18 @@ export default function ToolRequestsPanel() {
       {error && <p className="card border-l-4 border-l-red-500 p-3 text-xs font-bold text-red-700">{error}</p>}
 
       {rows.length === 0 ? (
-        <p className="card p-4 text-sm text-stone-400">No tool purchase requests yet.</p>
+        <p className="card p-4 text-sm text-stone-400">No purchase requests yet.</p>
       ) : (
         <div className="card overflow-x-auto p-0">
-          <table className="w-full min-w-[980px] text-right text-xs">
+          <table className="w-full min-w-[1180px] text-right text-xs">
             <thead className="bg-clay-50/70 text-[10px] uppercase tracking-wide text-stone-500">
               <tr>
                 <th className="p-2 text-left font-bold">Date</th>
-                <th className="p-2 text-left font-bold">Tool</th>
-                <th className="p-2 font-bold">Qty</th>
                 <th className="p-2 font-bold">Type</th>
-                <th className="p-2 text-left font-bold">Reason</th>
+                <th className="p-2 text-left font-bold">Item</th>
+                <th className="p-2 font-bold">Qty</th>
+                <th className="p-2 text-left font-bold">Reason / notes</th>
+                <th className="p-2 text-left font-bold">Dept</th>
                 <th className="p-2 font-bold">Photo</th>
                 <th className="p-2 font-bold">AI check</th>
                 <th className="p-2 text-left font-bold">By</th>
@@ -161,8 +176,6 @@ export default function ToolRequestsPanel() {
               {rows.map((r) => (
                 <tr key={r._id} className="border-t border-clay-50">
                   <td className="p-2 text-left font-semibold text-stone-800">{fmtDate(r.createdAt)}</td>
-                  <td className="p-2 text-left text-stone-700">{r.title}</td>
-                  <td className="p-2 tabular-nums">{r.quantity ?? ""}</td>
                   <td className="p-2">
                     {r.kind && (
                       <span
@@ -170,11 +183,25 @@ export default function ToolRequestsPanel() {
                           r.kind === "maintenance" ? "bg-clay-100 text-clay-800" : "bg-blue-100 text-blue-800"
                         }`}
                       >
-                        {r.kind === "maintenance" ? "🛠 Maintenance" : "🆕 New item"}
+                        {r.kind === "maintenance" ? "🛠 Damaged" : "🆕 New tool"}
                       </span>
                     )}
                   </td>
-                  <td className="p-2 text-left text-stone-500">{r.justification || ""}</td>
+                  <td className="p-2 text-left text-stone-700">
+                    <span className="font-semibold">{r.title}</span>
+                    {r.description && <span className="block text-[11px] text-stone-500">{r.description}</span>}
+                  </td>
+                  <td className="p-2 tabular-nums">
+                    {r.quantity ?? ""}
+                    {r.unit && <span className="ml-1 text-[10px] text-stone-400">{r.unit}</span>}
+                  </td>
+                  <td className="p-2 text-left text-stone-500">
+                    {r.justification || ""}
+                    {r.notes && <span className="block text-[11px] italic text-stone-400">{r.notes}</span>}
+                  </td>
+                  <td className="p-2 text-left text-stone-500">
+                    {r.department ? DEPARTMENT_LABEL[r.department] || r.department : ""}
+                  </td>
                   <td className="p-2">
                     {r.photoFileId ? (
                       <a href={`/api/files/${r.photoFileId}`} target="_blank" rel="noreferrer">

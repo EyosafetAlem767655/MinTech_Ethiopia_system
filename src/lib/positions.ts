@@ -24,7 +24,6 @@ export type CapabilityKey =
   | "finished_goods_delivery"
   | "purchase_items"
   | "sales_report"
-  | "tool_request"
   | "pp_bag_damage"
   // Asset management feeds the monthly finance report.
   | "base_balance"
@@ -86,12 +85,16 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
   },
   purchase: {
     key: "purchase",
+    // ONE button for every purchase request, guided. It used to be a free-text
+    // capture handed to a model to sort into columns, with a second button
+    // ("🔧 tool request") running the guided flow for the asset role — two ways
+    // to file the same thing, one of them unreliable. The guided flow now asks
+    // first which kind of request it is: a damaged item, photographed and
+    // checked by the AI, or a new tool, described in full.
     button: "🛒 የግዢ ጥያቄ",
-    captureMode: "llm",
-    docType: "purchase_request",
+    captureMode: "asset_entry",
     input: "any",
-    question:
-      "📝 ዕቃውን ወይም አገልግሎቱን፣ የገንዘቡን መጠን እና ምክንያቱን ይፃፉ። ደጋፊ ማስረጃ ካለዎት ፎቶ ያያይዙ።",
+    question: "🛒 የግዢ ጥያቄ በደረጃ እናስገባለን። መጀመሪያ የጥያቄውን ዓይነት ይምረጡ።",
   },
   ops: {
     key: "ops",
@@ -138,13 +141,6 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
     captureMode: "asset_entry",
     input: "any",
     question: "🚛 የማድረሻ ሪፖርት በደረጃ እናስገባለን።",
-  },
-  tool_request: {
-    key: "tool_request",
-    button: "🔧 የመሣሪያ ግዢ ጥያቄ",
-    captureMode: "asset_entry",
-    input: "any",
-    question: "🔧 የመሣሪያ ግዢ ጥያቄ በደረጃ እናስገባለን።",
   },
   pp_bag_damage: {
     key: "pp_bag_damage",
@@ -368,7 +364,7 @@ export const POSITIONS: Record<PositionKey, Position> = {
     en: "Tool purchase request",
     am: "የመሣሪያ ግዢ ጥያቄ",
     description: "Raises tool and equipment purchase requests when needed (not daily).",
-    capabilities: ["tool_request"],
+    capabilities: ["purchase"],
     dailyRequired: false,
     submissionTables: ["purchase_requests"],
   },

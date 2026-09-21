@@ -247,20 +247,26 @@ export const SUBMISSIONS: Record<SubmissionCollection, SubmissionSpec> = {
   },
   tool_request: {
     table: "purchase_requests",
-    label: "Tool purchase request",
-    icon: "🔧",
+    label: "Purchase request",
+    icon: "🛒",
     dateColumn: "created_at",
     authorColumn: "requested_by",
-    searchColumns: ["title", "justification", "requested_by"],
+    searchColumns: ["title", "description", "justification", "department", "requested_by"],
+    // The four columns after `kind` arrive in 0028; the API only selects what
+    // the database has, so they simply do not show until it runs.
     displayFields: [
-      TEXT("title", "Tool"),
-      NUM("quantity", "Qty"),
+      TEXT("title", "Item"),
       TEXT("kind", "Type"),
+      LONG("description", "Description"),
+      NUM("quantity", "Qty"),
+      TEXT("unit", "Unit"),
       LONG("justification", "Reason"),
+      TEXT("department", "Department"),
+      LONG("notes", "Notes"),
       TEXT("status", "Status"),
       TEXT("requested_by", "By"),
     ],
-    editableKeys: ["title", "quantity", "justification"],
+    editableKeys: ["title", "description", "quantity", "unit", "justification", "department", "notes"],
     photoColumn: "photo_file_id",
   },
   pp_bag_damage: {

@@ -2,11 +2,28 @@ import { geminiGenerate } from "@/lib/llm";
 import {
   allStepsFor,
   draftKeyLabel,
+  findStep,
+  isSkip,
+  itemKeys,
+  MAX_VOUCHER_ITEMS,
+  nextStep,
   parseQty,
   stepLabel,
   type AssetFlowKind,
   type AssetStep,
 } from "@/lib/asset-flows";
+
+/** The two flows whose draft is a list of line items that can grow or shrink. */
+const VOUCHER_KINDS = new Set<AssetFlowKind>(["grv", "store_issue"]);
+
+/** Slot number of the first line item nobody has described yet, or null when full. */
+function firstEmptyItem(draft: Record<string, string | number>): number | null {
+  for (let i = 1; i <= MAX_VOUCHER_ITEMS; i++) {
+    const v = draft[itemKeys(i).description];
+    if (v === undefined || v === "") return i;
+  }
+  return null;
+}
 
 /**
  * Correcting any field of any report, before it is submitted.
@@ -56,6 +73,14 @@ export interface FlowEditResult {
   usedAi: boolean;
   /** Set when the AI pass was needed but could not run. */
   error?: string;
+  /**
+   * A step to resume the flow at instead of the review card.
+   *
+   * Set when a voucher line was ADDED: the description is in, but its unit,
+   * quantity and stock-item questions are not, and they are asked the ordinary
+   * way rather than left for a second edit.
+   */
+  resumeAt?: string;
 }
 
 /**
@@ -104,8 +129,14 @@ export function editableFields(
 
   // Flow order first, and the UNFILTERED step list: a `when` guard decides what
   // to ask next, never what may be corrected.
-  for (const step of allStepsFor(kind)) {
+  //
+  // The one exception is an id declared TWICE — one per branch of the purchase
+  // request, with different wording. There the guard picks which copy supplies
+  // the label; the field is still listed either way.
+  const all = allStepsFor(kind);
+  for (const step of all) {
     if (step.type === "photo" || step.type === "photos" || step.type === "paste") continue;
+    if (step.when && !step.when(draft) && all.some((o) => o !== step && o.id === step.id)) continue;
     if (answered(step.id)) push(step, stepLabel(step));
   }
 
@@ -114,10 +145,30 @@ export function editableFields(
   // complaint was precisely that a curated list hides things.
   for (const key of Object.keys(draft)) {
     if (taken.has(key) || !answered(key)) continue;
+    // Extraction hints are the model's suggestion, never an answer, and
+    // showing them would invite "correcting" a field that does not exist.
+    if (key.endsWith("_hint")) continue;
     // Numeric where the value is numeric, so a correction is still checked as a
     // number rather than stored as text.
     const numeric = typeof draft[key] === "number" || /^-?\d*\.?\d+$/.test(String(draft[key]));
     push({ id: key, prompt: key, type: numeric ? "number" : "text" }, draftKeyLabel(key));
+  }
+
+  // A voucher can GROW from here. The next empty line is offered as one more
+  // numbered entry, so "12 = Cement 50kg" adds a fourth item the same way
+  // "3 = 45" corrects the third. Without this the only way to add a line a
+  // reporter forgot was to cancel and retype the whole voucher — the exact
+  // complaint the editor exists to answer. Removing a line is the reverse:
+  // its description set to "-".
+  if (VOUCHER_KINDS.has(kind)) {
+    const slot = firstEmptyItem(draft);
+    if (slot !== null && slot > 1) {
+      const step = findStep(kind, itemKeys(slot).description);
+      if (step && !taken.has(step.id)) {
+        taken.add(step.id);
+        out.push({ index: out.length + 1, step, label: `➕ ዕቃ ${slot} · Description (አዲስ)`, value: "—" });
+      }
+    }
   }
 
   return out;
@@ -196,12 +247,21 @@ const normChoice = (s: string) =>
     .trim();
 
 /**
- * The fast path: one `target = value` per line.
+ * The fast path: one correction per line, no model involved.
  *
  * The target may be the line number, the step id, or the label shown beside it.
  * All three are offered because all three are in front of the reporter when they
  * are typing — the number they just read, the English term off the paper form,
  * and the key they may know from the template.
+ *
+ * The separator is generous on purpose. This path is the one that works when
+ * Gemini does not, and it was too strict to be that: "3 = 45" was read but
+ * "3 45", "3 - 45" and "3 → 45" all fell through to the model, and when the
+ * model was down (a 503 afternoon) every one of them came back as "could not
+ * read the correction". A number followed by anything is a correction to that
+ * line; a number alone with the value on the next line is the same thing typed
+ * on a phone. The label forms still need "=" or ":" — a label can contain
+ * spaces and dashes of its own.
  */
 export function parseDirectEdit(
   fields: EditableField[],
@@ -216,13 +276,39 @@ export function parseDirectEdit(
   }
 
   const out: Record<string, string> = {};
-  for (const line of String(text || "").split(/\n+/)) {
-    const m = line.match(/^\s*([^=:]+?)\s*[=:]\s*(.+?)\s*$/);
-    if (!m) continue;
-    const [, target, value] = m;
-    if (!value) continue;
-    const field = byNumber.get(target.trim()) ?? byName.get(norm(target));
-    if (field) out[field.step.id] = value;
+  const lines = String(text || "")
+    .split(/\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    // "Supplier = ABC", "3-EL = 12". Checked FIRST: several labels begin with a
+    // digit ("3-EL", "5-EL", "2-EL"), and read as a number they would correct
+    // line 3 to "EL = 12" instead of the brand they name.
+    const byLabel = line.match(/^([^=:]+?)\s*[=:]\s*(.+?)\s*$/);
+    if (byLabel) {
+      const [, target, value] = byLabel;
+      const named = byName.get(norm(target));
+      if (named && value) {
+        out[named.step.id] = value;
+        continue;
+      }
+    }
+
+    // "3 = 45", "3: 45", "3 - 45", "3 → 45", "3) 45", "3. 45", "3 45".
+    const byNo = line.match(/^(\d{1,3})\s*(?:[=:\-–—→>)\.]\s*|\s+)(.+)$/);
+    if (byNo && byNumber.has(byNo[1])) {
+      out[byNumber.get(byNo[1])!.step.id] = byNo[2].trim();
+      continue;
+    }
+
+    // A bare number: the value is the next line.
+    if (/^\d{1,3}$/.test(line) && byNumber.has(line) && i + 1 < lines.length) {
+      out[byNumber.get(line)!.step.id] = lines[++i];
+      continue;
+    }
   }
   return out;
 }
@@ -274,20 +360,90 @@ export function validateForStep(
   return { ok: true, value: val };
 }
 
+/**
+ * Drop voucher line `slot`, closing the gap.
+ *
+ * Lines above it move down one so the list stays contiguous — `voucherItems`
+ * stops at the first empty description, and a hole in the middle would silently
+ * discard every line after it. The "add another?" answer of the new last line is
+ * set to "no" so the flow does not walk into the slot that was just vacated.
+ */
+function removeVoucherLine(draft: Record<string, string | number>, slot: number): void {
+  const keysOf = (i: number) => Object.values(itemKeys(i));
+  for (let i = slot; i < MAX_VOUCHER_ITEMS; i++) {
+    const from = itemKeys(i + 1);
+    const to = itemKeys(i);
+    for (const k of Object.keys(from) as (keyof ReturnType<typeof itemKeys>)[]) {
+      const v = draft[from[k]];
+      if (v === undefined) delete draft[to[k]];
+      else draft[to[k]] = v;
+    }
+    // The extraction hint travels with its line too.
+    const hintFrom = `${from.ledger}_hint`;
+    if (draft[hintFrom] !== undefined) draft[`${to.ledger}_hint`] = draft[hintFrom];
+    else delete draft[`${to.ledger}_hint`];
+  }
+  for (const k of keysOf(MAX_VOUCHER_ITEMS)) delete draft[k];
+  delete draft[`${itemKeys(MAX_VOUCHER_ITEMS).ledger}_hint`];
+
+  // Re-close the list at its new end.
+  const last = (firstEmptyItem(draft) ?? MAX_VOUCHER_ITEMS + 1) - 1;
+  if (last >= 1 && last < MAX_VOUCHER_ITEMS) draft[itemKeys(last).more] = "no";
+}
+
 /** Apply a `{ stepId: value }` map, recording only what actually moved. */
 function applyValues(
+  kind: AssetFlowKind,
   fields: EditableField[],
   draft: Record<string, string | number>,
   values: Record<string, string>
-): { draft: Record<string, string | number>; changes: FlowChange[]; rejected: { label: string; reason: string }[] } {
+): {
+  draft: Record<string, string | number>;
+  changes: FlowChange[];
+  rejected: { label: string; reason: string }[];
+  resumeAt?: string;
+} {
   const next = { ...draft };
   const changes: FlowChange[] = [];
   const rejected: { label: string; reason: string }[] = [];
   const byId = new Map(fields.map((f) => [f.step.id, f]));
+  let resumeAt: string | undefined;
 
   for (const [id, raw] of Object.entries(values)) {
     const field = byId.get(id);
     if (!field) continue;
+
+    // Voucher lines: a description set to "-" removes the line; a description
+    // typed into the empty slot adds one. Both are handled before validation,
+    // which would otherwise refuse the blank and accept the addition as a
+    // plain field edit with no line-item questions behind it.
+    if (VOUCHER_KINDS.has(kind)) {
+      const line = id.match(/^desc(\d+)$/);
+      if (line) {
+        const slot = Number(line[1]);
+        const existed = next[id] !== undefined && next[id] !== "";
+        if (existed && isSkip(raw)) {
+          if (slot === 1 && firstEmptyItem(next) === 2) {
+            rejected.push({ label: field.label, reason: "ቫውቸሩ ቢያንስ አንድ ዕቃ ሊኖረው ይገባል" });
+            continue;
+          }
+          const was = String(next[id]);
+          removeVoucherLine(next, slot);
+          changes.push({ id, label: `ዕቃ ${slot}`, from: was, to: "ተሰርዟል" });
+          continue;
+        }
+        if (!existed && !isSkip(raw) && raw.trim()) {
+          // Open the slot: the previous line's "add another?" has to say yes or
+          // the flow, and voucherItems, stop one line short of the new one.
+          if (slot > 1) next[itemKeys(slot - 1).more] = "yes";
+          next[id] = raw.trim();
+          changes.push({ id, label: field.label, from: "—", to: raw.trim() });
+          // Ask the rest of the new line's questions the ordinary way.
+          resumeAt = nextStep(kind, id, next);
+          continue;
+        }
+      }
+    }
 
     const checked = validateForStep(field.step, raw);
     if (!checked.ok) {
@@ -310,7 +466,7 @@ function applyValues(
     });
   }
 
-  return { draft: next, changes, rejected };
+  return { draft: next, changes, rejected, resumeAt };
 }
 
 const EDIT_SYSTEM =
@@ -345,7 +501,7 @@ export async function applyFlowEdit(
 
   const direct = parseDirectEdit(fields, text);
   if (Object.keys(direct).length > 0) {
-    const applied = applyValues(fields, draft, direct);
+    const applied = applyValues(kind, fields, draft, direct);
     return { ...applied, usedAi: false };
   }
 
@@ -404,7 +560,7 @@ export async function applyFlowEdit(
     values[id] = String(value);
   }
 
-  const applied = applyValues(fields, draft, values);
+  const applied = applyValues(kind, fields, draft, values);
   return { ...applied, usedAi: true };
 }
 
@@ -416,7 +572,14 @@ export function describeFlowChanges(result: FlowEditResult): string {
     : "";
 
   if (result.error) {
-    return `⚠️ ማስተካከያውን ማንበብ አልተቻለም። እባክዎ በ"ቁጥር = እሴት" መልኩ ይላኩ — ለምሳሌ "3 = 45"።${rejected}`;
+    // Say WHICH half failed. The free-text path needs the model and the model
+    // is down; the numbered path needs nothing and still works. Read as "could
+    // not read the correction" this looked like the editor being broken.
+    return (
+      `⚠️ የAI አገልግሎቱ አሁን አይገኝም፣ ስለዚህ በነጻ ጽሑፍ የተላከውን ማስተካከያ መረዳት አልቻልኩም።\n\n` +
+      `እባክዎ የመስኩን ቁጥር ተጠቅመው ይላኩ — ለምሳሌ <code>3 = 45</code> ወይም <code>3 45</code>። ` +
+      `በአንድ መልእክት ብዙ መስመር መላክ ይችላሉ።${rejected}`
+    );
   }
 
   if (result.changes.length === 0) {

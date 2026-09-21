@@ -5,32 +5,48 @@ export const dynamic = "force-dynamic";
 
 /** GET — tool purchase requests filed from the bot (Asset Management tab). */
 export async function GET() {
-  // quantity / kind arrive in 0013 and tg_file_id in 0025; fall back to the core
-  // columns when a deployment is running ahead of its migrations rather than
-  // 500-ing. The fallback loses the photo of a request filed since 0025, which
-  // is a missing thumbnail rather than a missing request.
-  let rows: Record<string, unknown>[];
-  try {
-    rows = await sql<Record<string, unknown>[]>`
+  // quantity / kind arrive in 0013, tg_file_id in 0025 and the four new-tool
+  // columns in 0028. Three shapes, newest first: a deployment running ahead of
+  // its migrations loses the newest columns rather than 500-ing. Each fallback
+  // costs a detail — a thumbnail, a description — never the request.
+  const shapes = [
+    () => sql<Record<string, unknown>[]>`
+      select id as _id, title, quantity, kind, justification, amount,
+             description, unit, department, notes,
+             coalesce(photo_file_id::text, tg_file_id) as "photoFileId", legitimacy, status,
+             requested_by as "requestedBy", created_at as "createdAt"
+        from purchase_requests
+       order by created_at desc
+       limit 200
+    `,
+    () => sql<Record<string, unknown>[]>`
       select id as _id, title, quantity, kind, justification, amount,
              coalesce(photo_file_id::text, tg_file_id) as "photoFileId", legitimacy, status,
              requested_by as "requestedBy", created_at as "createdAt"
         from purchase_requests
        order by created_at desc
        limit 200
-    `;
-  } catch (e) {
-    const code = (e as { code?: string })?.code;
-    if (code === "42P01") return NextResponse.json([]);
-    if (code !== "42703") throw e;
-    rows = await sql<Record<string, unknown>[]>`
+    `,
+    () => sql<Record<string, unknown>[]>`
       select id as _id, title, justification, amount,
              photo_file_id as "photoFileId", legitimacy, status,
              requested_by as "requestedBy", created_at as "createdAt"
         from purchase_requests
        order by created_at desc
        limit 200
-    `;
+    `,
+  ];
+
+  let rows: Record<string, unknown>[] = [];
+  for (let i = 0; i < shapes.length; i++) {
+    try {
+      rows = await shapes[i]();
+      break;
+    } catch (e) {
+      const code = (e as { code?: string })?.code;
+      if (code === "42P01") return NextResponse.json([]);
+      if (code !== "42703" || i === shapes.length - 1) throw e;
+    }
   }
 
   return NextResponse.json(

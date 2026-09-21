@@ -50,10 +50,12 @@ export async function GET(req: NextRequest) {
     ? [...SUBMISSION_COLLECTIONS]
     : [collection as SubmissionCollection];
 
-  // Reading every type costs one query each. They are cheap and indexed, and the
-  // per-collection limit keeps the merge small — an admin screen listing what
-  // arrived today is worth more than the round trips it saves.
-  const perCollection = isAll ? Math.max(10, Math.ceil(limit / 4)) : limit;
+  // Reading every type costs one query each. They are cheap and indexed. Each
+  // type is read up to the full limit rather than a quarter of it: the merge
+  // below is ordered by arrival, so the cap only ever trims the OLDEST filings,
+  // and a fresh report can never be pushed off the page by twenty-six other
+  // types each contributing a handful of older rows.
+  const perCollection = limit;
 
   const results: { collection: SubmissionCollection; rows: Record<string, unknown>[] }[] = [];
   const unavailable: string[] = [];
@@ -93,7 +95,7 @@ export async function GET(req: NextRequest) {
   // from so the UI can label and act on it.
   const merged = results
     .flatMap(({ collection: key, rows }) =>
-      rows.map((r) => ({ ...r, _collection: key, _sortAt: sortInstant(SUBMISSIONS[key], r) }))
+      rows.map((r) => ({ ...r, _collection: key, _sortAt: sortInstant(r) }))
     )
     .sort((a, b) => b._sortAt - a._sortAt)
     .slice(0, limit);
@@ -107,10 +109,18 @@ export async function GET(req: NextRequest) {
   });
 }
 
-/** Sort key for the merged view: the report's own date, else when it landed. */
-function sortInstant(spec: SubmissionSpec, row: Record<string, unknown>): number {
-  const raw = row[spec.dateColumn] ?? row.created_at;
-  const t = new Date(String(raw ?? "")).getTime();
+/**
+ * Sort key for the merged view: WHEN THE ROW LANDED, not the report's own date.
+ *
+ * This screen answers "what has the bot received" — and a report filed this
+ * morning about last Tuesday's delivery is something that arrived this morning.
+ * Sorting by the report date put that row under a week of older filings, and
+ * with twenty-odd types each contributing rows the page was full before it was
+ * reached; the report was there, unfindable, and the screen read as the bot
+ * having lost it.
+ */
+function sortInstant(row: Record<string, unknown>): number {
+  const t = new Date(String(row.created_at ?? "")).getTime();
   return isNaN(t) ? 0 : t;
 }
 
@@ -177,17 +187,26 @@ async function queryCollection(
   const upperExclusive =
     !dateIsText && upper instanceof Date ? new Date(upper.getTime() + 86_400_000) : upper;
 
-  // The quick range is an INSTANT, not a date, so "last 24 hours" really means
-  // the last 24 hours. A text date column can only be compared by day, so it
-  // gets the day the range started — the closest true statement available.
-  const sinceBound = since ? (dateIsText ? since.toISOString().slice(0, 10) : since) : null;
+  // The quick range is "filed in the last N hours/days", and it is applied to
+  // created_at — the moment the row landed — on every table alike.
+  //
+  // It used to be applied to the report's own date column, which is the
+  // calendar day the reporter PICKED, stored at UTC midnight. A raw-material
+  // receipt filed today for last Tuesday's truck therefore failed "last 24
+  // hours" by six days, and the asset team's reports — which are routinely filed
+  // a day or two after the fact — did not show up at all on the screen that
+  // exists to show they had arrived. The explicit from/to dates below still
+  // filter the report date, which is what a date picker means.
+  //
+  // Ordered the same way for the same reason, unless a date range was given.
+  const byArrival = !from && !to;
 
   return await sql<Record<string, unknown>[]>`
     select ${sql(columns)}${photoIdsSelect}
       from ${sql(spec.table)}
      where ${from ? sql`${sql(dateColumn)} >= ${lower}` : sql`true`}
        and ${to ? sql`${sql(dateColumn)} < ${upperExclusive}` : sql`true`}
-       and ${sinceBound ? sql`${sql(dateColumn)} >= ${sinceBound}` : sql`true`}
+       and ${since ? sql`created_at >= ${since}` : sql`true`}
        and ${
          q && searchColumns.length > 0
            ? sql`(${searchColumns
@@ -195,7 +214,7 @@ async function queryCollection(
                .reduce((a, b) => sql`${a} or ${b}`)})`
            : sql`true`
        }
-     order by ${sql(dateColumn)} desc, created_at desc
+     order by ${byArrival ? sql`created_at desc` : sql`${sql(dateColumn)} desc, created_at desc`}
      limit ${limit}
   `;
 }

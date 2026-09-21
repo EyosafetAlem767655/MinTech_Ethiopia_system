@@ -810,7 +810,9 @@ const NORM_RECEIPT = {
 const ASSET_FLOW_BY_CAP: Record<string, AssetFlowKind | undefined> = {
   raw_material_received: "raw_material",
   finished_goods_delivery: "delivery",
-  tool_request: "tool_request",
+  // The 🛒 button; the flow keeps its old kind name so no session, table or
+  // registry key has to change with it.
+  purchase: "tool_request",
   pp_bag_damage: "pp_bag_damage",
   production_report: "production_daily",
   pp_bag_used: "pp_bag_used",
@@ -970,7 +972,7 @@ async function askAssetStep(chatId: string, state: AssetFlowState): Promise<void
     });
     return;
   }
-  const step = findStep(state.kind, state.step);
+  const step = findStep(state.kind, state.step, state.draft);
   if (!step) return;
 
   if (step.type === "date") {
@@ -1609,19 +1611,26 @@ export async function POST(req: NextRequest) {
 
         const result = await applyFlowEdit(state.kind, state.draft, text);
         state.draft = result.draft;
-        state.step = "review";
+        // Where to go next:
+        //  - a voucher line was added → its remaining questions, then review;
+        //  - something changed or was refused → the review card, redrawn;
+        //  - nothing at all → STAY on the edit step. The reply below explains
+        //    the format; making the person press ✏️ again before they can retry
+        //    was one tap too many on a phone, every single time.
+        const nothing = result.changes.length === 0 && result.rejected.length === 0;
+        state.step = result.resumeAt ?? (nothing ? "edit" : "review");
         session.assetFlow = { ...state };
         await persist(session);
 
         // Always say what happened. An edit that silently changed nothing is
         // indistinguishable from one that worked, and that silence is the exact
         // bug this pattern was written to kill on the sales flow.
-        await sendMessage(chatId, describeFlowChanges(result));
-        await askAssetStep(chatId, state);
+        await sendMessage(chatId, describeFlowChanges(result), nothing ? { reply_markup: CHANGE_CANCEL_KEYBOARD } : {});
+        if (!nothing) await askAssetStep(chatId, state);
         return NextResponse.json({ ok: true });
       }
 
-      const step = findStep(state.kind, state.step);
+      const step = findStep(state.kind, state.step, state.draft);
       if (!step) {
         // Scratch state referencing a step that no longer exists (a deploy landed
         // mid-flow). Restart rather than trapping the user in a dead state.
