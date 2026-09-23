@@ -12,10 +12,19 @@ export default function RangeSelector({
   value,
   onChange,
   keys,
+  labels,
 }: {
   value: RangeKey;
   onChange: (key: RangeKey) => void;
   keys?: RangeKey[];
+  /**
+   * Override a window's wording for one screen.
+   *
+   * "Daily" reads correctly beside a trend chart and wrongly beside a list of
+   * readings, where the same window means "today only". The windows, their
+   * order and this control stay one implementation; only the word changes.
+   */
+  labels?: Partial<Record<RangeKey, string>>;
 }) {
   const list = keys ? RANGE_LIST.filter((r) => keys.includes(r.key)) : RANGE_LIST;
   return (
@@ -29,7 +38,7 @@ export default function RangeSelector({
             value === r.key ? "bg-white text-clay-800 shadow" : "text-clay-400 hover:text-clay-600"
           }`}
         >
-          {r.label}
+          {labels?.[r.key] ?? r.label}
         </button>
       ))}
     </div>

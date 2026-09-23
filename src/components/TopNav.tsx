@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useState } from "react";
 import { NAV_ITEMS, isActive } from "@/lib/nav";
 
 /**
@@ -17,6 +18,22 @@ import { NAV_ITEMS, isActive } from "@/lib/nav";
  */
 export default function TopNav() {
   const pathname = usePathname();
+  const [refreshing, setRefreshing] = useState(false);
+
+  /**
+   * A full reload, deliberately — not `router.refresh()`.
+   *
+   * Every panel fetches its own data in a client `useEffect` on mount. A
+   * server-side refresh re-renders the tree without re-running any of them, so
+   * the figures on screen would not move: "I pressed refresh and nothing
+   * happened", which is worse than having no button. The route skeletons and
+   * the cached shell make the reload cheap.
+   */
+  const refresh = () => {
+    setRefreshing(true);
+    window.location.reload();
+  };
+
   if (pathname === "/login") return null;
 
   return (
@@ -45,6 +62,17 @@ export default function TopNav() {
               </Link>
             );
           })}
+
+          <button
+            onClick={refresh}
+            disabled={refreshing}
+            title="Reload everything on this page"
+            aria-label="Refresh"
+            className="ml-2 flex items-center gap-1.5 rounded-full bg-white/70 px-3 py-1.5 text-xs font-bold text-stone-600 transition-all hover:bg-white hover:text-clay-700 disabled:opacity-60"
+          >
+            <span className={`text-sm leading-none ${refreshing ? "inline-block animate-spin" : ""}`}>⟳</span>
+            {refreshing ? "Refreshing…" : "Refresh"}
+          </button>
         </div>
       </div>
     </nav>

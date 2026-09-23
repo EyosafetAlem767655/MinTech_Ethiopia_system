@@ -1,6 +1,9 @@
 /* MinTech Ethiopia service worker: push notifications + offline app shell */
-const CACHE = "mintech-v1";
-const SHELL = ["/", "/manifest.json"];
+// Bumped with the shell. The activate handler deletes every cache that is not
+// this one, so a rename is what actually ships a new offline page.
+const CACHE = "mintech-v2";
+const OFFLINE = "/offline.html";
+const SHELL = ["/", "/manifest.json", OFFLINE];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).catch(() => {}));
@@ -28,7 +31,17 @@ self.addEventListener("fetch", (event) => {
           caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});
           return res;
         })
-        .catch(() => caches.match(req).then((m) => m || caches.match("/")))
+        // Offline: this exact page if it was visited before, then the cached
+        // shell, and finally the offline page — which is the only one of the
+        // three guaranteed to be there, because it is installed with the worker.
+        // Without that last step a first-time visitor on a dead connection got
+        // the browser's own error page.
+        .catch(() =>
+          caches
+            .match(req)
+            .then((m) => m || caches.match("/"))
+            .then((m) => m || caches.match(OFFLINE))
+        )
     );
   }
 });

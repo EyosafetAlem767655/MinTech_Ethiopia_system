@@ -21,6 +21,7 @@ import {
   type SubmissionSpec,
 } from "@/lib/submissions";
 import { InstallButton } from "@/components/InstallPrompt";
+import type { SchemaReport } from "@/lib/schema-check";
 
 interface BotUser {
   _id: string;
@@ -814,6 +815,102 @@ interface ErrorRow {
  * The 24-hour count beside each row is the point of it: one timeout is weather,
  * forty is a broken deployment, and the message alone cannot tell them apart.
  */
+/**
+ * Does the database have the columns this deployment writes to?
+ *
+ * Migrations are applied by hand here, so a deploy can run ahead of its schema.
+ * `insertRow` keeps that from losing a submission, but the drift itself was only
+ * ever visible as a `schema_column_missing` row naming a column — never the file
+ * that adds it. This names the file.
+ */
+function SchemaCheck() {
+  // The route adds the name of the one file that fixes everything at once.
+  const [report, setReport] = useState<(SchemaReport & { backfill: string }) | null>(null);
+  const [checking, setChecking] = useState(false);
+
+  const check = useCallback(async () => {
+    setChecking(true);
+    try {
+      const res = await fetch("/api/admin/schema");
+      setReport(res.ok ? await res.json() : null);
+    } catch {
+      setReport(null);
+    } finally {
+      setChecking(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    check();
+  }, [check]);
+
+  if (!report) {
+    return <div className="card h-14 animate-pulse bg-clay-50" />;
+  }
+
+  // Grouped by the file to run: four missing columns from one migration is one
+  // action, not four.
+  const byMigration = new Map<string, string[]>();
+  for (const m of report.missing) {
+    byMigration.set(m.migration, [...(byMigration.get(m.migration) ?? []), `${m.table}.${m.column}`]);
+  }
+  for (const t of report.missingTables) {
+    byMigration.set(t.migration, [...(byMigration.get(t.migration) ?? []), `${t.table} (whole table)`]);
+  }
+
+  if (report.ok) {
+    return (
+      <div className="card flex items-center justify-between gap-2 border-l-4 border-l-green-500 p-3">
+        <p className="text-xs font-bold text-green-800">✅ Database schema matches the code.</p>
+        <button
+          onClick={check}
+          disabled={checking}
+          className="shrink-0 rounded-full bg-stone-100 px-2.5 py-1 text-[10px] font-bold text-stone-600 disabled:opacity-50"
+        >
+          {checking ? "…" : "Re-check"}
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="card space-y-2 border-l-4 border-l-red-500 p-3">
+      <div className="flex items-start justify-between gap-2">
+        <p className="text-xs font-bold text-red-800">
+          {report.error
+            ? "⚠️ The schema check could not run."
+            : `⚠️ The database is missing ${report.missing.length + report.missingTables.length} thing(s) the code writes to.`}
+        </p>
+        <button
+          onClick={check}
+          disabled={checking}
+          className="shrink-0 rounded-full bg-stone-100 px-2.5 py-1 text-[10px] font-bold text-stone-600 disabled:opacity-50"
+        >
+          {checking ? "…" : "Re-check"}
+        </button>
+      </div>
+
+      {report.error ? (
+        <p className="text-[11px] text-stone-500">{report.error}</p>
+      ) : (
+        <>
+          {[...byMigration.entries()].map(([migration, items]) => (
+            <div key={migration} className="rounded-lg bg-stone-50 p-2">
+              <p className="font-mono text-[10px] font-bold text-stone-700">{migration}</p>
+              <p className="mt-0.5 text-[11px] text-stone-500">{items.join(" · ")}</p>
+            </div>
+          ))}
+          <p className="text-[11px] text-stone-500">
+            Run <span className="font-mono font-bold text-clay-800">{report.backfill}</span> in the Supabase SQL
+            editor — it adds every one of these and is safe to run more than once. Until then those values are
+            dropped as reports are saved (the reports themselves are kept).
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
+
 function ErrorsTab() {
   const [rows, setRows] = useState<ErrorRow[] | null>(null);
   const [showResolved, setShowResolved] = useState(false);
@@ -847,6 +944,11 @@ function ErrorsTab() {
 
   return (
     <div className="space-y-3 pb-10">
+      {/* Above the error list on purpose: a missing column is the CAUSE of the
+          schema_column_missing rows below it, and reading those without it is
+          how the drift went unnoticed for days. */}
+      <SchemaCheck />
+
       <div className="flex items-center justify-between gap-2 px-1">
         <p className="text-[11px] text-stone-500">
           {rows === null ? "Loading…" : `${rows.length} ${showResolved ? "recorded" : "open"}`}

@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>MinTech Ethiopia — offline</title>
+    <!--
+      Served by the service worker when a navigation fails and nothing is cached.
+      Everything is inline and self-contained: this page is shown precisely when
+      the network cannot deliver a stylesheet or a font.
+    -->
+    <style>
+      :root { color-scheme: light; }
+      body {
+        margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+        background: #faf6f4; color: #2b1610; padding: 24px; text-align: center;
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      }
+      .wrap { max-width: 420px; }
+      h1 { margin: 14px 0 6px; font-size: 22px; font-weight: 700; }
+      p { margin: 0; font-size: 14px; line-height: 1.55; color: #6b6a66; }
+      button {
+        margin-top: 20px; border: 0; border-radius: 999px; padding: 10px 22px;
+        font-size: 14px; font-weight: 700; color: #fff; background: #a63d25; cursor: pointer;
+      }
+      .hint { margin-top: 18px; font-size: 12px; color: #a8a29e; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div style="font-size: 44px">📡</div>
+      <h1>No connection</h1>
+      <p>
+        MinTech cannot reach the server right now. This is the connection, not the data — every report that
+        has been submitted is safe and will be here when you are back online.
+      </p>
+      <button onclick="location.reload()">Try again</button>
+      <p class="hint">Reports can still be filed through the Telegram bot.</p>
+    </div>
+    <script>
+      // Come back by itself the moment the connection returns, so nobody is left
+      // looking at this page after the network has recovered.
+      addEventListener("online", function () {
+        location.reload();
+      });
+    </script>
+  </body>
+</html>

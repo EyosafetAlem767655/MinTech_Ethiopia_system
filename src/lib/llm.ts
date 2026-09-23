@@ -608,6 +608,73 @@ async function geminiAttempt(
  * Every final failure is recorded through `logError`, which never throws, so
  * this function's contract is unchanged: it returns a result, never rejects.
  */
+/**
+ * The same request, asked of Nemotron instead — when that is possible at all.
+ *
+ * Returns null when this call CANNOT cross providers, which is the important
+ * half of the contract:
+ *
+ *  - an `inline_data` part means the request carries a photograph, and Nemotron
+ *    is a text model. Sending it the prompt without the image would produce a
+ *    confident answer about a receipt it never saw, which is far worse than a
+ *    failure;
+ *  - `tools` means the caller wants a function call back, and the two providers
+ *    describe those differently. Guessing at that mapping to save an outage is
+ *    how a tool call comes back subtly wrong;
+ *  - no NVIDIA key configured — nothing to cross to.
+ *
+ * Everything else is plain text in and text out, which is exactly what the
+ * free-text edit parser and the brief need.
+ */
+async function nemotronFallback(
+  contents: GeminiContent[],
+  opts: NonNullable<Parameters<typeof geminiAttempt>[1]>
+): Promise<GeminiCallResult | null> {
+  if (opts.tools) return null;
+  if (contents.some((c) => c.parts?.some((p) => p && typeof p === "object" && "inline_data" in p))) return null;
+  if (!nvidiaKey()) return null;
+
+  // Gemini's contents → OpenAI messages. The system instruction is its own
+  // field there and an ordinary system message here.
+  const messages: { role: "system" | "user" | "assistant"; content: string }[] = [];
+  if (opts.systemInstruction) messages.push({ role: "system", content: opts.systemInstruction });
+  // JSON mode is a generationConfig flag for Gemini; for an OpenAI-compatible
+  // endpoint it is safer to ASK in words than to rely on response_format, which
+  // not every model behind this base URL honours. The callers all strip fences
+  // before parsing anyway.
+  if (opts.json) {
+    messages.push({ role: "system", content: "Reply with strict JSON only. No prose, no markdown fences." });
+  }
+  for (const c of contents) {
+    const text = (c.parts || [])
+      .map((p) => (p && typeof p === "object" && typeof p.text === "string" ? p.text : ""))
+      .filter(Boolean)
+      .join("\n");
+    if (text) messages.push({ role: c.role === "model" ? "assistant" : "user", content: text });
+  }
+  if (messages.length === 0) return null;
+
+  try {
+    const res = await textAI().chat.completions.create({
+      model: TEXT_MODEL,
+      messages,
+      temperature: opts.temperature ?? 0,
+      ...(opts.maxOutputTokens ? { max_tokens: opts.maxOutputTokens } : {}),
+    });
+    const text = res.choices?.[0]?.message?.content ?? "";
+    if (!text.trim()) return { ok: false, text: "", calls: [], error: "empty response", model: TEXT_MODEL };
+    return { ok: true, text, calls: [], model: TEXT_MODEL };
+  } catch (e) {
+    return {
+      ok: false,
+      text: "",
+      calls: [],
+      error: e instanceof Error ? e.message : String(e),
+      model: TEXT_MODEL,
+    };
+  }
+}
+
 export async function geminiGenerate(
   contents: GeminiContent[],
   opts: Parameters<typeof geminiAttempt>[1] & { errorSource?: string } = {}
@@ -722,8 +789,30 @@ export async function geminiGenerate(
     if (tried.length) {
       first = { ...first, error: `${first.error} · also tried: ${tried.join(", ")}` };
     }
-    // Every alternative was busy or missing: fall through to the same-model
-    // retry below, which is now the last resort rather than the only one.
+
+    // Every Gemini model is full. There is one more provider in this system —
+    // Nemotron, already configured and already reading text for the ingestion
+    // classifier — and a free-text correction is a text task like any other.
+    // Crossing to it is the difference between "the editor is down this
+    // afternoon" and one slower answer.
+    const crossed = await nemotronFallback(contents, opts);
+    if (crossed) {
+      if (crossed.ok) {
+        void logError({
+          source,
+          kind: "gemini_text_fallback",
+          message: `every Gemini model was busy; answered by ${TEXT_MODEL}.`,
+          detail: { tried, answeredBy: TEXT_MODEL, configured: GEMINI_MODEL, reason: first.error },
+        });
+        return crossed;
+      }
+      // The other provider failed too. Report both, so the log does not blame
+      // Gemini for an outage that was wider than Gemini.
+      first = { ...first, error: `${first.error} · ${TEXT_MODEL}: ${crossed.error}` };
+    }
+
+    // Nothing else could take it: fall through to the same-model retry below,
+    // which is now the last resort rather than the only one.
   }
 
   if (!isRetryable(first.error || "")) {

@@ -3,6 +3,7 @@ import "./globals.css";
 import PwaSetup from "@/components/PwaSetup";
 import BottomNav from "@/components/BottomNav";
 import TopNav from "@/components/TopNav";
+import OfflineBanner from "@/components/OfflineBanner";
 import InstallPrompt from "@/components/InstallPrompt";
 
 export const metadata: Metadata = {
@@ -28,6 +29,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           so the padding goes with it. */}
       <body className="font-sans min-h-screen pb-24 lg:pb-10">
         <PwaSetup />
+        {/* Above the nav: a dead connection is the first thing worth knowing. */}
+        <OfflineBanner />
         <TopNav />
         {children}
         <InstallPrompt />
