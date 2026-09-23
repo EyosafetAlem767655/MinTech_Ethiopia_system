@@ -69,7 +69,7 @@ export default function OwnerDashboard() {
       : { emoji: "🌙", text: "Good evening" };
 
   return (
-    <main className="max-w-lg mx-auto">
+    <main className="app-shell">
       {/* ───────────── Hero ───────────── */}
       <header className="hero-gradient text-white px-5 pt-12 pb-20 rounded-b-[2.2rem] relative overflow-hidden">
         <div className="absolute -top-10 -right-10 w-48 h-48 rounded-full bg-white/5 animate-float" />
@@ -175,7 +175,7 @@ export default function OwnerDashboard() {
           )}
 
           {!summaries && !error && (
-            <div className="space-y-3">
+            <div className="space-y-3 lg:grid lg:grid-cols-2 lg:gap-3 lg:space-y-0 xl:grid-cols-4">
               {[0, 1, 2, 3].map((i) => (
                 <div key={i} className="card h-28 animate-pulse bg-clay-50" />
               ))}
@@ -183,7 +183,7 @@ export default function OwnerDashboard() {
           )}
 
           {summaries && (
-            <div className="space-y-3">
+            <div className="space-y-3 lg:grid lg:grid-cols-2 lg:gap-3 lg:space-y-0 xl:grid-cols-4">
               {summaries.map((s) => (
                 <SummaryCard key={s.department} summary={s} />
               ))}
@@ -191,6 +191,9 @@ export default function OwnerDashboard() {
           )}
         </section>
 
+        {/* Two feeds, side by side on a desktop: both are lists nobody
+            scrolls to the bottom of, and a wide screen can hold both. */}
+        <div className="space-y-5 lg:grid lg:grid-cols-2 lg:gap-5 lg:space-y-0">
         {/* ───────── Who submitted what (all types) ───────── */}
         <section className="animate-fade-up">
           <h2 className="mb-3 px-1 font-display text-lg font-bold">Recent submissions</h2>
@@ -202,6 +205,7 @@ export default function OwnerDashboard() {
           <h2 className="mb-3 px-1 font-display text-lg font-bold">Daily reports</h2>
           <DailyReportsPanel />
         </section>
+        </div>
       </div>
     </main>
   );

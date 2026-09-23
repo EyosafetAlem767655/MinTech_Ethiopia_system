@@ -88,7 +88,7 @@ export default function SettingsPage() {
   };
 
   return (
-    <main className="max-w-4xl mx-auto px-4 pb-10">
+    <main className="app-shell px-4 pb-10">
       <header className="hero-gradient -mx-4 px-5 pb-7 pt-10 text-white sm:mx-0 sm:mt-4 sm:rounded-2xl">
         <div className="flex items-start justify-between gap-3">
           <div>

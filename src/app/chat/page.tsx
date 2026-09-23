@@ -147,7 +147,7 @@ export default function ChatPage() {
   };
 
   return (
-    <main className="max-w-lg mx-auto flex flex-col min-h-screen">
+    <main className="mx-auto flex min-h-screen w-full max-w-lg flex-col lg:max-w-3xl">
       <header className="hero-gradient text-white px-5 pt-10 pb-6 rounded-b-3xl">
         <h1 className="font-display text-xl font-bold">💬 Company Assistant</h1>
         <p className="text-clay-100/80 text-xs mt-1">

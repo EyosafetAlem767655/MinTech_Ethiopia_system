@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import PwaSetup from "@/components/PwaSetup";
 import BottomNav from "@/components/BottomNav";
+import TopNav from "@/components/TopNav";
 import InstallPrompt from "@/components/InstallPrompt";
 
 export const metadata: Metadata = {
@@ -23,8 +24,11 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <body className="font-sans min-h-screen pb-24">
+      {/* pb-24 clears the phone's fixed tab bar. On a desktop that bar is gone,
+          so the padding goes with it. */}
+      <body className="font-sans min-h-screen pb-24 lg:pb-10">
         <PwaSetup />
+        <TopNav />
         {children}
         <InstallPrompt />
         <BottomNav />

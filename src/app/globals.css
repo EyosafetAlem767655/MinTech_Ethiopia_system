@@ -33,6 +33,18 @@ body {
   @apply rounded-2xl bg-white border border-clay-100 shadow-[0_4px_24px_rgba(62,22,13,0.06)];
 }
 
+/*
+ * The page column.
+ *
+ * A phone gets the 32rem column the whole app was designed around; a desktop
+ * gets the width of the screen up to 80rem. One class rather than a `max-w-lg`
+ * repeated across five page shells, so the desktop width is one edit if it is
+ * ever wrong — and so nobody widens four pages and forgets the fifth.
+ */
+.app-shell {
+  @apply mx-auto w-full max-w-lg lg:max-w-7xl;
+}
+
 .shimmer-bg {
   background: linear-gradient(90deg, rgba(255,255,255,0) 0%, rgba(255,255,255,0.35) 50%, rgba(255,255,255,0) 100%);
   background-size: 700px 100%;

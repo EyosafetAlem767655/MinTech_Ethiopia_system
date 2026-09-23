@@ -23,6 +23,26 @@ import SalesAnalyticsPanel from "@/components/panels/SalesAnalyticsPanel";
  * formats come first (production grid, stock status, raw-material received,
  * deliveries, purchased items), then the existing operational panels.
  */
+/**
+ * Panels that must keep the full width of the page on a desktop.
+ *
+ * Everything on this tab is a report, and most reports here are wide tables —
+ * the delivery sheet alone is sixteen columns. Halving their width to fit two
+ * abreast would trade a readable table for a tidy grid, so the wide ones span
+ * both columns and only the card-shaped panels pair up.
+ */
+const FULL_WIDTH = new Set<ComponentType>([
+  ProductionPanels,
+  WhitenessPanel,
+  RawMaterialReceivedPanel,
+  DeliveryReportPanel,
+  VoucherPanels,
+  FinancePanels,
+  SalesInvoicesPanel,
+  SalesAnalyticsPanel,
+  ToolRequestsPanel,
+]);
+
 const PANELS: Record<DepartmentKey, ComponentType[]> = {
   // One component, because a single range control has to drive all four views.
   // Shift analysis and stone traceability were removed from the system; the
@@ -71,7 +91,7 @@ export default function DepartmentPage() {
 
   if (!isDepartmentKey(dept)) {
     return (
-      <main className="max-w-lg mx-auto px-4 pt-10 text-center">
+      <main className="app-shell px-4 pt-10 text-center">
         <p className="text-sm text-stone-500">Unknown department.</p>
         <Link href="/" className="mt-3 inline-block text-sm font-bold text-clay-700">
           ← Back to Brief
@@ -83,7 +103,7 @@ export default function DepartmentPage() {
   const panels = PANELS[dept];
 
   return (
-    <main className="max-w-lg mx-auto px-4 pb-6 pt-4">
+    <main className="app-shell px-4 pb-6 pt-4">
       <Link href="/" className="mb-2 inline-flex items-center gap-1 text-xs font-bold text-clay-600">
         ← Brief
       </Link>
@@ -95,10 +115,13 @@ export default function DepartmentPage() {
           the panels below are the reports it actually submits. */}
       {!REPORT_ONLY.has(dept) && <DepartmentReport dept={dept} />}
 
-      {/* Detailed module reports */}
-      <div className="mt-4 space-y-8">
+      {/* Detailed module reports. One column on a phone, exactly as before; a
+          two-column grid from lg up, with the wide tables spanning both. */}
+      <div className="mt-4 space-y-8 lg:grid lg:grid-cols-2 lg:items-start lg:gap-8 lg:space-y-0">
         {panels.map((Panel, i) => (
-          <Panel key={i} />
+          <div key={i} className={FULL_WIDTH.has(Panel) ? "lg:col-span-2" : ""}>
+            <Panel />
+          </div>
         ))}
       </div>
     </main>

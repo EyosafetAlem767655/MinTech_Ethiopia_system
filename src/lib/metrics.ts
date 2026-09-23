@@ -1,6 +1,7 @@
 import sql from "@/lib/sql";
 import { addDays, daysBetween, eatDateLabel, eatDayStart, yesterdayRange } from "@/lib/dates";
 import { reconcileBags } from "@/lib/stock-reconciliation";
+import { alarmingCustomers, creditFigures } from "@/lib/credit";
 
 /**
  * All dashboard numbers. Previously 10 MongoDB aggregation pipelines; now SQL.
@@ -549,6 +550,38 @@ export async function detectExceptions(
     );
   }
 
+
+  // 2b. A client is carrying too much unpaid stock.
+  //
+  //     The credit tab shows this too, but an exposure that only appears to
+  //     somebody who opens the Finance tab is not an alarm. Tonnes rather than
+  //     birr, deliberately: the risk is stock that has left the yard, and the
+  //     owner's rule is stated in tonnes.
+  try {
+    const creditRows = await sql<{ customer: string; qty: string; date: string; credit: string; paid: string }[]>`
+      select i.customer, i.qty, i.date, i.invoice_credit as credit,
+             coalesce((select sum(p.amount) from sales_credit_payments p where p.invoice_id = i.id), 0) as paid
+        from sales_invoices i
+       where i.invoice_credit > 0
+    `;
+    const exposures = alarmingCustomers(
+      creditRows.map((r) => {
+        const f = creditFigures({ date: r.date, invoiceCredit: Number(r.credit), paid: Number(r.paid) }, now);
+        return { customer: r.customer, qty: Number(r.qty) || 0, outstanding: f.outstanding, status: f.status, daysLeft: f.daysLeft };
+      })
+    );
+    for (const c of exposures) {
+      exceptions.push(
+        `${c.customer} has ${c.unpaidTonnes.toLocaleString()} t of stock on unpaid credit ` +
+          `(${Math.round(c.outstanding).toLocaleString()} ETB across ${c.invoices} invoice${c.invoices === 1 ? "" : "s"})` +
+          `${c.worstOverdueDays > 0 ? `, the oldest ${c.worstOverdueDays} days overdue` : ""}.`
+      );
+    }
+  } catch (e) {
+    // sales_invoices arrives in 0027 and sales_credit_payments in 0029. Neither
+    // missing may cost the rest of this list.
+    console.warn("detectExceptions: credit exposure unavailable", e);
+  }
 
   // 3. The bag stock on the floor disagrees with the vouchers.
   //
