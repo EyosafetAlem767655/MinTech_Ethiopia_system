@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { ledgerLabel, parseBagLedgerKey } from "@/lib/products";
+import { BagStockCheck, type Reconciliation } from "@/components/panels/BagStockCheck";
 
 /**
  * The two paper vouchers, and whether they agree with the floor.
@@ -55,26 +56,6 @@ interface Voucher {
   receiptCheck?: ReceiptCheck | null;
 }
 
-interface ReconRow {
-  key: string;
-  size: string;
-  colour: string;
-  label: string;
-  baseBalance: number;
-  received: number;
-  issued: number;
-  expected: number;
-  counted: number | null;
-  gap: number | null;
-}
-
-interface Reconciliation {
-  month: string;
-  countedOn: string | null;
-  rows: ReconRow[];
-  discrepancies: ReconRow[];
-}
-
 interface Payload {
   grv: Voucher[];
   grvItems: Item[];
@@ -91,7 +72,16 @@ const fmt = (n: number | null | undefined, dp = 2) =>
 const fmtDate = (d: string) =>
   new Date(d).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "2-digit" });
 
-export default function VoucherPanels() {
+/**
+ * `showStockCheck` is false on the finance tab.
+ *
+ * This panel is rendered on two tabs. On asset management the stock check is
+ * the question the vouchers answer, so it leads. On finance the tab is a set of
+ * sub-tabs, and a check bolted below them appeared to belong to whichever one
+ * was open — so finance shows it inside the monthly report instead, which is
+ * the period it actually describes.
+ */
+export default function VoucherPanels({ showStockCheck = true }: { showStockCheck?: boolean }) {
   const [data, setData] = useState<Payload | null>(null);
   const [tab, setTab] = useState<"grv" | "siv">("grv");
 
@@ -132,7 +122,7 @@ export default function VoucherPanels() {
 
   return (
     <div className="space-y-4">
-      <Reconciliation recon={data.reconciliation} />
+      {showStockCheck && <BagStockCheck recon={data.reconciliation} />}
 
       <div className="flex gap-1.5 px-1">
         {(
@@ -171,78 +161,6 @@ export default function VoucherPanels() {
         </div>
       )}
     </div>
-  );
-}
-
-/* ───────────────────────────── reconciliation ─────────────────────────────── */
-
-/**
- * Opening + received − issued, against what production actually counted.
- *
- * A null gap means nobody has counted this month, which is NOT the same as
- * everything agreeing — it says so rather than showing a reassuring dash.
- */
-function Reconciliation({ recon }: { recon: Reconciliation | null }) {
-  if (!recon) return null;
-  const hasGaps = recon.discrepancies.length > 0;
-  const counted = recon.rows.some((r) => r.counted !== null);
-
-  return (
-    <section className="card space-y-2 p-3">
-      <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h3 className="font-display text-sm font-bold">📦 PP bag stock check · {recon.month}</h3>
-        <p className="text-[11px] text-stone-400">
-          {counted ? `Counted ${recon.countedOn}` : "Not counted this month"}
-        </p>
-      </div>
-
-      <div className="-mx-1 overflow-x-auto">
-        <table className="w-full min-w-[420px] text-right text-xs">
-          <thead className="text-[10px] uppercase tracking-wide text-stone-500">
-            <tr>
-              <th className="p-1.5 text-left font-bold">Bag</th>
-              <th className="p-1.5 font-bold">Opening</th>
-              <th className="p-1.5 font-bold">Received</th>
-              <th className="p-1.5 font-bold">Issued</th>
-              <th className="p-1.5 font-bold">Expected</th>
-              <th className="p-1.5 font-bold">Counted</th>
-              <th className="p-1.5 font-bold">Gap</th>
-            </tr>
-          </thead>
-          <tbody>
-            {recon.rows.map((r) => (
-              <tr key={r.key} className="border-t border-clay-50">
-                <td className="p-1.5 text-left font-semibold text-stone-800">{r.label}</td>
-                <td className="p-1.5 tabular-nums text-stone-500">{fmt(r.baseBalance, 0)}</td>
-                <td className="p-1.5 tabular-nums text-stone-700">{fmt(r.received, 0)}</td>
-                <td className="p-1.5 tabular-nums text-stone-700">{fmt(r.issued, 0)}</td>
-                <td className="p-1.5 tabular-nums font-semibold text-stone-800">{fmt(r.expected, 0)}</td>
-                <td className="p-1.5 tabular-nums text-stone-800">
-                  {r.counted === null ? <span className="text-stone-300">—</span> : fmt(r.counted, 0)}
-                </td>
-                <td
-                  className={`p-1.5 font-bold tabular-nums ${
-                    r.gap === null ? "text-stone-300" : r.gap === 0 ? "text-green-700" : "text-red-700"
-                  }`}
-                >
-                  {r.gap === null ? "—" : `${r.gap > 0 ? "+" : ""}${fmt(r.gap, 0)}`}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      <p className="text-[11px] leading-snug text-stone-400">
-        {!counted
-          ? "Production has not filed a bag count this month, so there is nothing to check the vouchers against."
-          : hasGaps
-            ? "A gap means bags moved without a voucher, a voucher was filed twice, or the count is off. The counted figure is recorded as reported — nothing here changes it."
-            : "The floor agrees with the vouchers."}{" "}
-        Checked per colour, because the six kinds carry different unit prices and are packed
-        separately — a gap that named only the size could not say what it is worth.
-      </p>
-    </section>
   );
 }
 

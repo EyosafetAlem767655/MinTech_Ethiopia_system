@@ -32,6 +32,9 @@ import SalesAnalyticsPanel from "@/components/panels/SalesAnalyticsPanel";
  * abreast would trade a readable table for a tidy grid, so the wide ones span
  * both columns and only the card-shaped panels pair up.
  */
+/** The voucher panel as finance shows it — see the finance entry in PANELS. */
+const FinanceVouchers = () => <VoucherPanels showStockCheck={false} />;
+
 const FULL_WIDTH = new Set<ComponentType>([
   ProductionPanels,
   WhitenessPanel,
@@ -39,6 +42,7 @@ const FULL_WIDTH = new Set<ComponentType>([
   RawMaterialReceivedPanel,
   DeliveryReportPanel,
   VoucherPanels,
+  FinanceVouchers,
   FinancePanels,
   SalesInvoicesPanel,
   SalesAnalyticsPanel,
@@ -80,8 +84,11 @@ const PANELS: Record<DepartmentKey, ComponentType[]> = {
   // Analytics first: the question the tab answers, then the sheet it is built from.
   sales: [SalesAnalyticsPanel, SalesInvoicesPanel],
   // Finance files the goods receiving voucher, so it reads the same panel —
-  // one record of a purchase, seen from both departments.
-  finance: [FinancePanels, VoucherPanels],
+  // one record of a purchase, seen from both departments. Without the stock
+  // check, which finance shows inside its monthly report: this tab is a set of
+  // sub-tabs, and a check hanging below all of them read as part of whichever
+  // was open.
+  finance: [FinancePanels, FinanceVouchers],
 };
 
 /**

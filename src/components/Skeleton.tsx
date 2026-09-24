@@ -16,11 +16,11 @@ export function CardSkeleton({ className = "h-40" }: { className?: string }) {
 }
 
 /** A row of tiles, as the KPI grids use. */
-export function TileSkeleton({ count = 4 }: { count?: number }) {
+export function TileSkeleton({ count = 4, className = "h-24" }: { count?: number; className?: string }) {
   return (
     <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
       {Array.from({ length: count }).map((_, i) => (
-        <CardSkeleton key={i} className="h-24" />
+        <CardSkeleton key={i} className={className} />
       ))}
     </div>
   );

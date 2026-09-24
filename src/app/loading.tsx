@@ -16,7 +16,8 @@ export default function Loading() {
       </div>
       <div className="relative -mt-12 space-y-5 px-4 pb-6">
         <CardSkeleton className="h-28" />
-        <TileSkeleton count={4} />
+        {/* The four department cards, at the height they really are. */}
+        <TileSkeleton count={4} className="h-44" />
         <CardSkeleton className="h-40" />
       </div>
     </main>

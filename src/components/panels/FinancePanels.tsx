@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import DecideBtn from "@/components/DecideButton";
+import BagStockCheckCard from "@/components/panels/BagStockCheck";
 import {
   ALARM_TONNES,
   STATUS_LABEL,
@@ -450,6 +451,13 @@ function MonthlyTab() {
         </p>
         <p className="font-display text-2xl font-bold text-clay-900">{fmt(data.totals.netWorth)} ETB</p>
       </div>
+
+      {/* The bag stock check belongs to a month, so it belongs here — and only
+          here. It used to arrive from the voucher panel below the whole tab,
+          where it sat under the WHT list or the credit table as if it were part
+          of them. It follows the month selected above. */}
+      <h3 className="px-1 pt-2 text-xs font-bold uppercase tracking-widest text-stone-400">Bag stock check</h3>
+      <BagStockCheckCard month={data.month} />
     </section>
   );
 }

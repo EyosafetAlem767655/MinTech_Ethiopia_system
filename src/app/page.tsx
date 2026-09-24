@@ -177,7 +177,9 @@ export default function OwnerDashboard() {
           {!summaries && !error && (
             <div className="space-y-3 lg:grid lg:grid-cols-2 lg:gap-3 lg:space-y-0 xl:grid-cols-4">
               {[0, 1, 2, 3].map((i) => (
-                <div key={i} className="card h-28 animate-pulse bg-clay-50" />
+                // h-44 is the height of a real summary card, so the grid
+                // does not jump a hundred pixels when the counts land.
+                <div key={i} className="card h-44 animate-pulse bg-clay-50" />
               ))}
             </div>
           )}
@@ -222,16 +224,24 @@ function SummaryCard({ summary }: { summary: DepartmentSummary }) {
       href={`/departments/${summary.department}`}
       className="card block overflow-hidden p-0 text-left transition active:scale-[0.99]"
     >
-      {/* Header strip */}
-      <div className={`${meta.accent} flex items-center justify-between px-4 py-3 text-white`}>
-        <div className="flex items-center gap-2.5">
-          <span className="text-xl">{meta.icon}</span>
-          <div>
-            <p className="font-display text-base font-bold leading-none">{meta.name}</p>
-            <p className="mt-0.5 text-[11px] text-white/80">{meta.blurb}</p>
+      {/* Header strip.
+
+          The count pill is `shrink-0 whitespace-nowrap` and the text beside it
+          is allowed to shrink (`min-w-0` + truncate). Without that, "quiet"
+          fitted but "12 updates" did not: flexbox squeezed the pill, the words
+          wrapped onto two lines inside it, and the pill grew into a lumpy box
+          that pushed the strip taller than its neighbours — so a row of four
+          cards stopped lining up the moment any of them had something to
+          report. */}
+      <div className={`${meta.accent} flex min-h-[3.75rem] items-center justify-between gap-3 px-4 py-3 text-white`}>
+        <div className="flex min-w-0 items-center gap-2.5">
+          <span className="shrink-0 text-xl">{meta.icon}</span>
+          <div className="min-w-0">
+            <p className="truncate font-display text-base font-bold leading-none">{meta.name}</p>
+            <p className="mt-0.5 truncate text-[11px] text-white/80">{meta.blurb}</p>
           </div>
         </div>
-        <span className="rounded-full bg-white/20 px-2.5 py-1 text-[11px] font-bold">
+        <span className="shrink-0 whitespace-nowrap rounded-full bg-white/20 px-2.5 py-1 text-[11px] font-bold tabular-nums">
           {quiet ? "quiet" : `${summary.activityCount} update${summary.activityCount === 1 ? "" : "s"}`}
         </span>
       </div>
@@ -250,8 +260,11 @@ function SummaryCard({ summary }: { summary: DepartmentSummary }) {
 
 function MiniKpi({ kpi }: { kpi: Kpi }) {
   return (
-    <div className="rounded-xl bg-clay-50/70 p-3">
-      <p className="font-display text-lg font-bold tabular-nums text-clay-900">
+    // h-full so the two tiles match even when one label runs to a second line,
+    // and the figure never wraps: "1,234.56 t" broken across two lines reads as
+    // two numbers.
+    <div className="flex h-full flex-col rounded-xl bg-clay-50/70 p-3">
+      <p className="truncate font-display text-lg font-bold tabular-nums text-clay-900">
         <CountUp value={kpi.value} prefix={kpi.prefix ?? ""} suffix={kpi.suffix ?? ""} decimals={kpi.decimals ?? 0} />
       </p>
       <p className="mt-0.5 text-[10px] font-medium leading-tight text-stone-400">{kpi.label}</p>
