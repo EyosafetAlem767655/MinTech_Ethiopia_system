@@ -2,6 +2,8 @@ import sql from "@/lib/sql";
 import { addDays, daysBetween, eatDateLabel, eatDayStart, yesterdayRange } from "@/lib/dates";
 import { reconcileBags } from "@/lib/stock-reconciliation";
 import { alarmingCustomers, creditFigures } from "@/lib/credit";
+import { productLabel } from "@/lib/products";
+import { bandLabel, belowSpec, specFor } from "@/lib/whiteness-spec";
 
 /**
  * All dashboard numbers. Previously 10 MongoDB aggregation pipelines; now SQL.
@@ -581,6 +583,39 @@ export async function detectExceptions(
     // sales_invoices arrives in 0027 and sales_credit_payments in 0029. Neither
     // missing may cost the rest of this list.
     console.warn("detectExceptions: credit exposure unavailable", e);
+  }
+
+  // 2c. A product came off the line below its published whiteness band.
+  //
+  //     The same readings the bot alerts admins and HR about, through the same
+  //     function — one definition of "out of spec", so the Telegram warning and
+  //     the Brief can never disagree. Two days rather than one: a check filed
+  //     late last night is still worth seeing on this morning's list.
+  try {
+    const twoDays = addDays(eatDayStart(now), -2);
+    const checks = await sql<
+      { date_label: string; quarter: number; product_code: string; line: number; readings: Record<string, string> }[]
+    >`
+      select date_label, quarter, product_code, line, readings
+        from whiteness_checks
+       where date >= ${twoDays}
+       order by date desc
+       limit 200
+    `;
+    for (const c of checks) {
+      const breaches = belowSpec(c.product_code, c.readings);
+      if (breaches.length === 0) continue;
+      const spec = specFor(c.product_code);
+      exceptions.push(
+        `${productLabel(c.product_code)} on line ${c.line} read ` +
+          `${breaches.map((b) => `${b.value}%`).join(", ")} ` +
+          `on ${c.date_label} (round ${c.quarter})` +
+          `${spec ? `, below its ${bandLabel(spec)} band` : ""}.`
+      );
+    }
+  } catch (e) {
+    // whiteness_checks arrives in 0022. Its absence may not cost the rest.
+    console.warn("detectExceptions: whiteness spec check unavailable", e);
   }
 
   // 3. The bag stock on the floor disagrees with the vouchers.

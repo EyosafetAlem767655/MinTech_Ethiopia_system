@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { productLabel } from "@/lib/products";
 import RangeSelector from "@/components/RangeSelector";
 import { type RangeKey } from "@/lib/ranges";
+import { bandLabel, belowSpec, readingBelow, specFor } from "@/lib/whiteness-spec";
 
 /**
  * Whiteness quality checks — four a day, per product, per line.
@@ -96,6 +97,10 @@ export default function WhitenessPanel() {
 
     return {
       count: rows.length,
+      /* Checks with at least one reading under the product's band — the same
+         function the bot alarm and the Brief use, so a row shown red here is
+         exactly a row somebody was paged about. */
+      breached: rows.filter((r) => belowSpec(r.productCode, r.readings).length > 0).length,
       brands: [...byBrand.entries()]
         .map(([code, vals]) => ({ code, label: productLabel(code), avg: averageOf(vals), n: vals.length }))
         .sort((a, b) => (b.avg ?? -1) - (a.avg ?? -1)),
@@ -126,6 +131,11 @@ export default function WhitenessPanel() {
         <>
           <p className="px-1 text-[11px] text-stone-400">
             {rows.length} check{rows.length === 1 ? "" : "s"} · {windowLabel.toLowerCase()}
+            {summary && summary.breached > 0 && (
+              <span className="ml-2 rounded-full bg-red-100 px-2 py-0.5 text-[10px] font-bold text-red-800">
+                ⚠️ {summary.breached} below spec
+              </span>
+            )}
           </p>
 
           <div className="card max-h-[26rem] overflow-auto p-0">
@@ -154,8 +164,20 @@ export default function WhitenessPanel() {
                     {WB_SLOTS.map((s) => {
                       const v = r.readings?.[s] ?? "";
                       const numeric = v !== "" && isFinite(Number(v));
+                      /* Three states, three colours: a number inside the band
+                         is plain, a number under it is red, and a word (MNT,
+                         OUTAGE, OFF) stays amber — a stopped line is not a
+                         quality failure and must never be coloured as one. */
+                      const low = readingBelow(r.productCode, v) !== null;
+                      const spec = specFor(r.productCode);
                       return (
-                        <td key={s} className={`p-2 tabular-nums ${numeric ? "text-stone-700" : "text-amber-700"}`}>
+                        <td
+                          key={s}
+                          title={low && spec ? `Below the ${bandLabel(spec)} band for ${productLabel(r.productCode)}` : undefined}
+                          className={`p-2 tabular-nums ${
+                            low ? "font-bold text-red-700" : numeric ? "text-stone-700" : "text-amber-700"
+                          }`}
+                        >
                           {/* A non-numeric reading is shown as the word that was
                               typed — MNT and 0 mean entirely different things. */}
                           {v === "" ? <span className="text-stone-300">—</span> : v}
@@ -174,7 +196,20 @@ export default function WhitenessPanel() {
               <AverageTable
                 title="Average · per brand"
                 subtitle={`${windowLabel} · ${summary.count} checks`}
-                rows={summary.brands.map((b) => ({ key: b.code, label: b.label, avg: b.avg, n: b.n }))}
+                rows={summary.brands.map((b) => {
+                  const spec = specFor(b.code);
+                  return {
+                    key: b.code,
+                    label: b.label,
+                    avg: b.avg,
+                    n: b.n,
+                    // The band the sheet gives, so the average is read against
+                    // something. Products the sheet does not cover say so
+                    // rather than showing a blank that looks like a pass.
+                    band: spec ? bandLabel(spec) : "no band",
+                    low: spec !== null && b.avg !== null && b.avg < spec.alertFloor,
+                  };
+                })}
               />
               <AverageTable
                 title="Average · per line"
@@ -196,7 +231,8 @@ function AverageTable({
 }: {
   title: string;
   subtitle: string;
-  rows: { key: string; label: string; avg: number | null; n: number }[];
+  /** `band` and `low` are the brand table only; the per-line table has neither. */
+  rows: { key: string; label: string; avg: number | null; n: number; band?: string; low?: boolean }[];
 }) {
   return (
     <div className="card p-3">
@@ -210,8 +246,11 @@ function AverageTable({
             {rows.map((r) => (
               <tr key={r.key} className="border-t border-clay-50">
                 <td className="p-1.5 text-left text-stone-700">{r.label}</td>
+                {r.band !== undefined && <td className="p-1.5 text-left text-[10px] text-stone-400">{r.band}</td>}
                 <td className="p-1.5 text-[10px] text-stone-400">{r.n} checks</td>
-                <td className="p-1.5 font-bold tabular-nums text-clay-900">{pct(r.avg)}</td>
+                <td className={`p-1.5 font-bold tabular-nums ${r.low ? "text-red-700" : "text-clay-900"}`}>
+                  {pct(r.avg)}
+                </td>
               </tr>
             ))}
           </tbody>

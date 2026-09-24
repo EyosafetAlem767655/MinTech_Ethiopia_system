@@ -39,6 +39,11 @@ export const EXPECTED_COLUMNS: ExpectedColumn[] = [
   { table: "purchase_requests", column: "unit", migration: "0028_purchase_request_details.sql" },
   { table: "purchase_requests", column: "department", migration: "0028_purchase_request_details.sql" },
   { table: "purchase_requests", column: "notes", migration: "0028_purchase_request_details.sql" },
+
+  // Whiteness alarms (0032). Without it every re-save of a below-spec check
+  // alerts every admin and HR user again, so its absence is loud rather than
+  // quiet — worth naming here alongside the silent ones.
+  { table: "whiteness_checks", column: "alerted_at", migration: "0032_whiteness_alerts.sql" },
 ];
 
 /** Tables the app cannot work without, and the migration that creates each. */

@@ -1,18 +1,29 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import DecideBtn from "@/components/DecideButton";
+import {
+  PURCHASE_DEPARTMENT_ORDER,
+  purchaseDeptKey,
+  purchaseDeptLabel,
+} from "@/lib/purchase-departments";
+import { agoLabel, priorRequests } from "@/lib/purchase-history";
 
 /**
  * Purchase requests filed from the bot — the one panel for them.
  *
+ * Grouped by the department that asked, because that is the question being put
+ * to whoever reads this: not "what has been requested" but "who keeps asking".
  * A compact table, and a pop-up with everything behind one row: the full
  * description, the photograph at a readable size, the AI's verdict on it with
- * its confidence and what it saw, and the decision buttons. There used to be a
- * second panel underneath this one (the original "trust loop" card list) showing
- * the same rows with an ETB amount nobody files any more and an AI verdict in a
- * shape the bot stopped writing — so a request checked by the model showed no
- * check at all there. Two views of one table that disagreed; this is the one.
+ * its confidence and what it saw, every earlier request for the same item, and
+ * the decision buttons.
+ *
+ * There used to be a second panel underneath this one (the original "trust
+ * loop" card list) showing the same rows with an ETB amount nobody files any
+ * more and an AI verdict in a shape the bot stopped writing — so a request
+ * checked by the model showed no check at all there. Two views of one table
+ * that disagreed; this is the one.
  */
 
 /** What the bot's photo check writes (src/lib/llm.ts analyseToolPhoto). */
@@ -63,15 +74,6 @@ const STATUS_TONE: Record<string, string> = {
   rejected: "bg-red-100 text-red-800",
   disregarded: "bg-stone-100 text-stone-600",
   deferred: "bg-purple-100 text-purple-700",
-};
-
-const DEPARTMENT_LABEL: Record<string, string> = {
-  production: "Production",
-  asset_management: "Asset",
-  sales: "Sales",
-  finance: "Finance",
-  hr: "HR",
-  other: "Other",
 };
 
 const OPEN_STATUSES = new Set(["pending", "deferred"]);
@@ -223,6 +225,7 @@ export default function ToolRequestsPanel() {
   const [busy, setBusy] = useState<Record<string, boolean>>({});
   const [error, setError] = useState("");
   const [openId, setOpenId] = useState<string | null>(null);
+  const [dept, setDept] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -270,10 +273,28 @@ export default function ToolRequestsPanel() {
     [load]
   );
 
+  /* One group per department, in the canonical order, with the requests that
+     have never been given one last. Built from the rows already fetched — the
+     table and the grouping cannot disagree about what is in them. */
+  const groups = useMemo(() => {
+    const by = new Map<string, Row[]>();
+    for (const r of rows ?? []) {
+      const k = purchaseDeptKey(r.department);
+      by.set(k, [...(by.get(k) ?? []), r]);
+    }
+    const known = PURCHASE_DEPARTMENT_ORDER.filter((k) => by.has(k));
+    const unknown = [...by.keys()].filter((k) => !PURCHASE_DEPARTMENT_ORDER.includes(k)).sort();
+    return [...known, ...unknown].map((key) => {
+      const list = (by.get(key) ?? []).slice().sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt));
+      return { key, list, open: list.filter((r) => r.status === "pending").length };
+    });
+  }, [rows]);
+
   if (!rows) return <div className="card h-40 animate-pulse bg-clay-50" />;
 
   const open = rows.filter((r) => r.status === "pending").length;
   const selected = openId ? rows.find((r) => r._id === openId) ?? null : null;
+  const shown = dept ? groups.filter((g) => g.key === dept) : groups;
 
   return (
     <section className="space-y-3">
@@ -291,56 +312,119 @@ export default function ToolRequestsPanel() {
       {rows.length === 0 ? (
         <p className="card p-4 text-sm text-stone-400">No purchase requests yet.</p>
       ) : (
-        <div className="card overflow-x-auto p-0">
-          <p className="px-3 pt-2 text-[10px] text-stone-400">Tap a row for the full request, the photo and the AI check.</p>
-          <table className="w-full min-w-[720px] text-right text-xs">
-            <thead className="bg-clay-50/70 text-[10px] uppercase tracking-wide text-stone-500">
-              <tr>
-                <th className="p-2 text-left font-bold">Date</th>
-                <th className="p-2 font-bold">Type</th>
-                <th className="p-2 text-left font-bold">Item</th>
-                <th className="p-2 font-bold">Qty</th>
-                <th className="p-2 text-left font-bold">Dept</th>
-                <th className="p-2 font-bold">AI check</th>
-                <th className="p-2 text-left font-bold">By</th>
-                <th className="p-2 font-bold">Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r) => (
-                <tr
-                  key={r._id}
-                  onClick={() => setOpenId(r._id)}
-                  className="cursor-pointer border-t border-clay-50 transition-colors hover:bg-clay-50/60"
-                >
-                  <td className="p-2 text-left font-semibold text-stone-800">{fmtDate(r.createdAt)}</td>
-                  <td className="p-2">
-                    <KindBadge kind={r.kind} />
-                  </td>
-                  <td className="max-w-[220px] truncate p-2 text-left font-semibold text-stone-700">{r.title}</td>
-                  <td className="p-2 tabular-nums">
-                    {r.quantity ?? ""}
-                    {r.unit && <span className="ml-1 text-[10px] text-stone-400">{r.unit}</span>}
-                  </td>
-                  <td className="p-2 text-left text-stone-500">
-                    {r.department ? DEPARTMENT_LABEL[r.department] || r.department : ""}
-                  </td>
-                  <td className="p-2">
-                    <CheckBadge row={r} />
-                  </td>
-                  <td className="p-2 text-left text-stone-500">{r.requestedBy}</td>
-                  <td className="p-2">
-                    <StatusBadge status={r.status} />
-                  </td>
+        <>
+          {/* Filter, not a re-sort: the groups keep their order so the same
+              department is always in the same place on the page. */}
+          <div className="flex flex-wrap items-center gap-1 px-1">
+            <button
+              onClick={() => setDept(null)}
+              className={`rounded-full px-3 py-1 text-[11px] font-bold transition ${
+                dept === null ? "bg-clay-700 text-white" : "bg-clay-50 text-clay-700"
+              }`}
+            >
+              All · {rows.length}
+            </button>
+            {groups.map((g) => (
+              <button
+                key={g.key}
+                onClick={() => setDept(g.key === dept ? null : g.key)}
+                className={`rounded-full px-3 py-1 text-[11px] font-bold transition ${
+                  dept === g.key ? "bg-clay-700 text-white" : "bg-clay-50 text-clay-700"
+                }`}
+              >
+                {purchaseDeptLabel(g.key === "unassigned" ? null : g.key)} · {g.list.length}
+              </button>
+            ))}
+          </div>
+
+          <div className="card overflow-x-auto p-0">
+            <p className="px-3 pt-2 text-[10px] text-stone-400">
+              Tap a row for the full request, the photo, the AI check and every earlier request for the same item.
+            </p>
+            <table className="w-full min-w-[720px] text-right text-xs">
+              <thead className="bg-clay-50/70 text-[10px] uppercase tracking-wide text-stone-500">
+                <tr>
+                  <th className="p-2 text-left font-bold">Date</th>
+                  <th className="p-2 font-bold">Type</th>
+                  <th className="p-2 text-left font-bold">Item</th>
+                  <th className="p-2 font-bold">Qty</th>
+                  <th className="p-2 font-bold">Asked before</th>
+                  <th className="p-2 font-bold">AI check</th>
+                  <th className="p-2 text-left font-bold">By</th>
+                  <th className="p-2 font-bold">Status</th>
                 </tr>
+              </thead>
+              {shown.map((g) => (
+                <tbody key={g.key}>
+                  {/* The department heading replaces the old Dept column: the
+                      same fact, stated once per block instead of on every row. */}
+                  <tr className="border-t border-clay-100 bg-clay-50/60">
+                    <td colSpan={8} className="px-2 py-1.5 text-left">
+                      <span className="text-[11px] font-bold text-clay-800">
+                        {purchaseDeptLabel(g.key === "unassigned" ? null : g.key)}
+                      </span>
+                      <span className="ml-2 text-[10px] text-stone-500">
+                        {g.list.length} request{g.list.length === 1 ? "" : "s"}
+                        {g.open > 0 ? ` · ${g.open} awaiting decision` : ""}
+                      </span>
+                      {g.key === "unassigned" && (
+                        <span className="ml-2 text-[10px] text-stone-400">
+                          filed before the damaged-item flow asked which department
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                  {g.list.map((r) => {
+                    const before = priorRequests(r, rows).length;
+                    return (
+                      <tr
+                        key={r._id}
+                        onClick={() => setOpenId(r._id)}
+                        className="cursor-pointer border-t border-clay-50 transition-colors hover:bg-clay-50/60"
+                      >
+                        <td className="p-2 text-left font-semibold text-stone-800">{fmtDate(r.createdAt)}</td>
+                        <td className="p-2">
+                          <KindBadge kind={r.kind} />
+                        </td>
+                        <td className="max-w-[220px] truncate p-2 text-left font-semibold text-stone-700">{r.title}</td>
+                        <td className="p-2 tabular-nums">
+                          {r.quantity ?? ""}
+                          {r.unit && <span className="ml-1 text-[10px] text-stone-400">{r.unit}</span>}
+                        </td>
+                        <td className="p-2">
+                          {before > 0 ? (
+                            <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-800">
+                              {before}×
+                            </span>
+                          ) : (
+                            <span className="text-stone-300">—</span>
+                          )}
+                        </td>
+                        <td className="p-2">
+                          <CheckBadge row={r} />
+                        </td>
+                        <td className="p-2 text-left text-stone-500">{r.requestedBy}</td>
+                        <td className="p-2">
+                          <StatusBadge status={r.status} />
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
               ))}
-            </tbody>
-          </table>
-        </div>
+            </table>
+          </div>
+        </>
       )}
 
       {selected && (
-        <RequestModal row={selected} busy={!!busy[selected._id]} onClose={() => setOpenId(null)} onDecide={decide} />
+        <RequestModal
+          row={selected}
+          prior={priorRequests(selected, rows)}
+          busy={!!busy[selected._id]}
+          onClose={() => setOpenId(null)}
+          onDecide={decide}
+        />
       )}
     </section>
   );
@@ -349,11 +433,13 @@ export default function ToolRequestsPanel() {
 /** The whole request in one pop-up: every field, the photo, the verdict, the decision. */
 function RequestModal({
   row,
+  prior,
   busy,
   onClose,
   onDecide,
 }: {
   row: Row;
+  prior: Row[];
   busy: boolean;
   onClose: () => void;
   onDecide: (id: string, action: string) => Promise<void>;
@@ -404,7 +490,7 @@ function RequestModal({
             )
           )}
           {field("Reason", row.justification)}
-          {field("Department", row.department ? DEPARTMENT_LABEL[row.department] || row.department : null)}
+          {field("Department", row.department ? purchaseDeptLabel(row.department) : null)}
           {field("Notes", row.notes)}
           {row.decidedBy && row.decidedAt
             ? field("Decision", `${row.status} by ${row.decidedBy} · ${fmtWhen(row.decidedAt)}`)
@@ -424,6 +510,44 @@ function RequestModal({
 
         <div className="mt-3">
           <CheckDetail row={row} />
+        </div>
+
+        {/* ── Has this been bought before? ──────────────────────────────────
+            Text only, on purpose: it is read while deciding, and a second
+            table of photographs and verdicts here would compete with the
+            request being decided. The empty case says so out loud — a blank
+            space reads as "not checked", which is the opposite of the
+            reassurance it is meant to give. */}
+        <div className="mt-3">
+          <p className="mb-1.5 text-[10px] font-bold uppercase tracking-wide text-stone-400">
+            Previously requested {prior.length > 0 ? `· ${prior.length}` : ""}
+          </p>
+          {prior.length === 0 ? (
+            <p className="rounded-xl bg-stone-50 p-3 text-[11px] text-stone-500">
+              No earlier request for this item in the last 500 requests.
+            </p>
+          ) : (
+            <ul className="divide-y divide-stone-100 rounded-xl bg-stone-50 px-3">
+              {prior.slice(0, 12).map((p) => (
+                <li key={p._id} className="flex flex-wrap items-baseline gap-x-2 py-1.5 text-[11px] text-stone-600">
+                  <span className="font-semibold text-stone-800">{fmtDate(p.createdAt)}</span>
+                  <span className="text-stone-400">({agoLabel(p.createdAt)})</span>
+                  <span className="tabular-nums">
+                    {p.quantity ?? "?"} {p.unit || ""}
+                  </span>
+                  <span className="text-stone-400">·</span>
+                  <span>{purchaseDeptLabel(p.department)}</span>
+                  <span className="text-stone-400">·</span>
+                  <span className="font-semibold">{p.status}</span>
+                  <span className="text-stone-400">·</span>
+                  <span className="truncate">{p.requestedBy}</span>
+                </li>
+              ))}
+              {prior.length > 12 && (
+                <li className="py-1.5 text-[10px] text-stone-400">…and {prior.length - 12} older.</li>
+              )}
+            </ul>
+          )}
         </div>
 
         {OPEN_STATUSES.has(row.status) && (

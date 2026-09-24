@@ -46,6 +46,7 @@ import {
   priceListTemplate,
 } from "@/lib/finance-paste";
 import { monthLabel, nextMonth, priceListItems } from "@/lib/finance-report";
+import { PURCHASE_DEPARTMENTS } from "@/lib/purchase-departments";
 import type { ToolPhotoCheck, VoucherRead } from "@/lib/llm";
 // Names and the kind union live in a client-safe module — see flow-titles.ts.
 import { FLOW_TITLE, type AssetFlowKind } from "@/lib/flow-titles";
@@ -188,15 +189,12 @@ export const PURCHASE_UNITS = [
   { label: "📦 pack", value: "pack" },
 ];
 
-/** Who is asking: the four departments, or somewhere else. */
-export const PURCHASE_DEPARTMENTS = [
-  { label: "🏭 ምርት (Production)", value: "production" },
-  { label: "📦 የንብረት አስተዳደር (Asset)", value: "asset_management" },
-  { label: "🤝 ሽያጭ (Sales)", value: "sales" },
-  { label: "💵 ፋይናንስ (Finance)", value: "finance" },
-  { label: "👥 የሰው ኃይል (HR)", value: "hr" },
-  { label: "➖ ሌላ (Other)", value: "other" },
-];
+/**
+ * Who is asking. The list itself lives in purchase-departments.ts so the
+ * dashboard can read the same one — importing this module in the browser pulls
+ * the Postgres client in with it.
+ */
+export { PURCHASE_DEPARTMENTS };
 
 /**
  * A purchase request, one of two shapes chosen up front.
@@ -248,16 +246,19 @@ const TOOL_REQUEST_STEPS: AssetStep[] = [
   { id: "quantity", label: "Qty", prompt: "🔢 ብዛቱን ይፃፉ።", type: "number", when: isNewItem },
   { id: "unit", label: "Unit", prompt: "📏 መለኪያው ምንድን ነው?", type: "choice", choices: PURCHASE_UNITS, when: isNewItem },
   { id: "reason", label: "Reason", prompt: "❓ የግዢው ምክንያት ምንድን ነው?", type: "text", when: isNewItem },
+
+  /* ── Both ─────────────────────────────────────────────────────────────────
+     The department is asked of BOTH kinds. It used to be a new-tool question
+     only, which left every damaged-item request filed with no department at
+     all — so the dashboard could not say which part of the plant is wearing
+     out its tools, which is the whole point of asking. */
   {
     id: "department",
     label: "Department",
     prompt: "🏷 የትኛው ክፍል ነው የሚጠይቀው?",
     type: "choice",
     choices: PURCHASE_DEPARTMENTS,
-    when: isNewItem,
   },
-
-  /* ── Both ─────────────────────────────────────────────────────────────── */
   { id: "notes", label: "Notes", prompt: "🗒 ተጨማሪ ማስታወሻ ካለ ይፃፉ።", type: "text", skippable: true },
 ];
 
@@ -1662,6 +1663,7 @@ export function assetPreview(state: AssetFlowState): string {
       `❓ ዓይነት: 🛠 የተበላሸ ዕቃ\n` +
       `🔧 ዕቃ: <b>${esc(d.title)}</b>\n` +
       `🔢 ብዛት: ${qty(Number(d.quantity) || 0)}\n` +
+      `🏷 ክፍል: ${esc(deptLabel)}\n` +
       (state.photoFileId ? "📷 ፎቶ: ተያይዟል\n" : "📷 ፎቶ: የለም\n");
     const c = state.check;
     if (c) {

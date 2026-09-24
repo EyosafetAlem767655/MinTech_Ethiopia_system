@@ -19,3 +19,12 @@ create index if not exists web_sessions_active_idx on web_sessions (revoked_at);
 
 alter table web_sessions enable row level security;
 alter table web_sessions force row level security;
+
+-- ...and the one grant this app's Data API use depends on.
+--
+-- From 30 October 2025 Supabase no longer grants new tables to the Data API
+-- automatically, so a table created by this migration on a new project, a
+-- preview branch or a local `supabase db reset` would be unreachable over
+-- /rest/v1 — which is exactly how the Edge middleware validates a login cookie.
+-- RLS above still denies anon and authenticated; only the service key gets in.
+grant select, insert, update, delete on public.web_sessions to service_role;

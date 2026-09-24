@@ -9,6 +9,10 @@ export async function GET() {
   // columns in 0028. Three shapes, newest first: a deployment running ahead of
   // its migrations loses the newest columns rather than 500-ing. Each fallback
   // costs a detail — a thumbnail, a description — never the request.
+  //
+  // 500 rather than 200 because the panel now answers "have we bought this
+  // before?" from these rows. A window that stops short of the last purchase of
+  // a part would answer that question with a confident no.
   const shapes = [
     () => sql<Record<string, unknown>[]>`
       select id as _id, title, quantity, kind, justification, amount,
@@ -18,7 +22,7 @@ export async function GET() {
              requested_by as "requestedBy", created_at as "createdAt"
         from purchase_requests
        order by created_at desc
-       limit 200
+       limit 500
     `,
     () => sql<Record<string, unknown>[]>`
       select id as _id, title, quantity, kind, justification, amount,
@@ -27,7 +31,7 @@ export async function GET() {
              requested_by as "requestedBy", created_at as "createdAt"
         from purchase_requests
        order by created_at desc
-       limit 200
+       limit 500
     `,
     () => sql<Record<string, unknown>[]>`
       select id as _id, title, justification, amount,
@@ -36,7 +40,7 @@ export async function GET() {
              requested_by as "requestedBy", created_at as "createdAt"
         from purchase_requests
        order by created_at desc
-       limit 200
+       limit 500
     `,
   ];
 

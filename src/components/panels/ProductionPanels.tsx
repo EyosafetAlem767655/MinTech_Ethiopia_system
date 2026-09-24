@@ -1,38 +1,23 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  Line,
-  LineChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
+import { Bar, BarChart, CartesianGrid, Tooltip, XAxis, YAxis } from "recharts";
 import RangeSelector from "@/components/RangeSelector";
+import { AXIS, Chart, ScrollTable, TOOLTIP } from "@/components/panels/TableChart";
 import { RANGES, rangeWindow, type Bucket, type RangeKey } from "@/lib/ranges";
-import {
-  BAG_KINDS,
-  PRODUCTION_PRODUCTS,
-  bagLabel,
-  orderProducts,
-  productLabel,
-  type BagSize,
-} from "@/lib/products";
+import { PRODUCTION_PRODUCTS, orderProducts, productLabel } from "@/lib/products";
 
 /**
- * The whole Production tab: what was produced, what is on hand, and a chart of
- * each — nothing else.
+ * What the plant produced, and nothing else.
  *
- * One range control drives all four. Two independent filters would let the
- * production chart and the stock table show different periods side by side,
- * which is the sort of thing nobody notices until a number is quoted from the
- * wrong window.
+ * This panel used to carry the stock levels and the empty-bag counts as well.
+ * Neither is a production figure: both are inventory, counted by the asset side
+ * and reconciled against the goods vouchers, so they moved to Asset Management
+ * (StockOnHandPanel) where the rest of that argument lives. Production is left
+ * with the one question it owns — how much came off the lines — and the
+ * whiteness of it, in the panel below.
  *
- * Both tables scroll inside a bounded box with a sticky header rather than
+ * The table scrolls inside a bounded box with a sticky header rather than
  * running the length of the page. A year of daily rows is a legitimate thing to
  * ask for; a year-long page is not.
  */
@@ -45,43 +30,15 @@ interface ProductionRow {
   products: Record<string, number>;
 }
 
-interface OpsRow {
-  _id: string;
-  dateLabel: string;
-  date: string;
-  reportedBy: string;
-  stock?: Record<string, number>;
-  bags?: Partial<Record<BagSize, Record<string, number>>>;
-}
-
-/* Validated as a pair against the light chart surface: lightness band, chroma
-   floor, CVD separation (worst adjacent ΔE 24.7 protan) and 3:1 contrast all
-   pass. Each chart carries a single series, so its title names it and no legend
-   is needed. */
+/* Validated against the light chart surface: lightness band, chroma floor, CVD
+   separation and 3:1 contrast all pass. The chart carries a single series, so
+   its title names it and no legend is needed. */
 const PRODUCTION_INK = "#c64d30";
-const STOCK_INK = "#2a78d6";
 
 const fmtDate = (d: string) => new Date(d).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
 const num = (n?: number) => (n ? (Math.round(n * 100) / 100).toLocaleString() : "");
 const tons = (n: number) => `${(Math.round(n * 100) / 100).toLocaleString()} t`;
 const sum = (m?: Record<string, number>) => Object.values(m || {}).reduce((a, b) => a + Number(b || 0), 0);
-
-/** Calendar day of a timestamp, used to line a report up with its ops row. */
-const dayKey = (iso: string) => new Date(iso).toISOString().slice(0, 10);
-
-/**
- * The same day, from the ops row's own "D/M/YYYY" label.
- *
- * Both tables are written from one chosen date at UTC midnight, so the timestamps
- * already agree — but the label is the ops row's primary key and cannot drift,
- * so it is indexed as well. Two keys for one row costs nothing and means a row
- * whose timestamp was built some other way still finds its production report.
- */
-function labelDayKey(label?: string): string | null {
-  const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(label || "");
-  if (!m) return null;
-  return `${m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`;
-}
 
 /** Bucket key for a date, at the granularity the chosen range declares. */
 function bucketKey(iso: string, bucket: Bucket): string {
@@ -103,23 +60,18 @@ const bucketLabel = (key: string, bucket: Bucket) =>
 export default function ProductionPanels() {
   const [range, setRange] = useState<RangeKey>("daily");
   const [production, setProduction] = useState<ProductionRow[] | null>(null);
-  const [ops, setOps] = useState<OpsRow[] | null>(null);
 
   useEffect(() => {
     fetch("/api/production-reports")
       .then((r) => (r.ok ? r.json() : []))
       .then((d) => setProduction(Array.isArray(d) ? d : []))
       .catch(() => setProduction([]));
-    fetch("/api/ops-reports")
-      .then((r) => (r.ok ? r.json() : { reports: [] }))
-      .then((d) => setOps(Array.isArray(d?.reports) ? d.reports : []))
-      .catch(() => setOps([]));
   }, []);
 
   const { bucket } = RANGES[range];
   const win = useMemo(() => rangeWindow(range), [range]);
 
-  // Filtered client-side: both endpoints already return the full year, so
+  // Filtered client-side: the endpoint already returns the full year, so
   // changing the range is instant and costs no round trip.
   const prodRows = useMemo(() => {
     const from = win.start.getTime();
@@ -129,22 +81,6 @@ export default function ProductionPanels() {
       return t >= from && t < to;
     });
   }, [production, win]);
-
-  const stockRows = useMemo(() => {
-    const from = win.start.getTime();
-    const to = win.end.getTime();
-    return (ops ?? [])
-      .filter((r) => {
-        // Stock only. A row carrying nothing but a bag count is not a stock
-        // count, and letting one in would both print a blank line and — as the
-        // latest row of its bucket — pull the closing level down to zero.
-        if (!r.stock || Object.keys(r.stock).length === 0) return false;
-        const t = new Date(r.date).getTime();
-        return t >= from && t < to;
-      })
-      .slice()
-      .sort((a, b) => +new Date(b.date) - +new Date(a.date));
-  }, [ops, win]);
 
   /* Production is a FLOW: bucketed tonnage genuinely adds up. */
   const prodSeries = useMemo(() => {
@@ -158,61 +94,19 @@ export default function ProductionPanels() {
       .map(([k, t]) => ({ label: bucketLabel(k, bucket), tons: Math.round(t * 100) / 100 }));
   }, [prodRows, bucket]);
 
-  /* Stock is a LEVEL: the closing count for the bucket, never a sum. Adding
-     thirty daily snapshots together produces a number that means nothing. */
-  const stockSeries = useMemo(() => {
-    const acc = new Map<string, { at: number; tons: number }>();
-    for (const r of stockRows) {
-      const k = bucketKey(r.date, bucket);
-      const at = new Date(r.date).getTime();
-      const prev = acc.get(k);
-      if (!prev || at > prev.at) acc.set(k, { at, tons: sum(r.stock) });
-    }
-    return [...acc.entries()]
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([k, v]) => ({ label: bucketLabel(k, bucket), tons: Math.round(v.tons * 100) / 100 }));
-  }, [stockRows, bucket]);
-
   const prodCols = orderProducts(
     Array.from(new Set([...PRODUCTION_PRODUCTS, ...prodRows.flatMap((r) => Object.keys(r.products || {}))]))
   );
-  const stockCols = orderProducts(
-    Array.from(new Set([...PRODUCTION_PRODUCTS, ...stockRows.flatMap((r) => Object.keys(r.stock || {}))]))
-  );
-
-  /* The day's remaining empty bags, keyed by calendar day.
-
-     The counts are collected by the production flow but stored on the day's ops
-     row, which is where the pasted operations report has always written them.
-     They are joined back on here rather than copied onto production_reports:
-     one number per day per colour, with a single writer, cannot drift out of
-     agreement with itself. Two reports filed on the same day therefore show the
-     same closing count, which is correct — it is a level, not a per-report
-     figure. */
-  const bagsByDay = useMemo(() => {
-    const map = new Map<string, { at: number; bags: OpsRow["bags"] }>();
-    for (const r of ops ?? []) {
-      if (!r.bags) continue;
-      const at = new Date(r.date).getTime();
-      for (const day of [dayKey(r.date), labelDayKey(r.dateLabel)]) {
-        if (!day) continue;
-        const prev = map.get(day);
-        // Latest count for the day wins: a re-count supersedes the earlier one.
-        if (!prev || at > prev.at) map.set(day, { at, bags: r.bags });
-      }
-    }
-    return map;
-  }, [ops]);
 
   const colTotal = (c: string) => prodRows.reduce((a, r) => a + (r.products?.[c] || 0), 0);
   const grand = prodRows.reduce((a, r) => a + sum(r.products), 0);
 
-  if (production === null || ops === null) {
+  if (production === null) {
     return <div className="card h-64 animate-pulse bg-clay-50" />;
   }
 
   return (
-    <div className="space-y-8">
+    <section className="space-y-3">
       <div className="sticky top-0 z-20 -mx-4 bg-white/95 px-4 py-2 backdrop-blur sm:mx-0 sm:px-1">
         <RangeSelector value={range} onChange={setRange} />
         <p className="mt-1 px-1 text-[11px] text-stone-400">
@@ -220,227 +114,77 @@ export default function ProductionPanels() {
         </p>
       </div>
 
-      {/* ─────────────────────────── 1. Production ─────────────────────────── */}
-      <section className="space-y-3">
-        <div className="flex flex-wrap items-baseline justify-between gap-2 px-1">
-          <h2 className="font-display text-lg font-bold">🏭 Production</h2>
-          <p className="text-[11px] font-bold text-stone-500">
-            {tons(grand)} over {prodRows.length} report{prodRows.length === 1 ? "" : "s"}
-          </p>
-        </div>
+      <div className="flex flex-wrap items-baseline justify-between gap-2 px-1">
+        <h2 className="font-display text-lg font-bold">🏭 Production</h2>
+        <p className="text-[11px] font-bold text-stone-500">
+          {tons(grand)} over {prodRows.length} report{prodRows.length === 1 ? "" : "s"}
+        </p>
+      </div>
 
-        <Chart empty={prodSeries.length === 0} emptyLabel="No production in this period.">
-          <BarChart data={prodSeries} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#f3e3dd" vertical={false} />
-            <XAxis dataKey="label" {...AXIS} minTickGap={16} />
-            <YAxis {...AXIS} width={40} tickFormatter={(v: number) => String(Math.round(v))} />
-            <Tooltip
-              cursor={{ fill: "#f3e3dd", opacity: 0.5 }}
-              contentStyle={TOOLTIP}
-              formatter={(v: number) => [tons(Number(v)), "Produced"]}
-            />
-            <Bar dataKey="tons" fill={PRODUCTION_INK} radius={[4, 4, 0, 0]} maxBarSize={38} />
-          </BarChart>
-        </Chart>
+      <Chart empty={prodSeries.length === 0} emptyLabel="No production in this period.">
+        <BarChart data={prodSeries} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#f3e3dd" vertical={false} />
+          <XAxis dataKey="label" {...AXIS} minTickGap={16} />
+          <YAxis {...AXIS} width={40} tickFormatter={(v: number) => String(Math.round(v))} />
+          <Tooltip
+            cursor={{ fill: "#f3e3dd", opacity: 0.5 }}
+            contentStyle={TOOLTIP}
+            formatter={(v: number) => [tons(Number(v)), "Produced"]}
+          />
+          <Bar dataKey="tons" fill={PRODUCTION_INK} radius={[4, 4, 0, 0]} maxBarSize={38} />
+        </BarChart>
+      </Chart>
 
-        <ScrollTable minWidth={900} empty={prodRows.length === 0} emptyLabel="No production reports in this period.">
-          <thead className="sticky top-0 z-10 bg-clay-50 text-[10px] uppercase tracking-wide text-stone-500 shadow-[0_1px_0_#f3e3dd]">
-            <tr>
-              <th className="p-2 text-left font-bold" rowSpan={2}>
-                Date
+      <ScrollTable minWidth={720} empty={prodRows.length === 0} emptyLabel="No production reports in this period.">
+        <thead className="sticky top-0 z-10 bg-clay-50 text-[10px] uppercase tracking-wide text-stone-500 shadow-[0_1px_0_#f3e3dd]">
+          <tr>
+            <th className="p-2 text-left font-bold" rowSpan={2}>
+              Date
+            </th>
+            <th className="p-2 text-left font-bold" rowSpan={2}>
+              FGR No
+            </th>
+            <th className="p-2 font-bold" colSpan={prodCols.length + 1}>
+              Produced (tonnes)
+            </th>
+          </tr>
+          <tr>
+            {prodCols.map((c) => (
+              <th key={c} className="p-2 font-bold">
+                {productLabel(c)}
               </th>
-              <th className="p-2 text-left font-bold" rowSpan={2}>
-                FGR No
-              </th>
-              <th className="p-2 font-bold" colSpan={prodCols.length + 1}>
-                Produced (tonnes)
-              </th>
-              <th className="border-l border-clay-100 p-2 font-bold" colSpan={BAG_KINDS.length}>
-                Remaining bags (pieces)
-              </th>
-            </tr>
-            <tr>
+            ))}
+            <th className="p-2 font-bold">Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          {prodRows.map((r) => (
+            <tr key={r._id} className="border-t border-clay-50">
+              <td className="p-2 text-left font-semibold text-stone-800">{fmtDate(r.date)}</td>
+              <td className="p-2 text-left text-stone-500">{r.fgrNo || "—"}</td>
               {prodCols.map((c) => (
-                <th key={c} className="p-2 font-bold">
-                  {productLabel(c)}
-                </th>
-              ))}
-              <th className="p-2 font-bold">Total</th>
-              {BAG_KINDS.map(({ size, colour }) => (
-                <th key={`${size}-${colour}`} className="border-l border-clay-100 p-2 font-bold">
-                  {bagLabel(size, colour)}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {prodRows.map((r) => {
-              const bags = bagsByDay.get(dayKey(r.date))?.bags;
-              return (
-                <tr key={r._id} className="border-t border-clay-50">
-                  <td className="p-2 text-left font-semibold text-stone-800">{fmtDate(r.date)}</td>
-                  <td className="p-2 text-left text-stone-500">{r.fgrNo || "—"}</td>
-                  {prodCols.map((c) => (
-                    <td key={c} className="p-2 tabular-nums text-stone-700">
-                      {num(r.products?.[c])}
-                    </td>
-                  ))}
-                  <td className="p-2 font-bold tabular-nums text-clay-900">{num(sum(r.products))}</td>
-                  {BAG_KINDS.map(({ size, colour }) => (
-                    <td
-                      key={`${size}-${colour}`}
-                      className="border-l border-clay-50 p-2 tabular-nums text-stone-700"
-                    >
-                      {num(bags?.[size]?.[colour])}
-                    </td>
-                  ))}
-                </tr>
-              );
-            })}
-          </tbody>
-          {/* Tonnage foots; the bag columns deliberately do not. Each is the
-              count left at the close of that day, so adding a month of them
-              down the page would produce a number that means nothing. */}
-          <tfoot className="sticky bottom-0 bg-clay-50 shadow-[0_-1px_0_#f3e3dd]">
-            <tr className="font-bold">
-              <td className="p-2 text-left" colSpan={2}>
-                Total
-              </td>
-              {prodCols.map((c) => (
-                <td key={c} className="p-2 tabular-nums">
-                  {num(colTotal(c))}
+                <td key={c} className="p-2 tabular-nums text-stone-700">
+                  {num(r.products?.[c])}
                 </td>
               ))}
-              <td className="p-2 tabular-nums text-clay-900">{num(grand)}</td>
-              <td colSpan={BAG_KINDS.length} className="border-l border-clay-100 p-2 text-[10px] font-normal text-stone-400">
-                closing count
+              <td className="p-2 font-bold tabular-nums text-clay-900">{num(sum(r.products))}</td>
+            </tr>
+          ))}
+        </tbody>
+        <tfoot className="sticky bottom-0 bg-clay-50 shadow-[0_-1px_0_#f3e3dd]">
+          <tr className="font-bold">
+            <td className="p-2 text-left" colSpan={2}>
+              Total
+            </td>
+            {prodCols.map((c) => (
+              <td key={c} className="p-2 tabular-nums">
+                {num(colTotal(c))}
               </td>
-            </tr>
-          </tfoot>
-        </ScrollTable>
-      </section>
-
-      {/* ────────────────────────────── 2. Stock ───────────────────────────── */}
-      <section className="space-y-3">
-        <div className="flex flex-wrap items-baseline justify-between gap-2 px-1">
-          <h2 className="font-display text-lg font-bold">📦 Stock on hand</h2>
-          <p className="text-[11px] text-stone-400">Closing count · tonnes, bags in pieces</p>
-        </div>
-
-        <Chart empty={stockSeries.length === 0} emptyLabel="No stock counts in this period.">
-          <LineChart data={stockSeries} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#f3e3dd" vertical={false} />
-            <XAxis dataKey="label" {...AXIS} minTickGap={16} />
-            <YAxis {...AXIS} width={40} tickFormatter={(v: number) => String(Math.round(v))} />
-            <Tooltip
-              cursor={{ stroke: "#d6c3bd", strokeWidth: 1 }}
-              contentStyle={TOOLTIP}
-              formatter={(v: number) => [tons(Number(v)), "Finished stock"]}
-            />
-            <Line
-              type="monotone"
-              dataKey="tons"
-              stroke={STOCK_INK}
-              strokeWidth={2}
-              dot={{ r: 3, fill: STOCK_INK, stroke: "#ffffff", strokeWidth: 2 }}
-              activeDot={{ r: 5, fill: STOCK_INK, stroke: "#ffffff", strokeWidth: 2 }}
-            />
-          </LineChart>
-        </Chart>
-        <p className="px-1 text-[11px] leading-snug text-stone-400">
-          Total finished product on hand, in tonnes. The remaining empty-bag counts are pieces rather than
-          tonnes, so they sit with the daily production report above instead of sharing this axis.
-        </p>
-
-        {/* No column totals here: each row is a closing snapshot, so summing
-            them down the page would produce a number that means nothing. */}
-        <ScrollTable minWidth={700} empty={stockRows.length === 0} emptyLabel="No stock counts in this period.">
-          <thead className="sticky top-0 z-10 bg-clay-50 text-[10px] uppercase tracking-wide text-stone-500 shadow-[0_1px_0_#f3e3dd]">
-            <tr>
-              <th className="p-2 text-left font-bold">Date</th>
-              {stockCols.map((c) => (
-                <th key={c} className="p-2 font-bold">
-                  {productLabel(c)}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {stockRows.map((r) => (
-              <tr key={r._id} className="border-t border-clay-50">
-                <td className="p-2 text-left font-semibold text-stone-800">{fmtDate(r.date)}</td>
-                {stockCols.map((c) => (
-                  <td key={c} className="p-2 tabular-nums text-stone-700">
-                    {num(r.stock?.[c])}
-                  </td>
-                ))}
-              </tr>
             ))}
-          </tbody>
-        </ScrollTable>
-      </section>
-    </div>
-  );
-}
-
-/* ────────────────────────────── shared pieces ─────────────────────────────── */
-
-const AXIS = {
-  tick: { fontSize: 10, fill: "#a8a29e" },
-  tickLine: false,
-  axisLine: false,
-} as const;
-
-const TOOLTIP = {
-  borderRadius: 12,
-  border: "1px solid #f3e3dd",
-  fontSize: 12,
-  boxShadow: "0 8px 24px rgba(62,22,13,0.12)",
-} as const;
-
-function Chart({
-  empty,
-  emptyLabel,
-  children,
-}: {
-  empty: boolean;
-  emptyLabel: string;
-  children: React.ReactElement;
-}) {
-  if (empty) return <p className="card p-6 text-center text-sm text-stone-400">{emptyLabel}</p>;
-  return (
-    <div className="card p-3">
-      <div className="-ml-2 h-52">
-        <ResponsiveContainer width="100%" height="100%">
-          {children}
-        </ResponsiveContainer>
-      </div>
-    </div>
-  );
-}
-
-/**
- * A table that scrolls in both directions inside a bounded box, so a long period
- * never stretches the page. The header and the totals row stay put while the
- * rows move between them.
- */
-function ScrollTable({
-  minWidth,
-  empty,
-  emptyLabel,
-  children,
-}: {
-  minWidth: number;
-  empty: boolean;
-  emptyLabel: string;
-  children: React.ReactNode;
-}) {
-  if (empty) return <p className="card p-4 text-sm text-stone-400">{emptyLabel}</p>;
-  return (
-    <div className="card max-h-[26rem] overflow-auto p-0">
-      <table className="w-full text-right text-xs" style={{ minWidth }}>
-        {children}
-      </table>
-    </div>
+            <td className="p-2 tabular-nums text-clay-900">{num(grand)}</td>
+          </tr>
+        </tfoot>
+      </ScrollTable>
+    </section>
   );
 }

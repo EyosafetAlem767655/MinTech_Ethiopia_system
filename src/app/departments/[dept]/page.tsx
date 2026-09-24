@@ -9,6 +9,7 @@ import BagControlPanel from "@/components/panels/BagControlPanel";
 import RawMaterialReceivedPanel from "@/components/panels/RawMaterialReceivedPanel";
 import DeliveryReportPanel from "@/components/panels/DeliveryReportPanel";
 import ProductionPanels from "@/components/panels/ProductionPanels";
+import StockOnHandPanel from "@/components/panels/StockOnHandPanel";
 import WhitenessPanel from "@/components/panels/WhitenessPanel";
 import FinancePanels from "@/components/panels/FinancePanels";
 import VoucherPanels from "@/components/panels/VoucherPanels";
@@ -34,6 +35,7 @@ import SalesAnalyticsPanel from "@/components/panels/SalesAnalyticsPanel";
 const FULL_WIDTH = new Set<ComponentType>([
   ProductionPanels,
   WhitenessPanel,
+  StockOnHandPanel,
   RawMaterialReceivedPanel,
   DeliveryReportPanel,
   VoucherPanels,
@@ -44,10 +46,10 @@ const FULL_WIDTH = new Set<ComponentType>([
 ]);
 
 const PANELS: Record<DepartmentKey, ComponentType[]> = {
-  // One component, because a single range control has to drive all four views.
-  // Shift analysis and stone traceability were removed from the system; the
-  // monthly stock-status sheet went earlier. Historic rows for all three remain
-  // readable and deletable under Settings → Submissions.
+  // Two questions, and only two: how much came off the lines, and how white it
+  // was. Stock levels and the empty-bag counts used to sit here too; they are
+  // inventory rather than output and now live on the asset tab, beside the
+  // vouchers that predict them.
   production: [ProductionPanels, WhitenessPanel],
   // The three reports the asset manager files come first, then the wider bag /
   // purchase context. Stock status and purchased items are gone: the asset role
@@ -59,6 +61,11 @@ const PANELS: Record<DepartmentKey, ComponentType[]> = {
     // because the stock check is the question the rest of the tab answers
     // pieces of.
     VoucherPanels,
+    // ...and immediately after it, the count itself. The reconciliation above
+    // works out what should be on the floor from the opening balance and the
+    // vouchers; this is what was actually counted there, so the two are read
+    // one after the other or not at all.
+    StockOnHandPanel,
     // Consumption sits directly under the vouchers on purpose: goods issued and
     // bags actually used are the two halves of the same question, and the whole
     // reason both exist is to be read against each other.

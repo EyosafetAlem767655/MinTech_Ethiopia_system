@@ -364,15 +364,32 @@ export async function getDepartmentSummary(
   };
 }
 
-/** Cheap COUNT-only activity tallies for a department's Brief summary. */
+/**
+ * Cheap COUNT-only activity tallies for a department's Brief summary.
+ *
+ * ONE RULE GOVERNS THIS FUNCTION: every figure it produces must be findable on
+ * that department's tab. A card is a door, and a number on it that the room
+ * behind does not contain sends somebody looking for something that is not
+ * there.
+ *
+ * Three of the four cards broke that rule. Production showed "Daily reports" —
+ * a count that is structurally almost always zero (the production position does
+ * not hold the free-text daily-report capability at all) and that no production
+ * panel renders. Asset showed "Material counts", a table nothing has written
+ * since that capability was retired; the detail KPIs were fixed for exactly
+ * this reason months ago and these were missed. Sales showed "Receipts", which
+ * left the sales tab when it was rebuilt around invoices.
+ *
+ * The windows also match the panels now: every count filters on the report's
+ * own `date` where it has one, because that is what the tables on the tab
+ * filter on. Counting arrivals here while the tab counts report dates would put
+ * a "3 updates" pill above a table showing two rows.
+ */
 async function departmentActivityCounts(
   dept: DepartmentKey,
   start: Date,
   end: Date
 ): Promise<{ total: number; headline: Kpi[] }> {
-  const positions = DEPARTMENTS[dept].positions;
-  const n = (rows: { n: string }[]) => Number(rows[0]?.n) || 0;
-
   // Every count below tolerates a table that is not there yet. These four run
   // in parallel behind one Brief, so a single missing relation — the sales
   // table between a deploy and its migration, say — would otherwise 500 the
@@ -383,81 +400,112 @@ async function departmentActivityCounts(
     console.warn(`departmentActivityCounts(${dept}): a table is not migrated yet; counting 0`);
   };
 
-  const reports = n(
-    await sql<{ n: string }[]>`
-      select count(*) as n from daily_reports
-       where created_at >= ${start} and created_at < ${end}
-         and positions && ${positions}::text[]`.catch((e) => {
-      missing(e);
-      return [];
-    })
-  );
-
   switch (dept) {
     case "production": {
-      const [a] = await sql<{ production: string }[]>`
-        select count(*) as production from production_reports
-         where date >= ${start} and date < ${end}`.catch((e) => {
-        missing(e);
-        return [{ production: "0" }];
-      });
+      // The tab is exactly two panels, so the card is exactly two numbers.
+      const [a] = await sql<{ production: string; whiteness: string }[]>`
+        select
+          (select count(*) from production_reports where date >= ${start} and date < ${end}) as production,
+          (select count(*) from whiteness_checks   where date >= ${start} and date < ${end}) as whiteness`.catch(
+        (e) => {
+          missing(e);
+          return [{ production: "0", whiteness: "0" }];
+        }
+      );
       const production = Number(a.production) || 0;
+      const whiteness = Number(a.whiteness) || 0;
       return {
-        total: reports + production,
+        total: production + whiteness,
         headline: [
           { icon: "🏭", label: "Production reports", value: production },
-          { icon: "📝", label: "Daily reports", value: reports },
+          { icon: "⚪", label: "Whiteness checks", value: whiteness },
         ],
       };
     }
     case "asset_management": {
-      const [a] = await sql<{ materials: string; purchases: string; damage: string }[]>`
-        select
-          (select count(*) from material_counts   where created_at >= ${start} and created_at < ${end}) as materials,
-          (select count(*) from purchase_requests where created_at >= ${start} and created_at < ${end}) as purchases,
-          (select count(*) from damage_claims     where created_at >= ${start} and created_at < ${end}) as damage`.catch((e) => {
-        missing(e);
-        return [{ materials: "0", purchases: "0", damage: "0" }];
-      });
-      const materials = Number(a.materials) || 0;
+      // Split in two on purpose: the second group of tables arrives in 0014,
+      // 0019 and 0022, and a database one migration behind must still show the
+      // raw material and delivery counts rather than an empty card.
+      const [[a], [b]] = await Promise.all([
+        sql<{ raw: string; deliveries: string; purchases: string; claims: string }[]>`
+          select
+            (select count(*) from raw_material_receipts where date >= ${start} and date < ${end})               as raw,
+            (select count(*) from delivery_reports      where date >= ${start} and date < ${end})               as deliveries,
+            (select count(*) from purchase_requests     where created_at >= ${start} and created_at < ${end})   as purchases,
+            (select count(*) from damage_claims         where created_at >= ${start} and created_at < ${end})   as claims`.catch(
+          (e) => {
+            missing(e);
+            return [{ raw: "0", deliveries: "0", purchases: "0", claims: "0" }];
+          }
+        ),
+        sql<{ grv: string; siv: string; usage: string; damage: string; stock: string }[]>`
+          select
+            (select count(*) from goods_receiving_vouchers where date >= ${start} and date < ${end}) as grv,
+            (select count(*) from store_issue_vouchers     where date >= ${start} and date < ${end}) as siv,
+            (select count(*) from pp_bag_usage             where date >= ${start} and date < ${end}) as usage,
+            (select count(*) from pp_bag_damage_reports    where date >= ${start} and date < ${end}) as damage,
+            (select count(*) from daily_ops_reports        where date >= ${start} and date < ${end}) as stock`.catch(
+          () => [{ grv: "0", siv: "0", usage: "0", damage: "0", stock: "0" }]
+        ),
+      ]);
+      const raw = Number(a.raw) || 0;
       const purchases = Number(a.purchases) || 0;
-      const damage = Number(a.damage) || 0;
+      const total =
+        raw +
+        purchases +
+        (Number(a.deliveries) || 0) +
+        (Number(a.claims) || 0) +
+        (Number(b.grv) || 0) +
+        (Number(b.siv) || 0) +
+        (Number(b.usage) || 0) +
+        (Number(b.damage) || 0) +
+        (Number(b.stock) || 0);
       return {
-        total: reports + materials + purchases + damage,
+        total,
         headline: [
-          { icon: "📦", label: "Material counts", value: materials },
-          { icon: "🛒", label: "Purchase reqs", value: purchases },
+          { icon: "🚚", label: "Raw material loads", value: raw },
+          { icon: "🛒", label: "Purchase requests", value: purchases },
         ],
       };
     }
     case "sales": {
-      const [a] = await sql<{ sales: string; receipts: string }[]>`
-        select
-          (select count(*) from sales_invoices where date >= ${start} and date < ${end}) as sales,
-          (select count(*) from receipts where created_at >= ${start} and created_at < ${end}) as receipts`.catch((e) => {
+      // Tonnage rather than a second count: the tab leads with the analytics,
+      // and how much left the yard is the figure that tab is built around.
+      const [a] = await sql<{ sales: string; tons: string }[]>`
+        select count(*) as sales, coalesce(sum(qty), 0) as tons
+          from sales_invoices where date >= ${start} and date < ${end}`.catch((e) => {
         missing(e);
-        return [{ sales: "0", receipts: "0" }];
+        return [{ sales: "0", tons: "0" }];
       });
       const sales = Number(a.sales) || 0;
-      const receipts = Number(a.receipts) || 0;
       return {
-        total: reports + sales + receipts,
+        total: sales,
         headline: [
           { icon: "🧾", label: "Sales", value: sales },
-          { icon: "📄", label: "Receipts", value: receipts },
+          { icon: "🤝", label: "Tons sold", value: Number(a.tons) || 0, suffix: " t", decimals: 2 },
         ],
       };
     }
     case "finance": {
-      const [a] = await sql<{ batches: string; wht: string }[]>`
-        select
-          (select count(*) from finance_purchase_batches where date >= ${start} and date < ${end}) as batches,
-          (select count(*) from wht_holders where created_at >= ${start} and created_at < ${end}) as wht
-      `.catch(() => [{ batches: "0", wht: "0" }]);
+      // Both of these do have a section on the finance tab (tool purchases, WHT
+      // receipt holders), so they stay. The total also counts the vouchers,
+      // which the tab renders through the same panel asset management uses.
+      const [[a], [v]] = await Promise.all([
+        sql<{ batches: string; wht: string }[]>`
+          select
+            (select count(*) from finance_purchase_batches where date >= ${start} and date < ${end}) as batches,
+            (select count(*) from wht_holders where created_at >= ${start} and created_at < ${end}) as wht
+        `.catch(() => [{ batches: "0", wht: "0" }]),
+        sql<{ grv: string; siv: string }[]>`
+          select
+            (select count(*) from goods_receiving_vouchers where date >= ${start} and date < ${end}) as grv,
+            (select count(*) from store_issue_vouchers     where date >= ${start} and date < ${end}) as siv
+        `.catch(() => [{ grv: "0", siv: "0" }]),
+      ]);
       const batches = Number(a.batches) || 0;
       const wht = Number(a.wht) || 0;
       return {
-        total: batches + wht,
+        total: batches + wht + (Number(v.grv) || 0) + (Number(v.siv) || 0),
         headline: [
           { icon: "🧾", label: "Purchase batches", value: batches },
           { icon: "📄", label: "WHT holders", value: wht },

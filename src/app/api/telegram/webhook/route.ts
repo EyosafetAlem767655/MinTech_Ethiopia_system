@@ -42,6 +42,7 @@ import { backgroundPurchaseReceiptCheck } from "@/lib/finance-receipts";
 import { logError } from "@/lib/errors";
 import { insertRow } from "@/lib/insert";
 import { runAfter } from "@/lib/after";
+import { whitenessAlert } from "@/lib/whiteness-alert";
 import { applySalesExtraction, parseSalesPaste, salesMissing } from "@/lib/sales-invoice";
 import { applyFlowEdit, describeFlowChanges, editableFields, renderFieldList } from "@/lib/flow-edit";
 import { dailyHeartbeat } from "@/lib/heartbeat";
@@ -1554,6 +1555,13 @@ export async function POST(req: NextRequest) {
                 ? "\n🔎 ፎቶዎቹ በጀርባ በኩል እየተጣሩ ነው።"
                 : "")
           );
+
+          // A whiteness check under its product's band is worth waking people
+          // for, but not worth making the reporter wait for: the ✅ above has
+          // already gone out, and this runs behind the response.
+          if (state.kind === "whiteness_check") {
+            runAfter(whitenessAlert(saved.id));
+          }
 
           // Answer first, analyse after — see backgroundPpDamageCheck.
           if (ppPiles.length > 0) {

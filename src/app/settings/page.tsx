@@ -901,9 +901,10 @@ function SchemaCheck() {
             </div>
           ))}
           <p className="text-[11px] text-stone-500">
-            Run <span className="font-mono font-bold text-clay-800">{report.backfill}</span> in the Supabase SQL
-            editor — it adds every one of these and is safe to run more than once. Until then those values are
-            dropped as reports are saved (the reports themselves are kept).
+            Run the file named against each group above in the Supabase SQL editor; every one of them is safe to
+            run more than once. <span className="font-mono font-bold text-clay-800">{report.backfill}</span> covers
+            all of the optional report columns in one go. Until then those values are dropped as reports are saved
+            (the reports themselves are kept).
           </p>
         </>
       )}
