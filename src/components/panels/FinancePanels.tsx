@@ -286,6 +286,7 @@ interface Report {
   usdRate: number | null;
   production: ProductionRow[];
   rawMaterials: RawRow[];
+  rawMaterialSource?: "daily" | "vouchers";
   totals: Record<string, number>;
   availableMonths: string[];
   error?: string;
@@ -398,7 +399,17 @@ function MonthlyTab() {
         </table>
       </div>
 
-      <h3 className="px-1 text-xs font-bold uppercase tracking-widest text-stone-400">Raw materials &amp; bags</h3>
+      <div className="flex flex-wrap items-baseline justify-between gap-2 px-1">
+        <h3 className="text-xs font-bold uppercase tracking-widest text-stone-400">Raw materials &amp; bags</h3>
+        {/* Which record the in/out columns were built from. The daily report
+            and the store issue voucher both describe material movement, and a
+            month reads one of them, never both — so it says which. */}
+        <p className="text-[10px] text-stone-400">
+          {data.rawMaterialSource === "daily"
+            ? "in/out from the daily raw-material report"
+            : "in/out from receipts and store issue vouchers"}
+        </p>
+      </div>
       <div className="card overflow-x-auto p-0">
         <table className="w-full min-w-[760px] text-right text-xs">
           <thead className="bg-clay-50/70 text-[10px] uppercase tracking-wide text-stone-500">

@@ -134,6 +134,12 @@ export interface FinanceReport {
   usdRate: number | null;
   production: ProductionFinanceRow[];
   rawMaterials: RawMaterialFinanceRow[];
+  /**
+   * Where this month's raw-material in/out came from. Stated rather than
+   * implied: the two sources can disagree, and a reader comparing two months
+   * has to be able to see which one each was built from.
+   */
+  rawMaterialSource: "daily" | "vouchers";
   totals: {
     baseBalance: number;
     received: number;
@@ -165,7 +171,18 @@ function sumMaps(rows: { m: Record<string, number> | null }[]): Record<string, n
 export async function buildFinanceReport(month: string): Promise<FinanceReport> {
   const { start, end } = monthBounds(month);
 
-  const [base, priceList, produced, delivered, received, bagsBoughtLegacy, issuedLegacy, bagsFromGrv, issuedFromSiv] =
+  const [
+    base,
+    priceList,
+    produced,
+    delivered,
+    received,
+    bagsBoughtLegacy,
+    issuedLegacy,
+    bagsFromGrv,
+    issuedFromSiv,
+    dailyRaw,
+  ] =
     await Promise.all([
     sql<{ products: Record<string, number>; raw_materials: Record<string, number>; bags: Record<string, number> }[]>`
       select products, raw_materials, bags from monthly_base_balances where month = ${month}
@@ -223,6 +240,11 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
          and i.ledger_kind is not null and i.ledger_key is not null
        group by i.ledger_kind, i.ledger_key
     `.catch(() => []),
+    // The daily raw-material report (0033). Already keyed by the three finance
+    // material names, so nothing is rolled up on the way in.
+    sql<{ received: Record<string, number>; issued: Record<string, number> }[]>`
+      select received, issued from raw_material_daily where date >= ${start} and date < ${end}
+    `.catch(() => []),
   ]);
 
   const baseRow = base[0];
@@ -231,7 +253,28 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
 
   const producedMap = sumMaps(produced);
   const soldMap = sumMaps(delivered);
-  const receivedMap = rollUpMaterials(sumMaps(received));
+  /**
+   * ONE SOURCE PER MONTH for raw material in and out, never two.
+   *
+   * From 0033 the daily raw-material report records received AND issued, and
+   * the owner made it the source of truth. The figures it replaces come from
+   * two other places: per-truck receipts (`raw_material_receipts`) and the
+   * material lines of store issue vouchers. Adding the new report to those
+   * would double every tonne in any month where both exist — which is every
+   * month from the day it ships.
+   *
+   * So the month picks its source. If anybody filed a daily report in it, that
+   * report IS the month; otherwise the old sources answer exactly as they
+   * always have, which is what keeps every closed month reproducible.
+   *
+   * The voucher's BAG lines are unaffected either way: nothing else records
+   * those, and the daily report does not mention them.
+   */
+  const usesDailyRaw = dailyRaw.length > 0;
+
+  const receivedMap = usesDailyRaw
+    ? sumMaps(dailyRaw.map((r) => ({ m: r.received || {} })))
+    : rollUpMaterials(sumMaps(received));
   // Bag purchases arrive in two shapes: asset management counts them by size AND
   // colour, and the retired finance rows carry a plain total per size with no
   // colour at all. Everything is keyed by KIND ("kg25:Yellow") from here on,
@@ -263,13 +306,17 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
     if (row.ledger_key in bagsBoughtMap) bagsBoughtMap[row.ledger_key] += n(row.qty);
   }
 
-  const issuedMaterials = rollUpMaterials(sumMaps(issuedLegacy.map((r) => ({ m: r.m }))));
+  // See usesDailyRaw above. The legacy `material_issues` rows are part of the
+  // OLD source and go with it.
+  const issuedMaterials = usesDailyRaw
+    ? sumMaps(dailyRaw.map((r) => ({ m: r.issued || {} })))
+    : rollUpMaterials(sumMaps(issuedLegacy.map((r) => ({ m: r.m }))));
   const issuedBags: Record<string, number> = Object.fromEntries(BAG_KIND_KEYS.map((k) => [k, 0]));
   for (const row of issuedFromSiv) {
     const qtyIssued = n(row.qty);
     if (row.ledger_kind === "bag") {
       if (row.ledger_key in issuedBags) issuedBags[row.ledger_key] += qtyIssued;
-    } else {
+    } else if (!usesDailyRaw) {
       // Already a finance material name — the voucher offers those three keys
       // directly, so there is no Kuni/Chips/Guji roll-up to do here.
       issuedMaterials[row.ledger_key] = (issuedMaterials[row.ledger_key] || 0) + qtyIssued;
@@ -379,6 +426,7 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
     usdRate,
     production,
     rawMaterials,
+    rawMaterialSource: usesDailyRaw ? "daily" : "vouchers",
     totals: {
       baseBalance: round3(production.reduce((a, r) => a + r.baseBalance, 0)),
       received: round3(totalProduced),

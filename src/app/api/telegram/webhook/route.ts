@@ -31,6 +31,7 @@ import {
   parseQty,
   pasteTemplate,
   saveAssetReport,
+  storeBlockOfStep,
   stepsFor,
   type AssetFlowKind,
   type AssetFlowState,
@@ -43,6 +44,9 @@ import { logError } from "@/lib/errors";
 import { insertRow } from "@/lib/insert";
 import { runAfter } from "@/lib/after";
 import { whitenessAlert } from "@/lib/whiteness-alert";
+import { seedStoreDraft } from "@/lib/store-inventory";
+import { parseRawMaterialPaste } from "@/lib/raw-material-paste";
+import { countChanges, parseStoreCountPaste } from "@/lib/store-count-paste";
 import { applySalesExtraction, parseSalesPaste, salesMissing } from "@/lib/sales-invoice";
 import { applyFlowEdit, describeFlowChanges, editableFields, renderFieldList } from "@/lib/flow-edit";
 import { dailyHeartbeat } from "@/lib/heartbeat";
@@ -818,6 +822,7 @@ const ASSET_FLOW_BY_CAP: Record<string, AssetFlowKind | undefined> = {
   production_report: "production_daily",
   pp_bag_used: "pp_bag_used",
   whiteness_check: "whiteness_check",
+  store_count: "store_count",
   base_balance: "base_balance",
   store_issue: "store_issue",
   grv: "grv",
@@ -995,7 +1000,7 @@ async function askAssetStep(chatId: string, state: AssetFlowState): Promise<void
     // The template goes in its own message with no markup so it can be copied
     // cleanly on mobile — a long <pre> block mixed into the instructions is
     // awkward to select, and this is the message the user edits and sends back.
-    await sendMessage(chatId, `<pre>${escapeHtml(pasteTemplate(state.kind, state.draft))}</pre>`);
+    await sendMessage(chatId, `<pre>${escapeHtml(pasteTemplate(state.kind, state.draft, state.step))}</pre>`);
     return;
   }
   const hint = step.skippable ? '\n<i>ከሌለ "-" ይላኩ።</i>' : "";
@@ -1775,6 +1780,62 @@ export async function POST(req: NextRequest) {
         }
         state.draft[step.id] = n;
       } else if (step.type === "paste") {
+        /* ── The store count: one block per paste step ──────────────────────
+           Handled before the others because it is the only flow with SEVERAL
+           paste steps, so what happens next is "the next block", not "whatever
+           the template left blank". `firstUnanswered` skips paste steps by
+           design, and using it here would jump straight to the review card
+           after the first block. */
+        const block = state.kind === "store_count" ? storeBlockOfStep(step.id) : null;
+        if (block) {
+          const blockName = step.label || block;
+          if (isAssetSkip(val)) {
+            // Not counted today. Recorded as skipped rather than as a block of
+            // zeroes: the figures still sitting in the draft are last count's,
+            // and writing them would claim a count nobody took.
+            state.skippedBlocks = [...(state.skippedBlocks ?? []).filter((b) => b !== block), block];
+            state.changedBlocks = { ...(state.changedBlocks ?? {}), [block]: 0 };
+            await sendMessage(chatId, `⏭ ${escapeHtml(blockName)} — አልተቆጠረም።`);
+            await advanceAsset(session, chatId, state);
+            return NextResponse.json({ ok: true });
+          }
+
+          const parsed = parseStoreCountPaste(block, val);
+          const readCount = Object.keys(parsed.values).length;
+          if (readCount === 0) {
+            await sendMessage(
+              chatId,
+              '⚠️ ከቅጂው ምንም ማንበብ አልተቻለም። እባክዎ የተላከውን ቅጂ ሞልተው ይመልሱት፣ ወይም ካልቆጠሩ "-" ይላኩ።',
+              { reply_markup: CHANGE_CANCEL_KEYBOARD }
+            );
+            return NextResponse.json({ ok: true });
+          }
+
+          // Counted BEFORE the draft is overwritten — after the merge there is
+          // nothing left to compare against.
+          const { changed } = countChanges(state.draft, parsed.values);
+          Object.assign(state.draft, parsed.values);
+          state.skippedBlocks = (state.skippedBlocks ?? []).filter((b) => b !== block);
+          state.changedBlocks = { ...(state.changedBlocks ?? {}), [block]: changed };
+
+          const blockProblems = [...parsed.invalid, ...parsed.unknown].slice(0, 6);
+          if (blockProblems.length > 0) {
+            await sendMessage(
+              chatId,
+              `⚠️ እነዚህ መስመሮች አልተነበቡም፦\n${blockProblems.map((x) => `• ${escapeHtml(x)}`).join("\n")}\n\n` +
+                "<i>የክፍሉ ርዕስ ትክክል መሆኑን ያረጋግጡ።</i>"
+            );
+          }
+
+          await sendMessage(
+            chatId,
+            `✅ ${escapeHtml(blockName)} — ${readCount} ዕቃ ተነብቧል` +
+              (changed > 0 ? ` · <b>${changed} ተቀይሯል</b>።` : " · ምንም አልተቀየረም።")
+          );
+          await advanceAsset(session, chatId, state);
+          return NextResponse.json({ ok: true });
+        }
+
         // Each pasteable flow has its own parser: the production template has
         // two identically-named product blocks, and the finance ones carry
         // "Talc" as both a brand and a raw material. A shared parser would have
@@ -1784,7 +1845,9 @@ export async function POST(req: NextRequest) {
             ? parseProductionPaste(val)
             : state.kind === "sales_invoice"
               ? parseSalesPaste(val)
-              : parseFinancePaste(val, { usdRate: state.kind === "price_list" });
+              : state.kind === "raw_material"
+                ? parseRawMaterialPaste(val)
+                : parseFinancePaste(val, { usdRate: state.kind === "price_list" });
         const filled = Object.keys(parsed.values).length;
         // The sales block may be answered by "-" instead: the reporter would
         // rather take the remaining questions one at a time. Nothing is lost —
@@ -1828,7 +1891,10 @@ export async function POST(req: NextRequest) {
           // than saying nothing. The two template-only reports have no questions
           // left to fall through to — an unread line there is simply blank, and
           // the review card names it.
-          const templateOnly = state.kind === "production_daily" || state.kind === "base_balance";
+          const templateOnly =
+            state.kind === "production_daily" ||
+            state.kind === "base_balance" ||
+            state.kind === "raw_material";
           await sendMessage(
             chatId,
             `⚠️ እነዚህ መስመሮች አልተነበቡም፦\n${problems.map((p) => `• ${escapeHtml(p)}`).join("\n")}\n\n` +
@@ -1940,7 +2006,11 @@ export async function POST(req: NextRequest) {
       if (cap.captureMode === "asset_entry") {
         const kind = ASSET_FLOW_BY_CAP[cap.key];
         if (kind) {
-          const state: AssetFlowState = { kind, step: firstStep(kind), draft: {} };
+          // The store count starts from the last one, so its blocks arrive
+          // carrying figures to edit rather than 132 blank lines. Read once,
+          // here, so pasteTemplate stays synchronous for every flow.
+          const draft = kind === "store_count" ? await seedStoreDraft() : {};
+          const state: AssetFlowState = { kind, step: firstStep(kind), draft };
           session.state = "asset_entry";
           session.draft = undefined;
           session.capture = undefined;

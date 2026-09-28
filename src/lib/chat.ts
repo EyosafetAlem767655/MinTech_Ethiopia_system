@@ -44,6 +44,8 @@ const READABLE_TABLES = {
   production_reports: "date",
   stock_status_reports: "created_at",
   raw_material_receipts: "date",
+  raw_material_daily: "date",
+  store_counts: "date",
   delivery_reports: "date",
   purchase_item_reports: "date",
   pp_bag_damage_reports: "date",
@@ -205,7 +207,7 @@ const tools: OpenAI.Chat.ChatCompletionTool[] = [
         properties: {
           kind: {
             type: "string",
-            enum: ["raw_material", "delivery", "purchase_items", "all"],
+            enum: ["raw_material", "delivery", "purchase_items", "store_count", "all"],
             description: "Which report to read. Default 'all'.",
           },
           days: { type: "number", description: "How many days back. Default 30." },
@@ -438,11 +440,24 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<unk
       const out: Record<string, unknown> = { days };
 
       if (kind === "raw_material" || kind === "all") {
+        // The daily report first: it is what is filed now. The per-truck
+        // receipts are still read because they are the only record of
+        // everything received before the daily report existed.
+        out.rawMaterialDaily = await sql`
+          select date_label as "date", received, issued, stock, reported_by as "reportedBy"
+            from raw_material_daily
+           where date >= ${since} order by date desc limit ${limit}`.catch(() => []);
         out.rawMaterialReceived = await sql`
           select date, supplier, dn_no as "dnNo", truck_plate as "truckPlate", mrv_no as "mrvNo",
                  materials, reported_by as "reportedBy"
             from raw_material_receipts
            where date >= ${since} order by date desc limit ${limit}`;
+      }
+      if (kind === "store_count" || kind === "all") {
+        out.storeCounts = await sql`
+          select date_label as "date", groups, items, counted_by as "countedBy"
+            from store_counts
+           where date >= ${since} order by date desc limit ${limit}`.catch(() => []);
       }
       if (kind === "delivery" || kind === "all") {
         out.deliveries = await sql`

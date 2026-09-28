@@ -6,7 +6,8 @@ import type { ComponentType } from "react";
 import DepartmentReport from "@/components/DepartmentReport";
 import { isDepartmentKey, type DepartmentKey } from "@/lib/departments";
 import BagControlPanel from "@/components/panels/BagControlPanel";
-import RawMaterialReceivedPanel from "@/components/panels/RawMaterialReceivedPanel";
+import RawMaterialDailyPanel from "@/components/panels/RawMaterialDailyPanel";
+import StoreInventoryPanel from "@/components/panels/StoreInventoryPanel";
 import DeliveryReportPanel from "@/components/panels/DeliveryReportPanel";
 import ProductionPanels from "@/components/panels/ProductionPanels";
 import StockOnHandPanel from "@/components/panels/StockOnHandPanel";
@@ -39,7 +40,8 @@ const FULL_WIDTH = new Set<ComponentType>([
   ProductionPanels,
   WhitenessPanel,
   StockOnHandPanel,
-  RawMaterialReceivedPanel,
+  RawMaterialDailyPanel,
+  StoreInventoryPanel,
   DeliveryReportPanel,
   VoucherPanels,
   FinanceVouchers,
@@ -59,7 +61,7 @@ const PANELS: Record<DepartmentKey, ComponentType[]> = {
   // purchase context. Stock status and purchased items are gone: the asset role
   // no longer files either, so a panel for them would only ever show stale rows.
   asset_management: [
-    RawMaterialReceivedPanel,
+    RawMaterialDailyPanel,
     DeliveryReportPanel,
     // Goods in, goods out, and whether the two agree with the floor. First,
     // because the stock check is the question the rest of the tab answers
@@ -79,6 +81,9 @@ const PANELS: Record<DepartmentKey, ComponentType[]> = {
     // showed the same rows with an amount nobody files and an AI verdict in a
     // shape the bot no longer writes — the check appeared blank there.
     ToolRequestsPanel,
+    // The spare-parts store. Last of the report panels because it is the one
+    // read by looking something up rather than by reading down it.
+    StoreInventoryPanel,
     BagControlPanel,
   ],
   // Analytics first: the question the tab answers, then the sheet it is built from.

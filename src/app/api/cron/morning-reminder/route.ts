@@ -12,6 +12,7 @@ import { splitByCompliance } from "@/lib/compliance";
 import { getAllDepartmentSummaries } from "@/lib/department-metrics";
 import { DEPARTMENTS } from "@/lib/departments";
 import { reportKeyboardFor, sendMessage } from "@/lib/telegram";
+import { STALE_DAYS, daysSinceAnyCount, groupStatuses, recentCounts } from "@/lib/store-inventory";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -166,9 +167,18 @@ export async function GET(req: NextRequest) {
   const adminUsers = employees.filter((u) => hasPosition(u.positions, "admin"));
   await Promise.all(adminUsers.map((u) => sendMessage(String(u.chat_id), adminText).catch(() => {})));
 
+  /* ─────────── 4. Monday: chase the weekly store count ─────────── */
+  //
+  // The spare-parts count is weekly, sometimes more often, so it has no place
+  // in the daily compliance list — a role cannot be marked late every day for a
+  // report that is not due every day. It gets one nudge a week instead, and
+  // only when nothing has been counted in seven days.
+  const storeNudged = await nudgeStoreCount(employees);
+
   return NextResponse.json({
     ok: true,
     date: today,
+    storeNudged,
     reminded: toRemind.length,
     sent,
     failed,
@@ -178,4 +188,57 @@ export async function GET(req: NextRequest) {
     hrDigests: hrUsers.length,
     adminDigests: adminUsers.length,
   });
+}
+
+/* ────────────────────────── the weekly store count ────────────────────────── */
+
+/** EAT weekday the nudge goes out on. 1 = Monday. */
+const STORE_COUNT_DAY = 1;
+
+/**
+ * One message a week to whoever counts the store, and only when it is overdue.
+ *
+ * Silent on every other day, and silent on Monday too if a count was filed in
+ * the last seven days — a reminder that arrives after the work is done is how
+ * people learn to ignore the bot. The groups that are actually stale are named,
+ * because "count the store" and "nobody has been to the bearings since the 2nd"
+ * are different messages.
+ */
+async function nudgeStoreCount(employees: Emp[]): Promise<number> {
+  const eatDay = new Date(Date.now() + 3 * 3600_000).getUTCDay();
+  if (eatDay !== STORE_COUNT_DAY) return 0;
+
+  try {
+    const counts = await recentCounts();
+    const since = daysSinceAnyCount(counts);
+    if (since !== null && since <= STALE_DAYS) return 0;
+
+    const stale = groupStatuses(counts).filter((g) => g.stale);
+    const text =
+      "🧰 <b>የመጋዘን ዕቃዎች ቆጠራ</b>\n\n" +
+      (since === null
+        ? "እስካሁን ቆጠራ አልተመዘገበም።"
+        : `የመጨረሻው ቆጠራ ከ<b>${since}</b> ቀናት በፊት ነው።`) +
+      (stale.length > 0
+        ? `\n\nያልተቆጠሩ ክፍሎች፦\n${stale.map((g) => `• ${g.label}`).join("\n")}`
+        : "") +
+      "\n\n<i>ከታች ያለውን ቁልፍ ተጭነው ያስገቡ። ያልቆጠሩትን ክፍል መዝለል ይችላሉ።</i>";
+
+    // The storekeeper, and nobody else: this is the role that holds the count
+    // capability (src/lib/positions.ts asset_materials).
+    const counters = employees.filter((u) => hasPosition(u.positions, "asset_materials"));
+    await Promise.all(
+      counters.map((u) =>
+        sendMessage(String(u.chat_id), text, {
+          reply_markup: reportKeyboardFor(resolveCapabilities(u.positions, u.capabilities).map((c) => c.button)),
+        }).catch(() => {})
+      )
+    );
+    return counters.length;
+  } catch (e) {
+    // store_counts arrives in 0034. A missing table may not cost the daily
+    // reminders that ran above this.
+    console.warn("nudgeStoreCount skipped:", e);
+    return 0;
+  }
 }

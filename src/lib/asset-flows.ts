@@ -16,7 +16,6 @@ import {
   looksLikeStockItem,
   parseBagLedgerKey,
   productLabel,
-  RAW_MATERIALS,
   type BagSize,
   type LedgerKind,
 } from "@/lib/products";
@@ -33,6 +32,7 @@ import {
   salesTemplate,
 } from "@/lib/sales-invoice";
 import { BANK_OTHER } from "@/lib/banks";
+import { eatDateLabel } from "@/lib/dates";
 import { chaseHolder } from "@/lib/wht-sms";
 import { bagKey, productionTemplate, DELIVERED_PREFIX, PROD_PREFIX, STOCK_PREFIX } from "@/lib/production-paste";
 import {
@@ -47,6 +47,13 @@ import {
 } from "@/lib/finance-paste";
 import { monthLabel, nextMonth, priceListItems } from "@/lib/finance-report";
 import { PURCHASE_DEPARTMENTS } from "@/lib/purchase-departments";
+import { rawMaterialTemplate, sectionMap } from "@/lib/raw-material-paste";
+import {
+  STORE_BLOCKS,
+  itemsOfBlock,
+  type StoreBlockKey,
+} from "@/lib/store-items";
+import { itemKey, storeBlockTemplate } from "@/lib/store-count-paste";
 import type { ToolPhotoCheck, VoucherRead } from "@/lib/llm";
 // Names and the kind union live in a client-safe module — see flow-titles.ts.
 import { FLOW_TITLE, type AssetFlowKind } from "@/lib/flow-titles";
@@ -90,6 +97,16 @@ export interface AssetFlowState {
   check?: ToolPhotoCheck;
   /** What the AI read off a voucher's photos, kept for the audit trail. */
   extraction?: VoucherExtractionRecord;
+  /**
+   * Store count only: blocks the counter explicitly skipped.
+   *
+   * Kept apart from the draft because the draft arrives PRE-FILLED with the
+   * last count — so a skipped block still holds figures, and without this the
+   * save could not tell a block somebody counted from one they left alone.
+   */
+  skippedBlocks?: StoreBlockKey[];
+  /** Store count only: how many lines of each block changed, for the card. */
+  changedBlocks?: Partial<Record<StoreBlockKey, number>>;
 }
 
 /**
@@ -157,18 +174,68 @@ export interface AssetStep {
 
 /* ─────────────────────────────── Step tables ──────────────────────────────── */
 
+/**
+ * The daily raw-material report: one day, three materials, three readings each.
+ *
+ * It used to record one TRUCK — supplier, delivery note, plate, M.R.V — with
+ * tonnage split five ways (Talc, Kuni, Chips, Guji, Lime Stone). What the plant
+ * needs on the dashboard is the day: what came in, what production consumed and
+ * what is left on the ground, in the three materials finance already accounts
+ * in. Deliveries are still documented on the Goods Receiving Voucher, which is
+ * where a supplier and a plate belong.
+ *
+ * One paste block rather than nine questions, in the shape the request was
+ * written in. Historic per-truck rows stay readable under Settings.
+ */
 const RAW_MATERIAL_STEPS: AssetStep[] = [
-  { id: "date", prompt: "📅 የገባበትን ቀን ይምረጡ።", type: "date" },
-  { id: "supplier", prompt: "🏢 አቅራቢውን (Supplier) ይፃፉ።", type: "text" },
-  { id: "dnNo", prompt: "📄 የአቅራቢውን የመላኪያ ደረሰኝ ቁጥር (Sup. Dn. No.) ይፃፉ።", type: "text", skippable: true },
-  { id: "truckPlate", prompt: "🚚 የመኪናውን ሰሌዳ ቁጥር (Truck Plate No.) ይፃፉ።", type: "text", skippable: true },
-  { id: "mrvNo", prompt: "🔖 የM.R.V ቁጥሩን ይፃፉ።", type: "text", skippable: true },
-  ...RAW_MATERIALS.map<AssetStep>((m) => ({
-    id: `mat:${m}`,
-    prompt: `⚖️ የ<b>${m}</b> ብዛት በቶን ይፃፉ። ከሌለ 0 ይፃፉ።`,
-    type: "number",
+  { id: "date", prompt: "📅 የሪፖርቱን ቀን ይምረጡ።", type: "date" },
+  {
+    id: "paste",
+    prompt:
+      "📋 የሚከተለውን ቅጂ ሞልተው ይመልሱት።\n\n" +
+      "<i>ቁጥሩን ከ = በኋላ በቶን ይፃፉ። ለምሳሌ፦</i>\n" +
+      "<code>Dolomite = 12.5</code>\n" +
+      "<i>የሌለውን 0 ይፃፉ ወይም ባዶ ይተዉት። የክፍሉን ርዕስ (--- Received ---) አይሰርዙ።</i>",
+    type: "paste",
+  },
+];
+
+/* ─────────────────────── The spare-parts store count ──────────────────────── */
+
+/**
+ * One paste step per block, each skippable.
+ *
+ * A count is routinely partial — the bearings today, the electrics on Thursday
+ * — so a block that is not being counted is skipped rather than filled with
+ * zeroes, and the figures it held last time stand until somebody counts it
+ * again. `groups` on the saved row records which blocks this count actually
+ * covered, which is what keeps "counted and found none" apart from "not
+ * counted".
+ */
+const STORE_COUNT_STEPS: AssetStep[] = [
+  { id: "date", prompt: "📅 የቆጠራውን ቀን ይምረጡ።", type: "date" },
+  ...STORE_BLOCKS.map<AssetStep>((b) => ({
+    id: storeBlockStep(b.key),
+    label: b.label,
+    prompt:
+      `${b.icon} <b>${b.label}</b> — የሚከተለውን ቅጂ ሞልተው ይመልሱት።\n\n` +
+      "<i>ቁጥሩ ያለው የመጨረሻው ቆጠራ ነው። የተቀየረውን ብቻ ያስተካክሉ።</i>\n" +
+      '<i>ይህን ክፍል ካልቆጠሩ "-" ይላኩ።</i>',
+    type: "paste",
+    skippable: true,
   })),
 ];
+
+/** Step id for one block of the store count. */
+export function storeBlockStep(block: StoreBlockKey): string {
+  return `block:${block}`;
+}
+
+/** The block a store-count step is for, or null. */
+export function storeBlockOfStep(stepId: string): StoreBlockKey | null {
+  const key = stepId.startsWith("block:") ? stepId.slice(6) : "";
+  return STORE_BLOCKS.some((b) => b.key === key) ? (key as StoreBlockKey) : null;
+}
 
 const DELIVERY_STEPS: AssetStep[] = [
   { id: "date", prompt: "📅 የተላከበትን ቀን ይምረጡ።", type: "date" },
@@ -1067,6 +1134,7 @@ const SALES_INVOICE_STEPS: AssetStep[] = [
 
 const STEPS: Record<AssetFlowKind, AssetStep[]> = {
   raw_material: RAW_MATERIAL_STEPS,
+  store_count: STORE_COUNT_STEPS,
   delivery: DELIVERY_STEPS,
   tool_request: TOOL_REQUEST_STEPS,
   pp_bag_damage: PP_BAG_DAMAGE_STEPS,
@@ -1089,11 +1157,22 @@ const STEPS: Record<AssetFlowKind, AssetStep[]> = {
  * not answer, so the same flow sends a two-line block after a good read and the
  * whole sheet after a failed one.
  */
-export function pasteTemplate(kind: AssetFlowKind, draft: Record<string, string | number> = {}): string {
+export function pasteTemplate(
+  kind: AssetFlowKind,
+  draft: Record<string, string | number> = {},
+  step = ""
+): string {
   if (kind === "production_daily") return productionTemplate();
   if (kind === "base_balance") return baseBalanceTemplate();
   if (kind === "price_list") return priceListTemplate();
   if (kind === "sales_invoice") return salesTemplate(draft);
+  if (kind === "raw_material") return rawMaterialTemplate();
+  // The store count is the one flow with several paste steps, so its template
+  // depends on WHICH block is being asked for, not just the flow.
+  if (kind === "store_count") {
+    const block = storeBlockOfStep(step);
+    return block ? storeBlockTemplate(block, draft) : "";
+  }
   return "";
 }
 
@@ -1378,18 +1457,44 @@ export function assetPreview(state: AssetFlowState): string {
   const head = `<b>${FLOW_TITLE[state.kind]}</b>\n`;
 
   if (state.kind === "raw_material") {
-    const lines = RAW_MATERIALS.map((m) => `  • ${m}: ${qty(Number(d[`mat:${m}`]) || 0)}`).join("\n");
-    const total = RAW_MATERIALS.reduce((a, m) => a + (Number(d[`mat:${m}`]) || 0), 0);
+    // Three blocks, each totalled. Stock is deliberately NOT totalled against
+    // the other two on the card: it is a level counted on the ground, and the
+    // only comparison worth making (opening + received − issued against it) is
+    // the stock check on the dashboard, which knows the opening balance.
+    const block = (label: string, section: "received" | "issued" | "stock") => {
+      const map = sectionMap(d, section);
+      const lines = FINANCE_RAW_MATERIALS.map((m) => `  • ${m}: ${qty(map[m])}`).join("\n");
+      const total = FINANCE_RAW_MATERIALS.reduce((a, m) => a + map[m], 0);
+      return `${label}\n${lines}\n  <b>ድምር: ${qty(total)}</b>\n`;
+    };
     return (
       head +
-      `📅 Date: ${esc(d.date)}\n` +
-      `🏢 Supplier: ${esc(d.supplier) || "—"}\n` +
-      `📄 Sup.Dn.No.: ${esc(d.dnNo) || "—"}\n` +
-      `🚚 Truck Plate: ${esc(d.truckPlate) || "—"}\n` +
-      `🔖 M.R.V: ${esc(d.mrvNo) || "—"}\n\n` +
-      `⚖️ <b>ብዛት (ቶን)</b>\n${lines}\n` +
-      `  ─────────\n  <b>ጠቅላላ: ${qty(total)}</b>\n`
+      `📅 Date: ${esc(d.date)}\n\n` +
+      block("📥 <b>ገቢ (Received, ቶን)</b>", "received") +
+      "\n" +
+      block("🏭 <b>ወጪ / ለምርት (Issue, ቶን)</b>", "issued") +
+      "\n" +
+      block("📦 <b>ክምችት (Stock, ቶን)</b>", "stock")
     );
+  }
+
+  if (state.kind === "store_count") {
+    // What was counted, and — the point of the card — how much of each block
+    // actually moved. A pre-filled block sent back untouched is the one way
+    // this report can lie, so it is stated before anybody approves it.
+    const lines = STORE_BLOCKS.map((b) => {
+      const items = itemsOfBlock(b.key);
+      const filed = items.filter((i) => d[itemKey(i.key)] !== undefined && d[itemKey(i.key)] !== "");
+      if (state.skippedBlocks?.includes(b.key) || filed.length === 0) {
+        return `${b.icon} ${b.label}: <i>አልተቆጠረም</i>`;
+      }
+      const changed = state.changedBlocks?.[b.key] ?? 0;
+      return (
+        `${b.icon} ${b.label}: ${filed.length}/${items.length} ዕቃ` +
+        (changed > 0 ? ` · <b>${changed} ተቀይሯል</b>` : " · <i>ምንም አልተቀየረም</i>")
+      );
+    }).join("\n");
+    return head + `📅 Date: ${esc(d.date)}\n\n${lines}\n`;
   }
 
   if (state.kind === "delivery") {
@@ -1761,13 +1866,52 @@ export async function saveAssetReport(
   const d = state.draft;
 
   if (state.kind === "raw_material") {
+    // Upserted on the day, like the ops report: filing the same day twice is a
+    // correction, not a second reading. All three blocks are replaced together
+    // — they were answered together, and merging them per material would leave
+    // yesterday's stock standing beside today's received.
+    const date = reportDate(d.date);
     const [row] = await sql<{ id: string }[]>`
-      insert into raw_material_receipts (date, supplier, dn_no, truck_plate, mrv_no, reported_by, materials, source)
-      values (${reportDate(d.date)}, ${String(d.supplier || "") || null}, ${String(d.dnNo || "") || null},
-              ${String(d.truckPlate || "") || null}, ${String(d.mrvNo || "") || null}, ${reportedBy},
-              ${sql.json(jsonMap(d, "mat:", RAW_MATERIALS))}, 'telegram')
+      insert into raw_material_daily (date, date_label, received, issued, stock, reported_by, source)
+      values (${date}, ${eatDateLabel(date)},
+              ${sql.json(sectionMap(d, "received"))},
+              ${sql.json(sectionMap(d, "issued"))},
+              ${sql.json(sectionMap(d, "stock"))},
+              ${reportedBy}, 'telegram')
+      on conflict (date_label) do update set
+        received = excluded.received,
+        issued = excluded.issued,
+        stock = excluded.stock,
+        reported_by = excluded.reported_by,
+        updated_at = now()
       returning id`;
-    return { id: row.id, table: "raw_material_receipts" };
+    return { id: row.id, table: "raw_material_daily" };
+  }
+
+  if (state.kind === "store_count") {
+    // Only the blocks that were actually counted. A skipped block still carries
+    // pre-filled figures in the draft, and writing those would record a count
+    // nobody took — the item would then look freshly verified on the dashboard.
+    const skipped = new Set(state.skippedBlocks ?? []);
+    const groups: string[] = [];
+    const items: Record<string, number> = {};
+    for (const b of STORE_BLOCKS) {
+      if (skipped.has(b.key)) continue;
+      const blockItems = itemsOfBlock(b.key).filter((i) => {
+        const v = d[itemKey(i.key)];
+        return v !== undefined && v !== "";
+      });
+      if (blockItems.length === 0) continue;
+      groups.push(b.key);
+      for (const i of blockItems) items[i.key] = Number(d[itemKey(i.key)]) || 0;
+    }
+
+    const date = reportDate(d.date);
+    const [row] = await sql<{ id: string }[]>`
+      insert into store_counts (date, date_label, groups, items, counted_by, source)
+      values (${date}, ${eatDateLabel(date)}, ${groups}, ${sql.json(items)}, ${reportedBy}, 'telegram')
+      returning id`;
+    return { id: row.id, table: "store_counts" };
   }
 
   if (state.kind === "delivery") {

@@ -22,6 +22,8 @@ export type CapabilityKey =
   | "whiteness_check"
   | "raw_material_received"
   | "finished_goods_delivery"
+  // The spare-parts store, counted block by block.
+  | "store_count"
   | "purchase_items"
   | "sales_report"
   | "pp_bag_damage"
@@ -128,12 +130,22 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
     input: "any",
     question: "⚪ የነጭነት ምርመራ መረጃውን በደረጃ እናስገባለን።",
   },
+  // The key is unchanged so no session, roster row or registry entry has to move
+  // with the report; what it collects is now the DAY (received, issued and
+  // counted) rather than one truckload.
   raw_material_received: {
     key: "raw_material_received",
-    button: "🚚 የጥሬ ዕቃ ገቢ ሪፖርት",
+    button: "🧱 የቀኑ የጥሬ ዕቃ ሪፖርት",
     captureMode: "asset_entry",
     input: "any",
-    question: "🚚 የጥሬ ዕቃ ገቢ ሪፖርት በደረጃ እናስገባለን።",
+    question: "🧱 የቀኑን የጥሬ ዕቃ ገቢ፣ ወጪና ክምችት እናስገባለን።",
+  },
+  store_count: {
+    key: "store_count",
+    button: "🧰 የመጋዘን ዕቃዎች ቆጠራ",
+    captureMode: "asset_entry",
+    input: "any",
+    question: "🧰 የመጋዘን ዕቃዎችን በክፍል በክፍል እንቆጥራለን። ያልቆጠሩትን ክፍል መዝለል ይችላሉ።",
   },
   finished_goods_delivery: {
     key: "finished_goods_delivery",
@@ -339,6 +351,9 @@ export const POSITIONS: Record<PositionKey, Position> = {
     capabilities: [
       "raw_material_received",
       "finished_goods_delivery",
+      // The managers asked for every item in the store to be counted. It is the
+      // storekeeper who counts it, so it sits with the other store reports.
+      "store_count",
       "pp_bag_damage",
       // Both feed the monthly finance report: the store issue voucher fills its
       // consumption column, and the base balance opens each month.
@@ -352,7 +367,13 @@ export const POSITIONS: Record<PositionKey, Position> = {
     // pp_bag_damage_reports is deliberately absent: the damage report is filed
     // weekly now, and leaving it here meant one weekly report marked this role
     // compliant for that day — masking a missing daily raw-material report.
+    // store_counts is deliberately absent: the count is weekly, and a weekly
+    // report here would mark the role compliant for a day it filed no daily
+    // raw-material report — exactly the masking the bag damage report caused.
+    // raw_material_receipts stays alongside its replacement so days filed
+    // before the daily report existed still count as reported.
     submissionTables: [
+      "raw_material_daily",
       "raw_material_receipts",
       "delivery_reports",
       "material_issues",

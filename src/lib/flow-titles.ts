@@ -24,6 +24,8 @@ export type AssetFlowKind =
   // Production's own daily and per-shift records.
   | "pp_bag_used"
   | "whiteness_check"
+  // The spare-parts store, counted block by block.
+  | "store_count"
   // Finance.
   | "price_list"
   | "wht_holder"
@@ -31,7 +33,7 @@ export type AssetFlowKind =
   | "sales_invoice";
 
 export const FLOW_TITLE: Record<AssetFlowKind, string> = {
-  raw_material: "🚚 የጥሬ ዕቃ ገቢ ሪፖርት",
+  raw_material: "🧱 የቀኑ የጥሬ ዕቃ ሪፖርት",
   delivery: "🚛 የማድረሻ ሪፖርት",
   tool_request: "🛒 የግዢ ጥያቄ",
   pp_bag_damage: "💔 የPP ከረጢት ብልሽት ሪፖርት",
@@ -41,6 +43,7 @@ export const FLOW_TITLE: Record<AssetFlowKind, string> = {
   grv: "📥 የዕቃ ገቢ ቫውቸር (GRV)",
   pp_bag_used: "🧺 የቀኑ የPP ከረጢት ፍጆታ",
   whiteness_check: "⚪ የነጭነት ጥራት ምርመራ",
+  store_count: "🧰 የመጋዘን ዕቃዎች ቆጠራ",
   price_list: "💲 የወሩ የዋጋ ዝርዝር",
   wht_holder: "📄 WHT ደረሰኝ ያዢ",
   sales_invoice: "🧾 የሽያጭ ሪፖርት",

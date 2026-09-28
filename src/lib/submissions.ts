@@ -20,6 +20,7 @@ export const SUBMISSION_COLLECTIONS = [
   "production",
   "stock_status",
   "raw_material",
+  "raw_material_daily",
   "delivery",
   "purchase_items",
   "tool_request",
@@ -37,6 +38,7 @@ export const SUBMISSION_COLLECTIONS = [
   // Production's own records.
   "pp_bag_usage",
   "whiteness",
+  "store_count",
   // Finance, rebuilt.
   "tool_purchase",
   "pp_bag_purchase",
@@ -444,6 +446,31 @@ export const SUBMISSIONS: Record<SubmissionCollection, SubmissionSpec> = {
     // through the bot, which replaces its lines rather than adding to them.
     editableKeys: [],
     extraChildren: [{ table: "pp_bag_usage_items", foreignKey: "usage_id" }],
+  },
+  raw_material_daily: {
+    table: "raw_material_daily",
+    label: "Daily raw material",
+    icon: "🧱",
+    dateColumn: "date",
+    authorColumn: "reported_by",
+    searchColumns: ["date_label", "reported_by"],
+    displayFields: [TEXT("date_label", "Date"), TEXT("reported_by", "By")],
+    // Received, issued and stock are three jsonb maps answered as one block.
+    // Editing one figure here without the other two would leave a day whose
+    // stock contradicts its own arithmetic, so a correction is re-filed on the
+    // bot instead, where it upserts the whole day.
+    editableKeys: [],
+  },
+  store_count: {
+    table: "store_counts",
+    label: "Store count",
+    icon: "🧰",
+    dateColumn: "date",
+    authorColumn: "counted_by",
+    searchColumns: ["date_label", "counted_by"],
+    displayFields: [TEXT("date_label", "Date"), TEXT("counted_by", "By")],
+    // 132 quantities in one jsonb map; the same argument as above.
+    editableKeys: [],
   },
   whiteness: {
     table: "whiteness_checks",

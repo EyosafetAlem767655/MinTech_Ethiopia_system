@@ -4,6 +4,7 @@ import { reconcileBags } from "@/lib/stock-reconciliation";
 import { alarmingCustomers, creditFigures } from "@/lib/credit";
 import { productLabel } from "@/lib/products";
 import { bandLabel, belowSpec, specFor } from "@/lib/whiteness-spec";
+import { STALE_DAYS, groupStatuses, recentCounts } from "@/lib/store-inventory";
 
 /**
  * All dashboard numbers. Previously 10 MongoDB aggregation pipelines; now SQL.
@@ -616,6 +617,34 @@ export async function detectExceptions(
   } catch (e) {
     // whiteness_checks arrives in 0022. Its absence may not cost the rest.
     console.warn("detectExceptions: whiteness spec check unavailable", e);
+  }
+
+  // 2d. A shelf in the spare-parts store has not been counted.
+  //
+  //     The count is weekly, and the managers asked for every item to be
+  //     reported. A group nobody has been to is not visible anywhere else: the
+  //     panel shows its last figures exactly as if they were current.
+  try {
+    const stale = groupStatuses(await recentCounts(), now).filter((g) => g.stale);
+    if (stale.length > 0) {
+      const never = stale.filter((g) => g.daysSince === null);
+      const overdue = stale.filter((g) => g.daysSince !== null);
+      if (overdue.length > 0) {
+        exceptions.push(
+          `Store inventory: ${overdue.map((g) => `${g.label} (${g.daysSince}d)`).join(", ")} ` +
+            `not counted in over ${STALE_DAYS} days.`
+        );
+      }
+      if (never.length > 0) {
+        exceptions.push(
+          `Store inventory: ${never.map((g) => g.label).join(", ")} ` +
+            `${never.length === 1 ? "has" : "have"} never been counted.`
+        );
+      }
+    }
+  } catch (e) {
+    // store_counts arrives in 0034.
+    console.warn("detectExceptions: store inventory unavailable", e);
   }
 
   // 3. The bag stock on the floor disagrees with the vouchers.
