@@ -7,16 +7,19 @@ import {
   analyseToolPhoto,
   checkReceiptQRCode,
   classifyIngestion,
-  extractVoucherGemini,
   extractReceiptGemini,
   extractSalesInvoice,
   verifyRequestLegitimacy,
   type GeminiReceipt,
   type IngestionExtraction,
 } from "@/lib/llm";
-import { buildCalendar, parseCalendarCallback, type CalendarSelection } from "@/lib/calendar";
 import {
-  applyVoucherExtraction,
+  buildCalendar,
+  buildMonthPicker,
+  parseCalendarCallback,
+  type CalendarSelection,
+} from "@/lib/calendar";
+import {
   assetPreview,
   findStep,
   firstStep,
@@ -39,14 +42,12 @@ import {
 } from "@/lib/asset-flows";
 import { parseProductionPaste } from "@/lib/production-paste";
 import { parseFinancePaste } from "@/lib/finance-paste";
-import { backgroundPurchaseReceiptCheck } from "@/lib/finance-receipts";
 import { logError } from "@/lib/errors";
 import { insertRow } from "@/lib/insert";
 import { runAfter } from "@/lib/after";
 import { whitenessAlert } from "@/lib/whiteness-alert";
-import { seedStoreDraft } from "@/lib/store-inventory";
 import { parseRawMaterialPaste } from "@/lib/raw-material-paste";
-import { countChanges, parseStoreCountPaste } from "@/lib/store-count-paste";
+import { parseStoreCountPaste } from "@/lib/store-count-paste";
 import { applySalesExtraction, parseSalesPaste, salesMissing } from "@/lib/sales-invoice";
 import { applyFlowEdit, describeFlowChanges, editableFields, renderFieldList } from "@/lib/flow-edit";
 import { dailyHeartbeat } from "@/lib/heartbeat";
@@ -678,21 +679,6 @@ async function saveCapture(session: any, user: any): Promise<{ reply: string; re
     return { reply: `✅ የቀኑ ሪፖርት ተቀምጧል${photoNote}። አመሰግናለሁ!`, ref: { table: "daily_reports", id: row.id } };
   }
 
-  if (capture.capKey === "materials") {
-    const row = await insertRow(
-      "material_counts",
-      {
-        user_id: user._id,
-        counted_by: user.fullName,
-        date_key: eatDateKey(),
-        raw_text: text,
-        tg_file_ids: photoFileIds,
-      },
-      { optional: ["tg_file_ids"], source: "telegram-webhook" }
-    );
-    return { reply: `📦 የዕቃ ቆጠራ ተቀምጧል። አመሰግናለሁ!`, ref: { table: "material_counts", id: row.id } };
-  }
-
   if (capture.capKey === "hr") {
     const kind = (capture.hrKind || "customer_contact") as HrKind;
     const row = await insertRow(
@@ -946,6 +932,25 @@ async function handleCalendarCallback(
     return;
   }
 
+  // The month picker. Its answer goes against the CURRENT step rather than a
+  // fixed key: a flow may one day ask for two months, and a hardcoded
+  // `draft.month` would silently overwrite the first with the second.
+  if (cal.year) {
+    await answerCallbackQuery(callbackId, "");
+    await sendMessage(chatId, "📅 ወሩን ይምረጡ።", {
+      reply_markup: buildMonthPicker(state.kind, cal.year, String(state.draft[state.step] || "")),
+    });
+    return;
+  }
+
+  if (cal.pickedMonth) {
+    const step = findStep(state.kind, state.step, state.draft);
+    state.draft[step?.type === "month" ? state.step : "month"] = cal.pickedMonth;
+    await answerCallbackQuery(callbackId, `📅 ${cal.pickedMonth}`);
+    await advanceAsset(session, chatId, state);
+    return;
+  }
+
   state.draft.date = cal.date!;
   await answerCallbackQuery(callbackId, `📅 ${cal.date}`);
   await advanceAsset(session, chatId, state);
@@ -987,6 +992,12 @@ async function askAssetStep(chatId: string, state: AssetFlowState): Promise<void
     });
     return;
   }
+  if (step.type === "month") {
+    await sendMessage(chatId, step.prompt, {
+      reply_markup: buildMonthPicker(state.kind, undefined, String(state.draft[step.id] || "")),
+    });
+    return;
+  }
   if (step.type === "choice") {
     await sendMessage(chatId, step.prompt, { reply_markup: choiceKeyboard(step) });
     return;
@@ -1005,91 +1016,6 @@ async function askAssetStep(chatId: string, state: AssetFlowState): Promise<void
   }
   const hint = step.skippable ? '\n<i>ከሌለ "-" ይላኩ።</i>' : "";
   await sendMessage(chatId, step.prompt + hint, { reply_markup: CHANGE_CANCEL_KEYBOARD });
-}
-
-/**
- * Read a voucher off its photos, then resume the flow.
- *
- * This is the one place an AI call sits between a message and its reply, so it is
- * fenced on three sides:
- *
- *  - `extractVoucherGemini` is bounded by RECEIPT_BUDGET_MS inside
- *    `geminiGenerate`, the same ceiling `analyseToolPhoto` runs under a few lines
- *    above. The webhook still answers well inside the function limit.
- *  - Every failure — no bytes, a dead provider, unparseable JSON, an exception —
- *    lands in the same place: the flow carries on and asks every question by
- *    hand. A slow provider can cost the reporter time, never their report.
- *  - Nothing is saved here. What the model read becomes a draft the reporter
- *    corrects on the review card, marked so an invented figure is visible.
- */
-async function extractVoucherIntoDraft(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  session: any,
-  chatId: string,
-  state: AssetFlowState
-): Promise<void> {
-  const fileIds = (state.photoFileIds || []).slice(0, MAX_FLOW_PHOTOS);
-  await sendMessage(chatId, "🔎 ፎቶዎቹን እያነበብኩ ነው…");
-
-  let record: VoucherExtractionRecord = {
-    checked: false,
-    confidence: 0,
-    notes: "",
-    unmatched: [],
-    filled: [],
-    error: "no photo could be read back",
-  };
-
-  try {
-    const images: { base64: string; contentType: string }[] = [];
-    for (const id of fileIds) {
-      const bytes = await getPhotoBase64(id).catch(() => null);
-      if (bytes) images.push(bytes);
-    }
-    if (images.length > 0) {
-      const read = await extractVoucherGemini(state.kind === "grv" ? "grv" : "siv", images);
-      if (read.ok) {
-        const { filled } = applyVoucherExtraction(state.draft, read.data);
-        record = {
-          checked: true,
-          confidence: read.data.confidence,
-          notes: read.data.notes,
-          unmatched: read.data.unmatched,
-          filled,
-        };
-      } else {
-        record = { ...record, error: read.error };
-      }
-    }
-  } catch (e) {
-    console.error("extractVoucherIntoDraft failed:", e);
-    record = { ...record, error: e instanceof Error ? e.message : String(e) };
-  }
-
-  state.extraction = record;
-  // Resume at the first field the model missed rather than re-asking what it
-  // already answered — the same resume the paste branch performs.
-  state.step = firstUnanswered(state.kind, state.draft);
-  session.assetFlow = { ...state };
-  await persist(session);
-
-  if (record.checked) {
-    await sendMessage(
-      chatId,
-      `✅ ${record.filled.length} መስክ ከፎቶው ተነብቧል (እርግጠኝነት ${record.confidence}%)።` +
-        (record.unmatched.length > 0
-          ? `\n⚠️ እነዚህ መስመሮች አልታወቁም፦\n${record.unmatched
-              .slice(0, 5)
-              .map((u) => `• ${escapeHtml(u)}`)
-              .join("\n")}`
-          : "") +
-        `\n<i>የቀሩት በጥያቄ ይጠየቃሉ። በመጨረሻ ሁሉንም አርመው ያረጋግጣሉ።</i>`
-    );
-  } else {
-    await sendMessage(chatId, "ℹ️ ፎቶውን ማንበብ አልተቻለም። በደረጃ በደረጃ እናስገባለን።");
-  }
-
-  await askAssetStep(chatId, state);
 }
 
 /**
@@ -1535,14 +1461,6 @@ export async function POST(req: NextRequest) {
           // ask whether THIS photo holds THIS many of THIS bag.
           const ppPiles = state.kind === "pp_bag_damage" ? damagePiles(state.draft, state.photoByStep || {}) : [];
           const ppReason = String(state.draft.reason || "");
-          // The GRV's receipt is read after the reply too, for the same reason.
-          // Its photos were already read for the line items, but the typed total
-          // still has to be checked against the printed one, and that check is
-          // not worth blocking a reply on.
-          const receiptFlow = state.kind === "grv";
-          const receiptPhotos = receiptFlow ? state.photoFileIds || [] : [];
-          const receiptTotal = Number(state.draft.totalAmount) || 0;
-          const receiptCurrency = String(state.draft.currency || "ETB");
           session.state = "idle";
           session.assetFlow = undefined;
           await persist(session);
@@ -1556,9 +1474,7 @@ export async function POST(req: NextRequest) {
           await sendMessage(
             chatId,
             `✅ ${title} ተመዝግቧል።\n📤 በዳሽቦርዱ ላይ ይታያል።` +
-              (ppPiles.length + receiptPhotos.length > 0
-                ? "\n🔎 ፎቶዎቹ በጀርባ በኩል እየተጣሩ ነው።"
-                : "")
+              (ppPiles.length > 0 ? "\n🔎 ፎቶዎቹ በጀርባ በኩል እየተጣሩ ነው።" : "")
           );
 
           // A whiteness check under its product's band is worth waking people
@@ -1576,18 +1492,6 @@ export async function POST(req: NextRequest) {
               reason: ppReason,
               chatId,
             });
-          }
-          if (receiptPhotos.length > 0) {
-            const note = await backgroundPurchaseReceiptCheck({
-              table: "goods_receiving_vouchers",
-              id: saved.id,
-              fileIds: receiptPhotos,
-              enteredTotal: receiptTotal,
-              currency: receiptCurrency,
-            });
-            // Silence means the receipt agreed with what was typed. Only a
-            // disagreement, or a check that could not run, is worth a message.
-            if (note) await sendMessage(chatId, note).catch(() => {});
           }
           await sendReportMenu(chatId, userCapabilities(user).map((c) => c.button));
           return NextResponse.json({ ok: true });
@@ -1716,25 +1620,16 @@ export async function POST(req: NextRequest) {
         }
 
         if (normText === NORM_PHOTOS_DONE) {
-          // Only a step marked `required` insists on a photo. The GRV does,
-          // because the receipt is the evidence behind every figure on it; the
-          // store issue voucher does not, because it is often filled at a bench
-          // with no camera and the user asked for "image OR one-by-one input".
+          // Only a step marked `required` insists on a photo. Neither voucher
+          // collects one any more — both are typed — so this now guards the
+          // sales report alone.
           if (collected.length === 0 && step.required) {
             await sendMessage(chatId, "🧾 የቫውቸሩን/ደረሰኙን ፎቶ ቢያንስ አንድ ያስፈልጋል።", {
               reply_markup: photosKeyboard,
             });
             return NextResponse.json({ ok: true });
           }
-          // The GRV only: a supplier's voucher IS the source, so reading it saves
-          // transcribing someone else's document. The store issue voucher is
-          // typed first and its photo checked afterwards — the person filling it
-          // in is standing at the shelf and already knows what they took.
-          if (state.kind === "grv" && collected.length > 0) {
-            await extractVoucherIntoDraft(session, chatId, state);
-            return NextResponse.json({ ok: true });
-          }
-          // A sale, read the same way: the receipts are the source, and what
+          // A sale is the one flow whose photos are still read: the receipts are the source, and what
           // they do not answer is asked for in one block afterwards.
           if (state.kind === "sales_invoice" && collected.length > 0) {
             await extractSalesIntoDraft(session, chatId, state);
@@ -1789,12 +1684,10 @@ export async function POST(req: NextRequest) {
         const block = state.kind === "store_count" ? storeBlockOfStep(step.id) : null;
         if (block) {
           const blockName = step.label || block;
+          // Nothing counted in this block. The same outcome as sending it back
+          // with every line blank — no figure is recorded and every item keeps
+          // what it had — so it needs no state of its own, just a way past.
           if (isAssetSkip(val)) {
-            // Not counted today. Recorded as skipped rather than as a block of
-            // zeroes: the figures still sitting in the draft are last count's,
-            // and writing them would claim a count nobody took.
-            state.skippedBlocks = [...(state.skippedBlocks ?? []).filter((b) => b !== block), block];
-            state.changedBlocks = { ...(state.changedBlocks ?? {}), [block]: 0 };
             await sendMessage(chatId, `⏭ ${escapeHtml(blockName)} — አልተቆጠረም።`);
             await advanceAsset(session, chatId, state);
             return NextResponse.json({ ok: true });
@@ -1802,23 +1695,19 @@ export async function POST(req: NextRequest) {
 
           const parsed = parseStoreCountPaste(block, val);
           const readCount = Object.keys(parsed.values).length;
-          if (readCount === 0) {
-            await sendMessage(
-              chatId,
-              '⚠️ ከቅጂው ምንም ማንበብ አልተቻለም። እባክዎ የተላከውን ቅጂ ሞልተው ይመልሱት፣ ወይም ካልቆጠሩ "-" ይላኩ።',
-              { reply_markup: CHANGE_CANCEL_KEYBOARD }
-            );
+          const blockProblems = [...parsed.invalid, ...parsed.unknown].slice(0, 6);
+
+          // A block with no figures at all is NOT an error — it is the honest
+          // answer "I did not count any of this". It only needs saying out loud
+          // when some lines could not be read, which is a different thing.
+          if (readCount === 0 && blockProblems.length === 0) {
+            await sendMessage(chatId, `⏭ ${escapeHtml(blockName)} — ምንም ቁጥር አልገባም። አልተቆጠረም።`);
+            await advanceAsset(session, chatId, state);
             return NextResponse.json({ ok: true });
           }
 
-          // Counted BEFORE the draft is overwritten — after the merge there is
-          // nothing left to compare against.
-          const { changed } = countChanges(state.draft, parsed.values);
           Object.assign(state.draft, parsed.values);
-          state.skippedBlocks = (state.skippedBlocks ?? []).filter((b) => b !== block);
-          state.changedBlocks = { ...(state.changedBlocks ?? {}), [block]: changed };
 
-          const blockProblems = [...parsed.invalid, ...parsed.unknown].slice(0, 6);
           if (blockProblems.length > 0) {
             await sendMessage(
               chatId,
@@ -1829,8 +1718,8 @@ export async function POST(req: NextRequest) {
 
           await sendMessage(
             chatId,
-            `✅ ${escapeHtml(blockName)} — ${readCount} ዕቃ ተነብቧል` +
-              (changed > 0 ? ` · <b>${changed} ተቀይሯል</b>።` : " · ምንም አልተቀየረም።")
+            `✅ ${escapeHtml(blockName)} — <b>${readCount}</b> ዕቃ ተቆጥሯል። ` +
+              "<i>ያልተሞሉት እንደነበሩ ይቀራሉ።</i>"
           );
           await advanceAsset(session, chatId, state);
           return NextResponse.json({ ok: true });
@@ -2006,11 +1895,7 @@ export async function POST(req: NextRequest) {
       if (cap.captureMode === "asset_entry") {
         const kind = ASSET_FLOW_BY_CAP[cap.key];
         if (kind) {
-          // The store count starts from the last one, so its blocks arrive
-          // carrying figures to edit rather than 132 blank lines. Read once,
-          // here, so pasteTemplate stays synchronous for every flow.
-          const draft = kind === "store_count" ? await seedStoreDraft() : {};
-          const state: AssetFlowState = { kind, step: firstStep(kind), draft };
+          const state: AssetFlowState = { kind, step: firstStep(kind), draft: {} };
           session.state = "asset_entry";
           session.draft = undefined;
           session.capture = undefined;

@@ -197,10 +197,16 @@ function VoucherCard({ v, items, isGrv }: { v: Voucher; items: Item[]; isGrv: bo
             {isGrv ? "📥" : "📤"} No. {v.voucherNo || "—"}
           </p>
           <p className="text-[11px] text-stone-500">
-            {fmtDate(v.date)} ·{" "}
-            {isGrv
-              ? v.supplier || "no supplier"
-              : `${v.issuedTo || "—"}${v.departmentSection ? ` · ${v.departmentSection}` : ""}`}
+            {/* The store issue voucher stopped asking who it was issued to;
+                the department is what it is read by now. An older voucher
+                still has both, so both are shown when both are there, and a
+                field that is empty is left out rather than printed as a dash. */}
+            {[
+              fmtDate(v.date),
+              ...(isGrv ? [v.supplier] : [v.departmentSection, v.issuedTo]),
+            ]
+              .filter(Boolean)
+              .join(" · ")}
           </p>
         </div>
         {isGrv && (

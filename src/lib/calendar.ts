@@ -8,6 +8,8 @@
  * Callback data is deliberately terse — Telegram caps callback_data at 64 bytes:
  *   cal:<flow>:d:<YYYY-MM-DD>   a day was chosen
  *   cal:<flow>:m:<YYYY-MM>      navigate to another month
+ *   cal:<flow>:M:<YYYY-MM>      a MONTH was chosen (the month picker)
+ *   cal:<flow>:y:<YYYY>         navigate to another year (the month picker)
  *   cal:<flow>:x                ignore (spacers and the header)
  */
 
@@ -19,6 +21,10 @@ export interface CalendarSelection {
   date?: string;
   /** "YYYY-MM" when the user paged to another month. */
   month?: string;
+  /** "YYYY-MM" when a whole month was chosen, on the month picker. */
+  pickedMonth?: string;
+  /** "YYYY" when the user paged to another year, on the month picker. */
+  year?: string;
   /** True for the inert spacer buttons. */
   ignore?: boolean;
 }
@@ -35,6 +41,8 @@ export function parseCalendarCallback(data: string): CalendarSelection | null {
   if (!flow || !kind) return null;
   if (kind === "d" && /^\d{4}-\d{2}-\d{2}$/.test(value || "")) return { flow, date: value };
   if (kind === "m" && /^\d{4}-\d{2}$/.test(value || "")) return { flow, month: value };
+  if (kind === "M" && /^\d{4}-\d{2}$/.test(value || "")) return { flow, pickedMonth: value };
+  if (kind === "y" && /^\d{4}$/.test(value || "")) return { flow, year: value };
   return { flow, ignore: true };
 }
 
@@ -100,5 +108,43 @@ export function buildCalendar(flow: string, month?: string, selected?: string, n
   // A one-tap shortcut for the overwhelmingly common case.
   rows.push([{ text: "📅 ዛሬ", callback_data: `cal:${flow}:d:${today}` }]);
 
+  return { inline_keyboard: rows };
+}
+
+/** "YYYY-MM" for the current month in EAT. */
+export function eatMonth(now = new Date()): string {
+  return eatToday(now).slice(0, 7);
+}
+
+/**
+ * A twelve-month grid, for a report that belongs to a MONTH rather than a day.
+ *
+ * The monthly opening balance always wrote the month after the current one,
+ * which is right on the day it is normally filed and wrong every other time —
+ * filed late it landed on the wrong month, and there was no way to say so from
+ * the bot. The same callback envelope as the date picker, so one handler and
+ * one set of rules covers both.
+ */
+export function buildMonthPicker(flow: string, year?: string, selected?: string, now = new Date()) {
+  const thisMonth = eatMonth(now);
+  const y = Number(year || (selected || thisMonth).slice(0, 4));
+
+  const cell = (i: number) => {
+    const value = `${y}-${String(i + 1).padStart(2, "0")}`;
+    const name = MONTH_NAMES[i].slice(0, 3);
+    const label = value === selected ? `✅${name}` : value === thisMonth ? `•${name}•` : name;
+    return { text: label, callback_data: `cal:${flow}:M:${value}` };
+  };
+
+  const rows: { text: string; callback_data: string }[][] = [
+    [
+      { text: "‹", callback_data: `cal:${flow}:y:${y - 1}` },
+      { text: String(y), callback_data: `cal:${flow}:x` },
+      { text: "›", callback_data: `cal:${flow}:y:${y + 1}` },
+    ],
+  ];
+  for (let row = 0; row < 4; row++) {
+    rows.push([0, 1, 2].map((col) => cell(row * 3 + col)));
+  }
   return { inline_keyboard: rows };
 }

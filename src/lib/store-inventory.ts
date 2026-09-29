@@ -1,6 +1,5 @@
 import sql from "@/lib/sql";
 import { STORE_GROUPS, STORE_ITEM_BY_KEY, type StoreItem } from "@/lib/store-items";
-import { itemKey } from "@/lib/store-count-paste";
 
 /**
  * What is on the shelf, worked out from the counts rather than stored.
@@ -119,23 +118,6 @@ export function groupStatuses(counts: CountRow[], now = new Date()): GroupStatus
       stale: daysSince === null || daysSince > STALE_DAYS,
     };
   });
-}
-
-/**
- * The draft a new count starts from: every item at its last known figure.
- *
- * This is what pre-fills the paste blocks, so the storekeeper edits what moved
- * instead of retyping 132 lines. An item never counted is left OUT rather than
- * seeded with 0 — a zero nobody has ever verified would be indistinguishable
- * from a shelf that was checked and found empty.
- */
-export async function seedStoreDraft(): Promise<Record<string, string | number>> {
-  const counts = await recentCounts();
-  const draft: Record<string, string | number> = {};
-  for (const s of itemStatuses(counts)) {
-    if (s.qty !== null) draft[itemKey(s.item.key)] = s.qty;
-  }
-  return draft;
 }
 
 /** Days since anything at all was counted, or null if nothing ever was. */

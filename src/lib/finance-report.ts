@@ -182,6 +182,7 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
     bagsFromGrv,
     issuedFromSiv,
     dailyRaw,
+    bagsUsed,
   ] =
     await Promise.all([
     sql<{ products: Record<string, number>; raw_materials: Record<string, number>; bags: Record<string, number> }[]>`
@@ -244,6 +245,14 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
     // material names, so nothing is rolled up on the way in.
     sql<{ received: Record<string, number>; issued: Record<string, number> }[]>`
       select received, issued from raw_material_daily where date >= ${start} and date < ${end}
+    `.catch(() => []),
+    // Bags used, per kind, off the daily PP bag usage report. See usesSivBags.
+    sql<{ ledger_key: string; qty: string }[]>`
+      select i.ledger_key, sum(i.quantity) as qty
+        from pp_bag_usage_items i
+        join pp_bag_usage u on u.id = i.usage_id
+       where u.date >= ${start} and u.date < ${end}
+       group by i.ledger_key
     `.catch(() => []),
   ]);
 
@@ -312,6 +321,23 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
     ? sumMaps(dailyRaw.map((r) => ({ m: r.issued || {} })))
     : rollUpMaterials(sumMaps(issuedLegacy.map((r) => ({ m: r.m }))));
   const issuedBags: Record<string, number> = Object.fromEntries(BAG_KIND_KEYS.map((k) => [k, 0]));
+
+  /**
+   * ONE SOURCE FOR BAGS ISSUED, as in stock-reconciliation.ts.
+   *
+   * The store issue voucher no longer classifies its lines, so bags leaving are
+   * recorded per kind only by the daily PP bag usage report. A month that still
+   * has classified voucher lines keeps using them and reproduces exactly what
+   * it was signed off with; every month after the change reads the usage
+   * report. The two are never added together.
+   */
+  const usesSivBags = issuedFromSiv.some((r) => r.ledger_kind === "bag");
+  if (!usesSivBags) {
+    for (const row of bagsUsed) {
+      if (row.ledger_key in issuedBags) issuedBags[row.ledger_key] += n(row.qty);
+    }
+  }
+
   for (const row of issuedFromSiv) {
     const qtyIssued = n(row.qty);
     if (row.ledger_kind === "bag") {

@@ -155,6 +155,10 @@ export const SUBMISSIONS: Record<SubmissionCollection, SubmissionSpec> = {
     editableKeys: ["text"],
     photosColumn: "photo_file_ids",
   },
+  // RETIRED. The 📦 የዕቃ ቆጠራ button that wrote this table is gone — the guided
+  // 🧰 የመጋዘን ዕቃዎች ቆጠራ counts the store properly now, item by item. The entry
+  // stays because the rows do: they are somebody's work, and they have to
+  // remain readable and deletable here.
   materials: {
     table: "material_counts",
     label: "Material count",

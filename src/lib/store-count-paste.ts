@@ -12,13 +12,15 @@ import {
  * 132 items is 132 messages if asked one at a time, so the bot sends three
  * blocks — the same three lists the managers wrote — and reads them back.
  *
- * Each block is PRE-FILLED with the last count, because the alternative is
- * retyping 132 figures every week and the figures that actually move in a week
- * are a handful. The cost of that choice is a figure nobody recounted being
- * sent back unchanged, so three things push against it: the header says when
- * the group was last counted, the review card says how many lines CHANGED, and
- * the panel marks an item whose figure has not moved in a long time. None of
- * them prevents it; all three make it visible.
+ * THE BLOCK IS A LIST, NOT A FORM TO COMPLETE. Nothing is pre-filled and no
+ * line has to be answered: a line with no number means no change, and only a
+ * number actually typed is recorded. Some of these parts turn over monthly and
+ * some in days, so a sheet that demanded all 132 figures every week would be
+ * filled in by carrying old numbers forward — and then every item would look
+ * freshly counted, which is worse than knowing that half of them were not.
+ *
+ * A typed `0` still means none left. Blank and zero are different answers here
+ * and are kept apart everywhere.
  *
  * Group headers switch context and are load-bearing: the list repeats names
  * across groups (16A is a breaker and a single-phase breaker, 13-18A is an
@@ -45,27 +47,30 @@ export function storeKeyOf(draftKey: string): string | null {
 const header = (label: string) => `--- ${label} ---`;
 
 /**
- * One block, ready to be copied back with the numbers edited.
+ * How an item is written on a template line.
  *
- * `draft` carries the seeded figures from the last count. An item with no
- * previous figure is left blank rather than filled with 0: nobody has ever
- * counted it, and a 0 would claim they had.
+ * The unit goes BEFORE the `=`, as part of the name, for anything not counted
+ * in pieces — a litre figure typed as a drum count is the one mistake this list
+ * invites. It used to trail the value instead (`Gas OIL=  (l)`), which meant a
+ * line left blank was not empty at all: it fell through to the number parser
+ * and came back reported as unreadable. Nothing follows the `=` now, so a blank
+ * line is unambiguously blank.
  */
-export function storeBlockTemplate(
-  block: StoreBlockKey,
-  draft: Record<string, string | number> = {}
-): string {
+export function templateName(item: { name: string; unit: string }): string {
+  return item.unit === "pcs" ? item.name : `${item.name} (${item.unit})`;
+}
+
+/**
+ * One block, to be copied back with the counted figures filled in.
+ *
+ * Every line is empty. There is nothing to edit and nothing to delete: type a
+ * number against what you counted, leave the rest alone.
+ */
+export function storeBlockTemplate(block: StoreBlockKey): string {
   const lines: string[] = [];
   for (const group of groupsOfBlock(block)) {
     lines.push(header(group.label));
-    for (const item of itemsOfGroup(group.key)) {
-      const v = draft[itemKey(item.key)];
-      const shown = v === undefined || v === "" ? "" : String(v);
-      // The unit is on the line for anything not counted in pieces — a litre
-      // figure typed as a drum count is the one mistake this list invites.
-      const unit = item.unit === "pcs" ? "" : `  (${item.unit})`;
-      lines.push(`${item.name}=${shown}${unit}`);
-    }
+    for (const item of itemsOfGroup(group.key)) lines.push(`${templateName(item)}=`);
   }
   return lines.join("\n");
 }
@@ -82,6 +87,9 @@ const BY_GROUP: Map<string, Map<string, string>> = (() => {
     const names = new Map<string, string>();
     for (const item of itemsOfGroup(group)) {
       names.set(norm(item.name), item.key);
+      // With and without the unit, because the template writes one and a person
+      // typing from memory writes the other.
+      names.set(norm(templateName(item)), item.key);
       // The stored key is accepted too, so a figure copied off the dashboard
       // pastes back in without being rewritten by hand.
       names.set(norm(item.key), item.key);
@@ -136,8 +144,8 @@ function splitPair(line: string): [string, string] | null {
 }
 
 function parseNumber(raw: string): number | null {
-  // The template writes the unit after the figure on non-pcs lines, and it
-  // comes back with it. Strip a trailing "(l)" / "(m)" / "pcs" before reading.
+  // A unit typed alongside the figure is tolerated ("200 l", "4 pcs"): the
+  // template does not put one there any more, but people write them.
   const cleaned = raw
     .replace(/\((?:pcs|l|m)\)/gi, "")
     .replace(/\b(pcs|ltr|lt|l|m)\b/gi, "")
@@ -161,8 +169,10 @@ export interface ParsedStoreCount {
 /**
  * Read one filled-in block.
  *
- * A blank line records 0: the template arrives carrying a figure, so clearing
- * one is a deliberate statement that there are none left.
+ * A BLANK LINE RECORDS NOTHING. It is not a zero and it is not an error: it is
+ * an item that was not counted this time, and it keeps whatever figure and
+ * whatever "last counted" date it already had. A typed 0 is a real count of
+ * none, and is recorded as one.
  *
  * A line whose name belongs to a DIFFERENT group than the header above it is
  * reported rather than matched — that is how a 16A breaker figure would end up
@@ -206,10 +216,8 @@ export function parseStoreCountPaste(block: StoreBlockKey, text: string): Parsed
       continue;
     }
 
-    if (!value.trim()) {
-      values[itemKey(key)] = 0;
-      continue;
-    }
+    // Not counted. Recorded nowhere, reported as nothing.
+    if (!value.trim()) continue;
 
     const qty = parseNumber(value);
     if (qty === null) invalid.push(line);
@@ -217,25 +225,4 @@ export function parseStoreCountPaste(block: StoreBlockKey, text: string): Parsed
   }
 
   return { values, unknown, invalid };
-}
-
-/**
- * How much of a block actually moved.
- *
- * The review card prints this, because a block sent back untouched is the one
- * failure mode of a pre-filled template and the reporter should see it said
- * out loud before they approve it.
- */
-export function countChanges(
-  before: Record<string, string | number>,
-  after: Record<string, number>
-): { changed: number; same: number } {
-  let changed = 0;
-  let same = 0;
-  for (const [k, v] of Object.entries(after)) {
-    const prev = before[k];
-    if (prev === undefined || Number(prev) !== v) changed++;
-    else same++;
-  }
-  return { changed, same };
 }

@@ -87,7 +87,7 @@ const n = (v: unknown) => Number(v) || 0;
 export async function reconcileBags(month = monthLabel()): Promise<ReconciliationResult> {
   const { start, end } = monthBounds(month);
 
-  const [base, grvLines, sivLines, latestCount] = await Promise.all([
+  const [base, grvLines, sivLines, usedLines, latestCount] = await Promise.all([
     sql<{ bags: Record<string, number> }[]>`
       select bags from monthly_base_balances where month = ${month}
     `.catch(() => []),
@@ -105,6 +105,14 @@ export async function reconcileBags(month = monthLabel()): Promise<Reconciliatio
         join store_issue_vouchers v on v.id = i.siv_id
        where v.date >= ${start} and v.date < ${end}
          and i.ledger_kind = 'bag' and i.ledger_key is not null
+       group by i.ledger_key
+    `.catch(() => []),
+    // The daily PP bag usage report, per kind. See usedLines below.
+    sql<{ ledger_key: string; qty: string }[]>`
+      select i.ledger_key, sum(i.quantity) as qty
+        from pp_bag_usage_items i
+        join pp_bag_usage u on u.id = i.usage_id
+       where u.date >= ${start} and u.date < ${end}
        group by i.ledger_key
     `.catch(() => []),
     // The most recent day production actually counted bags. Not "today": a
@@ -131,7 +139,21 @@ export async function reconcileBags(month = monthLabel()): Promise<Reconciliatio
   for (const row of grvLines) {
     if (row.ledger_key in received) received[row.ledger_key] += n(row.qty);
   }
-  for (const row of sivLines) {
+  /**
+   * ONE SOURCE FOR BAGS ISSUED, never two.
+   *
+   * The store issue voucher stopped asking which stock item a line is — the
+   * storekeeper types what left the shelf and nothing classifies it — so from
+   * here on the only per-kind record of bags LEAVING is the daily PP bag usage
+   * report, which has always collected exactly that.
+   *
+   * The old source still answers for the months it covers: if this month has
+   * any classified SIV lines, they are the month, exactly as before. Summing
+   * both would double every bag in every month where a voucher and a usage
+   * report describe the same sacks, which is every month up to now.
+   */
+  const issuedLines = sivLines.length > 0 ? sivLines : usedLines;
+  for (const row of issuedLines) {
     if (row.ledger_key in issued) issued[row.ledger_key] += n(row.qty);
   }
 

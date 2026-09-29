@@ -50,11 +50,12 @@ import { PURCHASE_DEPARTMENTS } from "@/lib/purchase-departments";
 import { rawMaterialTemplate, sectionMap } from "@/lib/raw-material-paste";
 import {
   STORE_BLOCKS,
+  STORE_ITEMS,
   itemsOfBlock,
   type StoreBlockKey,
 } from "@/lib/store-items";
 import { itemKey, storeBlockTemplate } from "@/lib/store-count-paste";
-import type { ToolPhotoCheck, VoucherRead } from "@/lib/llm";
+import type { ToolPhotoCheck } from "@/lib/llm";
 // Names and the kind union live in a client-safe module — see flow-titles.ts.
 import { FLOW_TITLE, type AssetFlowKind } from "@/lib/flow-titles";
 export { FLOW_TITLE };
@@ -97,16 +98,6 @@ export interface AssetFlowState {
   check?: ToolPhotoCheck;
   /** What the AI read off a voucher's photos, kept for the audit trail. */
   extraction?: VoucherExtractionRecord;
-  /**
-   * Store count only: blocks the counter explicitly skipped.
-   *
-   * Kept apart from the draft because the draft arrives PRE-FILLED with the
-   * last count — so a skipped block still holds figures, and without this the
-   * save could not tell a block somebody counted from one they left alone.
-   */
-  skippedBlocks?: StoreBlockKey[];
-  /** Store count only: how many lines of each block changed, for the card. */
-  changedBlocks?: Partial<Record<StoreBlockKey, number>>;
 }
 
 /**
@@ -147,9 +138,11 @@ export interface AssetStep {
   label?: string;
   /**
    * "photos" collects several and waits for a done button; "photo" takes one;
-   * "paste" sends a fill-in template and reads a whole block back at once.
+   * "paste" sends a fill-in template and reads a whole block back at once;
+   * "month" is the date picker with the days taken off, for a report that
+   * belongs to a month rather than a day.
    */
-  type: "date" | "text" | "number" | "choice" | "photo" | "photos" | "paste";
+  type: "date" | "month" | "text" | "number" | "choice" | "photo" | "photos" | "paste";
   choices?: { label: string; value: string }[];
   /** Skip the step unless this holds — used for the maintenance/new-item branch. */
   when?: (draft: Record<string, string | number>) => boolean;
@@ -205,12 +198,12 @@ const RAW_MATERIAL_STEPS: AssetStep[] = [
 /**
  * One paste step per block, each skippable.
  *
- * A count is routinely partial — the bearings today, the electrics on Thursday
- * — so a block that is not being counted is skipped rather than filled with
- * zeroes, and the figures it held last time stand until somebody counts it
- * again. `groups` on the saved row records which blocks this count actually
- * covered, which is what keeps "counted and found none" apart from "not
- * counted".
+ * A count is routinely partial in BOTH directions — the bearings today and the
+ * electrics on Thursday, and within a block only the shelves that moved. So the
+ * list arrives empty: a line with no number changes nothing, and an item keeps
+ * its figure and its "last counted" date until somebody actually counts it.
+ * `groups` on the saved row records which blocks this count covered, which is
+ * what keeps "counted and found none" (a stored 0) apart from "not counted".
  */
 const STORE_COUNT_STEPS: AssetStep[] = [
   { id: "date", prompt: "📅 የቆጠራውን ቀን ይምረጡ።", type: "date" },
@@ -218,9 +211,9 @@ const STORE_COUNT_STEPS: AssetStep[] = [
     id: storeBlockStep(b.key),
     label: b.label,
     prompt:
-      `${b.icon} <b>${b.label}</b> — የሚከተለውን ቅጂ ሞልተው ይመልሱት።\n\n` +
-      "<i>ቁጥሩ ያለው የመጨረሻው ቆጠራ ነው። የተቀየረውን ብቻ ያስተካክሉ።</i>\n" +
-      '<i>ይህን ክፍል ካልቆጠሩ "-" ይላኩ።</i>',
+      `${b.icon} <b>${b.label}</b> — የቆጠሩትን ብቻ ይሙሉ።\n\n` +
+      "<i>ያልቆጠሩትን ባዶ ይተዉት — ምንም አይቀየርም። ምንም ከሌለ 0 ይፃፉ።</i>\n" +
+      '<i>ይህን ክፍል ጨርሶ ካልቆጠሩ "-" ይላኩ።</i>',
     type: "paste",
     skippable: true,
   })),
@@ -483,6 +476,10 @@ const PRODUCTION_STEPS: AssetStep[] = [
  * colour went missing.
  */
 const BASE_BALANCE_STEPS: AssetStep[] = [
+  // Which month this balance OPENS. It used to be assumed — always the month
+  // after the current one — which is right on the day it is normally filed and
+  // wrong every other time, with no way to say so from the bot.
+  { id: "month", label: "Month", prompt: "📅 ይህ ሚዛን የየትኛው ወር መክፈቻ ነው?", type: "month" },
   {
     id: "paste",
     prompt: "📋 የሚከተለውን ቅጂ ሞልተው ይመልሱት።",
@@ -584,6 +581,23 @@ function voucherItemSteps(opts: {
    * asks: there the supplier's invoice IS the price.
    */
   askUnitCost: boolean;
+  /**
+   * Whether to ask for the printed Stock Code.
+   *
+   * False on both vouchers now. It was a second identifier for a line the
+   * description already names, skippable, and in practice always skipped — so
+   * it cost a question on every line and answered nothing.
+   */
+  askStockCode?: boolean;
+  /**
+   * Whether to ask which stock item a line is.
+   *
+   * GRV only. It is the sole record of PP bags ARRIVING, so the bag stock check
+   * and the finance bag rows are built on it. The store issue voucher no longer
+   * asks: bags LEAVING are already recorded per kind by the daily PP bag usage
+   * report, which is where the issued side now comes from.
+   */
+  askLedger: boolean;
 }): AssetStep[] {
   return Array.from({ length: MAX_VOUCHER_ITEMS }).flatMap<AssetStep>((_, idx) => {
     const i = idx + 1;
@@ -598,14 +612,18 @@ function voucherItemSteps(opts: {
         type: "text",
         when: asked,
       },
-      {
-        id: k.stockCode,
-        label: `ዕቃ ${i} · Stock Code`,
-        prompt: `🔖 ዕቃ ${i} — የStock Code ቁጥር ይፃፉ።`,
-        type: "text",
-        skippable: true,
-        when: asked,
-      },
+      ...(opts.askStockCode
+        ? [
+            {
+              id: k.stockCode,
+              label: `ዕቃ ${i} · Stock Code`,
+              prompt: `🔖 ዕቃ ${i} — የStock Code ቁጥር ይፃፉ።`,
+              type: "text" as const,
+              skippable: true,
+              when: asked,
+            },
+          ]
+        : []),
       {
         id: k.unit,
         prompt: `📏 ዕቃ ${i} — መለኪያውን (Unit) ይፃፉ — ለምሳሌ pcs, pak, kg።`,
@@ -633,26 +651,26 @@ function voucherItemSteps(opts: {
             },
           ]
         : []),
-      {
+      ...(!opts.askLedger ? [] : [{
         id: k.ledger,
         label: `ዕቃ ${i} · Stock item`,
         prompt:
           `📦 ዕቃ ${i} — ይህ ከየትኛው የክምችት ዕቃ ነው?\n` +
           `<i>የክምችት ሒሳብ የሚያዘው በዚህ መልስ ብቻ ነው።</i>`,
-        type: "choice",
+        type: "choice" as const,
         choices: ledgerStepChoices(opts.kinds),
-        when: (d) => suggestsStockItem(d, i),
+        when: (d: Record<string, string | number>) => suggestsStockItem(d, i),
       },
       {
         id: k.ledgerQty,
         label: `ዕቃ ${i} · Stock qty`,
         prompt: `🔢 ዕቃ ${i} — በክምችት አሃድ ስንት ነው? <i>(የተፃፈው Qty ተመሳሳይ ከሆነ እሱኑ ይፃፉ)</i>`,
-        type: "number",
-        when: (d) => {
+        type: "number" as const,
+        when: (d: Record<string, string | number>) => {
           const key = String(d[itemKeys(i).ledger] || "");
           return Boolean(key) && key !== LEDGER_NONE;
         },
-      },
+      }]),
     ];
 
     // No "add another?" after the last slot — there is nowhere left to go.
@@ -675,50 +693,33 @@ function voucherItemSteps(opts: {
 /* ── Goods Receiving Voucher (finance) ────────────────────────────────────── */
 
 /**
- * Everything bought and received, PP bags included.
+ * Everything bought and received, PP bags included. TYPED, like the SIV.
  *
- * The photos come SECOND, before any field is asked for, because the voucher
- * answers most of the questions itself. When the reporter presses "done" the
- * webhook reads the images and fills what it can; the flow then resumes at the
- * first field the model missed, exactly as a half-filled paste template does.
+ * It used to open with a camera: photograph the voucher, let the model read it,
+ * then correct what it got wrong. That is a good trade when the paper is dense
+ * and the reader is transcribing somebody else's document — and a bad one here,
+ * where it put an AI read between the reporter and a form they could simply
+ * fill in, and every figure then had to be checked anyway. What is typed is the
+ * record.
  *
- * Nothing below depends on the extraction succeeding — if the model is
- * unreachable, every step is simply asked by hand.
- *
- * Only bag kinds are offered for classification. Raw material arrives by truck
- * against a delivery note and is already recorded by the raw-material intake
- * form; letting a GRV line count as Dolomite received too would double the
- * month's tonnage with nothing to say which entry was the real one.
+ * One conditional question survives: which stock item a line is, asked only
+ * when the description mentions a bag. It is the ONLY record of PP bags
+ * arriving, and the bag stock check and the finance bag rows are built on it.
+ * Raw material is not offered — it arrives by truck against a delivery note and
+ * is already recorded by the daily raw-material report, and letting a GRV line
+ * count as Dolomite received too would double the month with nothing to say
+ * which entry was real.
  */
 const GRV_STEPS: AssetStep[] = [
   { id: "date", prompt: "📅 ዕቃው የገባበትን ቀን ይምረጡ።", type: "date" },
-  {
-    id: "photos",
-    prompt:
-      `🧾 የGoods Receiving Voucher እና የደረሰኙን ፎቶ ይላኩ — እስከ ${MAX_FLOW_PHOTOS} ፎቶ። ` +
-      `ከጨረሱ በኋላ "✅ ጨርሻለሁ" ይጫኑ።\n` +
-      `<i>ፎቶዎቹ ተነብበው ቅጹን በራሱ ይሞላል — እርስዎ አርመው ያረጋግጣሉ።</i>`,
-    type: "photos",
-    // The user asked for a receipt for confirmation, so this one cannot be
-    // skipped: the whole cross-check rests on there being paper behind a figure.
-    required: true,
-  },
   { id: "grvNo", prompt: "🔢 የቫውቸሩን ቁጥር (No.) ይፃፉ — ለምሳሌ 5516።", type: "text", skippable: true },
   { id: "supplier", prompt: "🏢 አቅራቢውን (Supplier) ይፃፉ።", type: "text", skippable: true },
-  {
-    id: "supplierInvoiceNo",
-    prompt: "📄 የአቅራቢውን የደረሰኝ ቁጥር (Supplier's Invoice No.) ይፃፉ።",
-    type: "text",
-    skippable: true,
-  },
-  { id: "purchaseOrderNo", prompt: "📋 የPurchase Order ቁጥር ይፃፉ።", type: "text", skippable: true },
-  {
-    id: "receivingStoreNo",
-    prompt: "🏬 የReceiving Store ቁጥር ይፃፉ።",
-    type: "text",
-    skippable: true,
-  },
-  ...voucherItemSteps({ kinds: ["bag"], costSkippable: false, askUnitCost: true }),
+  ...voucherItemSteps({
+    kinds: ["bag"],
+    costSkippable: false,
+    askUnitCost: true,
+    askLedger: true,
+  }),
   {
     id: "currency",
     prompt: "💱 በየትኛው ገንዘብ ተከፍሏል?",
@@ -729,59 +730,43 @@ const GRV_STEPS: AssetStep[] = [
     ],
   },
   { id: "totalAmount", prompt: "💰 የጠቅላላውን ዋጋ (Total amount) ይፃፉ።", type: "number" },
-  { id: "remarks", prompt: "📝 አስተያየት (Remarks) ካለ ይፃፉ።", type: "text", skippable: true },
-  { id: "preparedBy", prompt: "🧑 ያዘጋጀው (Prepared by) ማን ነው?", type: "text", skippable: true },
-  { id: "receivedBy", prompt: "🧑 የተረከበው (Received by) ማን ነው?", type: "text", skippable: true },
   { id: "approvedBy", prompt: "🧑 ያፀደቀው (Approved by) ማን ነው?", type: "text", skippable: true },
+  { id: "receivedBy", prompt: "🧑 የተረከበው (Received by) ማን ነው?", type: "text", skippable: true },
 ];
 
 /* ── Store Issue Voucher (asset management) ───────────────────────────────── */
 
 /**
- * Everything taken out of the warehouse.
+ * Everything taken out of the warehouse — exactly what the paper pad asks.
  *
- * TYPED ONLY — no photograph anywhere, unlike the GRV.
+ * Issuing store, issued-to, the requisition number, remarks and issued-by were
+ * all collected and none of them were wanted; the department is what anybody
+ * reads this by. Unit cost is not asked either: the store issues goods, finance
+ * prices them from the monthly price list, and a figure typed here could only
+ * be a second number to disagree with that one.
  *
- * On a goods receiving voucher the supplier's paper IS the source, and reading
- * it saves the reporter transcribing someone else's document. Here the person is
- * standing in the store with the items in front of them: they know what they
- * issued. A photo was collected at the end for a while and checked against the
- * entry, but it asked for a photograph to verify work nobody doubted, and it was
- * dropped. What is typed is the record.
- *
- * Unit cost is not asked either. The store issues goods, finance prices them,
- * and the monthly report values every issue from its own price list — a figure
- * typed here could only ever be a second number to disagree with that one.
- *
- * Both bag kinds and raw materials are offered, because this replaced the daily
- * raw-material issue and has to keep filling the Issue column of the monthly
- * report.
+ * Nor is the stock-item question. Bags LEAVING are recorded per kind by the
+ * daily PP bag usage report, which is where the monthly report and the bag
+ * stock check now take the issued side from.
  */
 const STORE_ISSUE_STEPS: AssetStep[] = [
   { id: "date", prompt: "📅 ዕቃው የወጣበትን ቀን ይምረጡ።", type: "date" },
   { id: "sivNo", prompt: "🔢 የቫውቸሩን ቁጥር (No.) ይፃፉ — ለምሳሌ 8610።", type: "text", skippable: true },
-  { id: "issuingStore", prompt: "🏬 የሚያወጣው መጋዘን (Issuing Store) የትኛው ነው?", type: "text", skippable: true },
-  { id: "issuedTo", prompt: "🧑 ለማን ተሰጠ (Issued To)?", type: "text" },
   {
     id: "departmentSection",
-    prompt: "🏷 ለየትኛው ክፍል (Department/Section) ነው?",
+    label: "Department",
+    prompt: "🏷 የትኛው ክፍል ነው የጠየቀው (Requesting Department)?",
     type: "text",
-    skippable: true,
   },
-  {
-    id: "requisitionNo",
-    prompt: "📋 የStore Requisition Note ቁጥር ይፃፉ።",
-    type: "text",
-    skippable: true,
-  },
-  ...voucherItemSteps({ kinds: ["bag", "material"], costSkippable: true, askUnitCost: false }),
-  { id: "remarks", prompt: "📝 አስተያየት (Remarks) ካለ ይፃፉ።", type: "text", skippable: true },
-  { id: "issuedBy", prompt: "🧑 ያወጣው (Issued by) ማን ነው?", type: "text", skippable: true },
+  ...voucherItemSteps({
+    kinds: [],
+    costSkippable: true,
+    askUnitCost: false,
+    askLedger: false,
+  }),
   { id: "approvedBy", prompt: "🧑 ያፀደቀው (Approved by) ማን ነው?", type: "text", skippable: true },
   { id: "receivedBy", prompt: "🧑 የተረከበው (Received by) ማን ነው?", type: "text", skippable: true },
-  // No photo step. It was collected last and checked against the entry, but the
-  // person filling this in is standing at the shelf and already knows what they
-  // took — it asked for a photograph to verify work nobody doubted.
+  // No photo step, and none of the fields the pad has that nobody fills in.
 ];
 
 /* ────────────────────────── Monthly price list (finance) ─────────────────── */
@@ -1171,7 +1156,7 @@ export function pasteTemplate(
   // depends on WHICH block is being asked for, not just the flow.
   if (kind === "store_count") {
     const block = storeBlockOfStep(step);
-    return block ? storeBlockTemplate(block, draft) : "";
+    return block ? storeBlockTemplate(block) : "";
   }
   return "";
 }
@@ -1382,70 +1367,6 @@ function jsonMap(draft: Record<string, string | number>, prefix: string, keys: r
   return out;
 }
 
-/* ────────────────────── Voucher extraction → draft ────────────────────────── */
-
-/**
- * Merge what the model read off a voucher into the draft.
- *
- * Only fields the reporter has not already answered are touched, and only values
- * actually present: a cell the model returned nothing for stays unanswered so
- * the flow asks about it, rather than being recorded as a confident zero. That
- * distinction is the safety property here — a quantity that was on the paper but
- * misread has to become a question, never a 0 nobody looked at.
- *
- * The ledger suggestion is written to a `_hint` key, NOT to the answer. It only
- * makes the bot ask "which stock item is this?"; the person's reply is the only
- * thing that ever sets a ledger key. A suggestion saved as an answer would put a
- * bag quantity into the month's stock on the model's say-so alone.
- *
- * Pure, so the merge is testable without a webhook or a provider.
- */
-export function applyVoucherExtraction(
-  draft: Record<string, string | number>,
-  read: VoucherRead
-): { filled: string[] } {
-  const filled: string[] = [];
-  const put = (key: string, value: string | number) => {
-    const existing = draft[key];
-    if (existing !== undefined && existing !== "") return;
-    draft[key] = value;
-    filled.push(key);
-  };
-
-  if (read.voucherNo) {
-    put("grvNo", read.voucherNo);
-    put("sivNo", read.voucherNo);
-  }
-  if (read.supplier) put("supplier", read.supplier);
-  if (read.supplierInvoiceNo) put("supplierInvoiceNo", read.supplierInvoiceNo);
-  if (read.purchaseOrderNo) put("purchaseOrderNo", read.purchaseOrderNo);
-  if (read.issuingStore) put("issuingStore", read.issuingStore);
-  if (read.issuedTo) put("issuedTo", read.issuedTo);
-  if (read.departmentSection) put("departmentSection", read.departmentSection);
-  if (read.requisitionNo) put("requisitionNo", read.requisitionNo);
-  if (read.remarks) put("remarks", read.remarks);
-  if (read.currency) put("currency", read.currency);
-  if (read.total > 0) put("totalAmount", read.total);
-
-  read.items.slice(0, MAX_VOUCHER_ITEMS).forEach((item, idx) => {
-    const i = idx + 1;
-    const k = itemKeys(i);
-    if (item.description) put(k.description, item.description);
-    if (item.stockCode) put(k.stockCode, item.stockCode);
-    if (item.unit) put(k.unit, item.unit);
-    if (item.quantity > 0) put(k.quantity, item.quantity);
-    if (item.unitCost > 0) put(k.unitCost, item.unitCost);
-    // A hint, never an answer — see the note above.
-    if (item.ledgerKey) put(`${k.ledger}_hint`, item.ledgerKey);
-    // The repeating block is gated on "add another?", so a voucher the model
-    // read four lines from has to answer that question for the first three or
-    // the flow stops after line one and silently drops the rest.
-    if (i < MAX_VOUCHER_ITEMS) put(k.more, idx + 1 < Math.min(read.items.length, MAX_VOUCHER_ITEMS) ? "yes" : "no");
-  });
-
-  return { filled };
-}
-
 /* ──────────────────────────────── Previews ────────────────────────────────── */
 
 const esc = (s: unknown) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -1479,22 +1400,27 @@ export function assetPreview(state: AssetFlowState): string {
   }
 
   if (state.kind === "store_count") {
-    // What was counted, and — the point of the card — how much of each block
-    // actually moved. A pre-filled block sent back untouched is the one way
-    // this report can lie, so it is stated before anybody approves it.
+    // What was counted, block by block. A block with nothing in it is named as
+    // NOT COUNTED rather than left off the card: "I did not get to the
+    // electrics" and "the electrics are all at zero" are different reports, and
+    // this is the last chance to notice which one is about to be filed.
+    const counted = (i: { key: string }) => {
+      const v = d[itemKey(i.key)];
+      return v !== undefined && v !== "";
+    };
     const lines = STORE_BLOCKS.map((b) => {
       const items = itemsOfBlock(b.key);
-      const filed = items.filter((i) => d[itemKey(i.key)] !== undefined && d[itemKey(i.key)] !== "");
-      if (state.skippedBlocks?.includes(b.key) || filed.length === 0) {
-        return `${b.icon} ${b.label}: <i>አልተቆጠረም</i>`;
-      }
-      const changed = state.changedBlocks?.[b.key] ?? 0;
-      return (
-        `${b.icon} ${b.label}: ${filed.length}/${items.length} ዕቃ` +
-        (changed > 0 ? ` · <b>${changed} ተቀይሯል</b>` : " · <i>ምንም አልተቀየረም</i>")
-      );
+      const filed = items.filter(counted);
+      return filed.length === 0
+        ? `${b.icon} ${b.label}: <i>አልተቆጠረም</i>`
+        : `${b.icon} ${b.label}: <b>${filed.length}</b>/${items.length} ዕቃ ተቆጥሯል`;
     }).join("\n");
-    return head + `📅 Date: ${esc(d.date)}\n\n${lines}\n`;
+    return (
+      head +
+      `📅 Date: ${esc(d.date)}\n\n${lines}\n\n` +
+      `🔢 ጠቅላላ: <b>${STORE_ITEMS.filter(counted).length}</b> ዕቃ\n` +
+      "<i>ያልተቆጠሩት ዕቃዎች የቀድሞ ቁጥራቸውን ይይዛሉ።</i>\n"
+    );
   }
 
   if (state.kind === "delivery") {
@@ -1665,62 +1591,78 @@ export function assetPreview(state: AssetFlowState): string {
 
   if (state.kind === "grv" || state.kind === "store_issue") {
     const isGrv = state.kind === "grv";
-    const ex = state.extraction;
-    const read = new Set(ex?.filled || []);
-    // Values the model supplied carry a marker. Everything on this card is about
-    // to be saved, and a figure nobody typed has to be visibly distinguishable
-    // from one somebody did — that is the whole reason the card exists.
-    const mark = (key: string) => (read.has(key) ? " 🤖" : "");
+
+    /* EVERY ANSWERED FIELD IS PRINTED. The card used to show six of them and
+       save twenty, so "approve" was given over data nobody had been shown —
+       which is the one thing a confirmation card exists to prevent. A field
+       with no value is left off rather than printed as a dash: a column of
+       em-dashes is what made the card unreadable enough to trim in the first
+       place. */
+    const line = (icon: string, label: string, value: unknown) => {
+      const text = esc(value as string);
+      return text ? `${icon} ${label}: <b>${text}</b>` : "";
+    };
 
     const items = voucherItems(d).map((it, i) => {
       const cost = it.unitCost ? ` × ${money(it.unitCost)}` : "";
       const ledger = it.ledgerKey
-        ? `
-     └ 📦 ${ledgerLabel(it.ledgerKind, it.ledgerKey)}: <b>${qty(it.ledgerQty)}</b> ${
+        ? `\n     └ 📦 ${ledgerLabel(it.ledgerKind, it.ledgerKey)}: <b>${qty(it.ledgerQty)}</b> ${
             it.ledgerKind === "bag" ? "ከረጢት" : "ቶን"
           }`
         : "";
+      const code = it.stockCode ? ` <i>[${esc(it.stockCode)}]</i>` : "";
       return (
-        `${i + 1}. ${esc(it.description)} — ${qty(it.quantity)} ${esc(it.unit) || "—"}${cost}` +
-        mark(itemKeys(i + 1).description) +
+        `${i + 1}. ${esc(it.description)}${code} — <b>${qty(it.quantity)}</b> ${esc(it.unit) || "—"}${cost}` +
         ledger
       );
     });
 
-    const photos = state.photoFileIds?.length || 0;
     const head = isGrv
       ? [
-          `📥 <b>የዕቃ ገቢ ቫውቸር (GRV)</b>`,
-          `🔢 No.: <b>${esc(d.grvNo) || "—"}</b>${mark("grvNo")}`,
-          `📅 ${esc(d.date)}`,
-          `🏢 አቅራቢ: <b>${esc(d.supplier) || "—"}</b>${mark("supplier")}`,
-          `📄 Invoice No.: <b>${esc(d.supplierInvoiceNo) || "—"}</b>${mark("supplierInvoiceNo")}`,
+          "📥 <b>የዕቃ ገቢ ቫውቸር (GRV)</b>",
+          line("🔢", "No.", d.grvNo),
+          line("📅", "ቀን", d.date),
+          line("🏢", "አቅራቢ", d.supplier),
         ]
       : [
-          `📤 <b>የመጋዘን ወጪ ቫውቸር (SIV)</b>`,
-          `🔢 No.: <b>${esc(d.sivNo) || "—"}</b>${mark("sivNo")}`,
-          `📅 ${esc(d.date)}`,
-          `🏬 መጋዘን: <b>${esc(d.issuingStore) || "—"}</b>${mark("issuingStore")}`,
-          `🧑 ለ: <b>${esc(d.issuedTo) || "—"}</b>${mark("issuedTo")}`,
-          `🏷 ክፍል: <b>${esc(d.departmentSection) || "—"}</b>${mark("departmentSection")}`,
+          "📤 <b>የመጋዘን ወጪ ቫውቸር (SIV)</b>",
+          line("🔢", "No.", d.sivNo),
+          line("📅", "ቀን", d.date),
+          line("🏷", "ክፍል", d.departmentSection),
         ];
 
     const tail = isGrv
       ? [
-          `💰 ጠቅላላ: <b>${money(Number(d.totalAmount) || 0)} ${esc(d.currency) || "ETB"}</b>${mark("totalAmount")}`,
-          `🧾 ፎቶ: <b>${photos}</b>`,
-          photos > 0 ? "<i>ደረሰኙ ከተመዘገበ በኋላ በAI ይመረመራል።</i>" : "",
+          `💰 ጠቅላላ: <b>${money(Number(d.totalAmount) || 0)} ${esc(d.currency) || "ETB"}</b>`,
+          line("🧑", "ያፀደቀው", d.approvedBy),
+          line("🧑", "የተረከበው", d.receivedBy),
         ]
-      : [`📷 ፎቶ: <b>${photos}</b>`];
+      : [line("🧑", "ያፀደቀው", d.approvedBy), line("🧑", "የተረከበው", d.receivedBy)];
+
+    // Historic drafts may still carry the fields neither voucher asks for any
+    // more. They are shown when present rather than dropped — a value that was
+    // collected and is about to be saved has to be on the card.
+    const legacy = [
+      line("🏬", "መጋዘን", d.issuingStore),
+      line("🧑", "ለ", d.issuedTo),
+      line("📄", "Invoice No.", d.supplierInvoiceNo),
+      line("📋", "P.O. No.", d.purchaseOrderNo),
+      line("🏬", "Receiving Store", d.receivingStoreNo),
+      line("📋", "Requisition No.", d.requisitionNo),
+      line("📝", "አስተያየት", d.remarks),
+      line("🧑", "ያዘጋጀው", d.preparedBy),
+      line("🧑", "ያወጣው", d.issuedBy),
+    ].filter(Boolean);
 
     // Lines with no confirmed stock item are named, not hidden. A voucher whose
     // bags were never classified simply does not move the stock balance, and the
     // reporter is the only person who can still fix that — after saving, nobody
     // is looking.
-    const unclassified = voucherItems(d).filter((it) => !it.ledgerKey).length;
+    const unclassified = isGrv ? voucherItems(d).filter((it) => !it.ledgerKey).length : 0;
 
     return [
       ...head,
+      ...legacy,
       "",
       ...(items.length > 0 ? items : ["  —"]),
       "",
@@ -1728,8 +1670,6 @@ export function assetPreview(state: AssetFlowState): string {
       unclassified > 0
         ? `<i>ℹ️ ${unclassified} ዕቃ በክምችት ሒሳብ ውስጥ አልገባም (የክምችት ዕቃ አይደለም ተብሏል)።</i>`
         : "",
-      ex?.checked ? `<i>🤖 ምልክት ያለው ከፎቶው የተነበበ ነው (እርግጠኝነት ${ex.confidence}%)። ስህተት ካለ ያስተካክሉ።</i>` : "",
-      ex && !ex.checked ? "<i>ፎቶውን ማንበብ አልተቻለም — ሁሉንም በእጅ አስገብተዋል።</i>" : "",
     ]
       .filter(Boolean)
       .join("\n");
@@ -1790,9 +1730,16 @@ export function assetPreview(state: AssetFlowState): string {
   return out;
 }
 
-/** The month a base balance opens — always the one after the month it is filed in. */
-function nextMonthOf(_draft: Record<string, string | number>): string {
-  return nextMonth(monthLabel());
+/**
+ * The month a base balance opens.
+ *
+ * The month the reporter picked, or — when the picker was never answered, which
+ * is every draft filed before it existed — the month after the one it is filed
+ * in, exactly as before.
+ */
+function nextMonthOf(draft: Record<string, string | number>): string {
+  const picked = String(draft.month || "");
+  return /^\d{4}-\d{2}$/.test(picked) ? picked : nextMonth(monthLabel());
 }
 
 export interface VoucherItem {
@@ -1889,14 +1836,13 @@ export async function saveAssetReport(
   }
 
   if (state.kind === "store_count") {
-    // Only the blocks that were actually counted. A skipped block still carries
-    // pre-filled figures in the draft, and writing those would record a count
-    // nobody took — the item would then look freshly verified on the dashboard.
-    const skipped = new Set(state.skippedBlocks ?? []);
+    // Only what was actually counted. An item with no figure is absent from the
+    // row entirely, and a block with no figures at all is absent from `groups`
+    // — which is what keeps "counted and found none" (a stored 0) apart from
+    // "not counted this time" on the dashboard.
     const groups: string[] = [];
     const items: Record<string, number> = {};
     for (const b of STORE_BLOCKS) {
-      if (skipped.has(b.key)) continue;
       const blockItems = itemsOfBlock(b.key).filter((i) => {
         const v = d[itemKey(i.key)];
         return v !== undefined && v !== "";
@@ -2108,11 +2054,11 @@ export async function saveAssetReport(
   if (state.kind === "grv" || state.kind === "store_issue") {
     const isGrv = state.kind === "grv";
     const items = voucherItems(d);
+    // Both vouchers are typed now, so neither carries a photo or an extraction.
+    // The columns stay and are still written: every voucher filed before the
+    // change has them, the dashboard reads them, and a NULL here is the honest
+    // record that this one was typed.
     const extraction = state.extraction ? sql.json({ ...state.extraction }) : null;
-    // Telegram file ids, not stored-file uuids: voucher photos are read once and
-    // never uploaded. They go into `tg_file_ids` (text[]) rather than
-    // `photo_file_ids` (uuid[]), which the recycle bin, the archive and both
-    // storage purges all join against stored_files.
     const photos = state.photoFileIds || [];
     const date = reportDate(d.date);
     // A blank voucher number must be stored as NULL, not "". The unique index is

@@ -14,7 +14,6 @@ export type CapabilityKey =
   | "receipt"
   | "purchase"
   | "ops"
-  | "materials"
   | "hr"
   // Structured department report formats (text / photo / Excel).
   | "production_report"
@@ -222,14 +221,6 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
     captureMode: "asset_entry",
     input: "any",
     question: "🧾 ቀኑን ይምረጡ። መቀጠል የሽያጩን ደረሰኞች ፎቶ ይላካሉ።",
-  },
-  materials: {
-    key: "materials",
-    button: "📦 የዕቃ ቆጠራ",
-    captureMode: "capture",
-    input: "any",
-    question:
-      "📦 የገቡትን የPP ከረጢቶች እና ሌሎች ዕቃዎችን ቆጠራ ይፃፉ (ዓይነት እና ብዛት)። የቆጠራውን ፎቶ አብረው ይላኩ።",
   },
   hr: {
     key: "hr",
