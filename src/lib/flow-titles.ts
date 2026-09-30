@@ -26,6 +26,8 @@ export type AssetFlowKind =
   | "whiteness_check"
   // The spare-parts store, counted block by block.
   | "store_count"
+  // A delivery of PP bags, on its own form.
+  | "pp_bag_receipt"
   // Finance.
   | "price_list"
   | "wht_holder"
@@ -44,6 +46,7 @@ export const FLOW_TITLE: Record<AssetFlowKind, string> = {
   pp_bag_used: "🧺 የቀኑ የPP ከረጢት ፍጆታ",
   whiteness_check: "⚪ የነጭነት ጥራት ምርመራ",
   store_count: "🧰 የመጋዘን ዕቃዎች ቆጠራ",
+  pp_bag_receipt: "🧺 የPP ከረጢት ገቢ",
   price_list: "💲 የወሩ የዋጋ ዝርዝር",
   wht_holder: "📄 WHT ደረሰኝ ያዢ",
   sales_invoice: "🧾 የሽያጭ ሪፖርት",

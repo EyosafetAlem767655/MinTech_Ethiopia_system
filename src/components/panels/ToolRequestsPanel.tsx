@@ -339,7 +339,8 @@ export default function ToolRequestsPanel() {
 
           <div className="card overflow-x-auto p-0">
             <p className="px-3 pt-2 text-[10px] text-stone-400">
-              Tap a row for the full request, the photo, the AI check and every earlier request for the same item.
+              Approve or reject on the row. Tap the row itself for the full request, the photo, the AI check
+              and every earlier request for the same item.
             </p>
             <table className="w-full min-w-[720px] text-right text-xs">
               <thead className="bg-clay-50/70 text-[10px] uppercase tracking-wide text-stone-500">
@@ -404,8 +405,35 @@ export default function ToolRequestsPanel() {
                           <CheckBadge row={r} />
                         </td>
                         <td className="p-2 text-left text-stone-500">{r.requestedBy}</td>
-                        <td className="p-2">
-                          <StatusBadge status={r.status} />
+                        {/* A request waiting on somebody is shown as the choice
+                            itself, not as a badge saying "pending" with the
+                            buttons hidden one tap away inside the pop-up. The
+                            clicks stop here so deciding does not also open it;
+                            the pop-up keeps the full set — deferring, marking
+                            bought — because that is where the photo and the AI
+                            check are to decide on. */}
+                        <td className="p-2" onClick={(e) => e.stopPropagation()}>
+                          {OPEN_STATUSES.has(r.status) ? (
+                            <div className="flex items-center justify-end gap-1">
+                              <DecideBtn
+                                label="✓"
+                                tone="blue"
+                                title="Approve"
+                                busy={!!busy[r._id]}
+                                onClick={() => decide(r._id, "approve")}
+                              />
+                              <DecideBtn
+                                label="✕"
+                                tone="red"
+                                title="Reject"
+                                busy={!!busy[r._id]}
+                                onClick={() => decide(r._id, "reject")}
+                              />
+                              {r.status === "deferred" && <StatusBadge status={r.status} />}
+                            </div>
+                          ) : (
+                            <StatusBadge status={r.status} />
+                          )}
                         </td>
                       </tr>
                     );

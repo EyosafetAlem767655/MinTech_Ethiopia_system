@@ -33,6 +33,12 @@ import {
 } from "@/lib/sales-invoice";
 import { BANK_OTHER } from "@/lib/banks";
 import { eatDateLabel } from "@/lib/dates";
+import {
+  bagKey as ppBagKey,
+  bagTotal as ppBagTotal,
+  bagsReceived,
+  ppBagTemplate,
+} from "@/lib/pp-bag-paste";
 import { chaseHolder } from "@/lib/wht-sms";
 import { bagKey, productionTemplate, DELIVERED_PREFIX, PROD_PREFIX, STOCK_PREFIX } from "@/lib/production-paste";
 import {
@@ -142,7 +148,7 @@ export interface AssetStep {
    * "month" is the date picker with the days taken off, for a report that
    * belongs to a month rather than a day.
    */
-  type: "date" | "month" | "text" | "number" | "choice" | "photo" | "photos" | "paste";
+  type: "date" | "month" | "text" | "number" | "choice" | "multichoice" | "photo" | "photos" | "paste";
   choices?: { label: string; value: string }[];
   /** Skip the step unless this holds — used for the maintenance/new-item branch. */
   when?: (draft: Record<string, string | number>) => boolean;
@@ -205,11 +211,26 @@ const RAW_MATERIAL_STEPS: AssetStep[] = [
  * `groups` on the saved row records which blocks this count covered, which is
  * what keeps "counted and found none" (a stored 0) apart from "not counted".
  */
+export const STORE_SECTIONS_STEP = "sections";
+
 const STORE_COUNT_STEPS: AssetStep[] = [
   { id: "date", prompt: "📅 የቆጠራውን ቀን ይምረጡ።", type: "date" },
+  {
+    id: STORE_SECTIONS_STEP,
+    label: "Sections",
+    prompt:
+      "🧰 የትኞቹን ክፍሎች ነው የሚያዘምኑት? የሚፈልጉትን ይንኩ፣ ከዚያ ጨርሻለሁ ይጫኑ።\n\n" +
+      "<i>የነኩዋቸው ክፍሎች ዝርዝር ብቻ ይላካል።</i>",
+    type: "multichoice",
+    choices: STORE_BLOCKS.map((b) => ({ label: `${b.icon} ${b.label}`, value: b.key })),
+  },
   ...STORE_BLOCKS.map<AssetStep>((b) => ({
     id: storeBlockStep(b.key),
     label: b.label,
+    // Only the ticked sections are sent. Walking somebody through all three
+    // when they came to update the oils is how a count sheet gets filled in
+    // from memory.
+    when: (d: Record<string, string | number>) => ticked(d, STORE_SECTIONS_STEP).includes(b.key),
     prompt:
       `${b.icon} <b>${b.label}</b> — የቆጠሩትን ብቻ ይሙሉ።\n\n` +
       "<i>ያልቆጠሩትን ባዶ ይተዉት — ምንም አይቀየርም። ምንም ከሌለ 0 ይፃፉ።</i>\n" +
@@ -218,6 +239,30 @@ const STORE_COUNT_STEPS: AssetStep[] = [
     skippable: true,
   })),
 ];
+
+/**
+ * A `multichoice` answer: the ticked values, comma-joined in the draft.
+ *
+ * Stored as one string rather than an array because the draft is
+ * Record<string, string | number> — the same shape every other answer lives in,
+ * which keeps the edit path, the review card and the save from needing to know
+ * this step type exists.
+ */
+export function ticked(draft: Record<string, string | number>, stepId: string): string[] {
+  return String(draft[stepId] || "")
+    .split(",")
+    .map((v) => v.trim())
+    .filter(Boolean);
+}
+
+/** Tick or untick one value, returning the new draft string. */
+export function toggleTick(current: string, value: string): string {
+  const set = current.split(",").map((v) => v.trim()).filter(Boolean);
+  const at = set.indexOf(value);
+  if (at >= 0) set.splice(at, 1);
+  else set.push(value);
+  return set.join(",");
+}
 
 /** Step id for one block of the store count. */
 export function storeBlockStep(block: StoreBlockKey): string {
@@ -702,23 +747,24 @@ function voucherItemSteps(opts: {
  * fill in, and every figure then had to be checked anyway. What is typed is the
  * record.
  *
- * One conditional question survives: which stock item a line is, asked only
- * when the description mentions a bag. It is the ONLY record of PP bags
- * arriving, and the bag stock check and the finance bag rows are built on it.
- * Raw material is not offered — it arrives by truck against a delivery note and
- * is already recorded by the daily raw-material report, and letting a GRV line
- * count as Dolomite received too would double the month with nothing to say
- * which entry was real.
+ * Nothing on it is classified as stock any more. PP bags have their own
+ * receiving form and raw material its own daily report; both record what
+ * arrived per kind, without depending on how somebody worded a line here. This
+ * voucher is the purchase record — what was bought, from whom, for how much.
  */
 const GRV_STEPS: AssetStep[] = [
   { id: "date", prompt: "📅 ዕቃው የገባበትን ቀን ይምረጡ።", type: "date" },
   { id: "grvNo", prompt: "🔢 የቫውቸሩን ቁጥር (No.) ይፃፉ — ለምሳሌ 5516።", type: "text", skippable: true },
   { id: "supplier", prompt: "🏢 አቅራቢውን (Supplier) ይፃፉ።", type: "text", skippable: true },
+  // No stock-item question any more. PP bags arriving have their own form
+  // (🧺 የPP ከረጢት ገቢ), which records them per kind without depending on how a
+  // voucher line happened to be worded — so this voucher is now purely typed,
+  // and a delivery can no longer be filed twice in two places.
   ...voucherItemSteps({
-    kinds: ["bag"],
+    kinds: [],
     costSkippable: false,
     askUnitCost: true,
-    askLedger: true,
+    askLedger: false,
   }),
   {
     id: "currency",
@@ -939,6 +985,38 @@ export function bagUsageItems(draft: Record<string, string | number>): BagUsageI
   return out;
 }
 
+/* ─────────────────── PP bags received (asset management) ─────────────────── */
+
+/**
+ * A delivery of PP bags, on its own form.
+ *
+ * Bags arriving used to be a side-question on the Goods Receiving Voucher — the
+ * bot asked "which stock item is this?" only when a line happened to mention a
+ * bag, and only then did the delivery reach the stock check. So whether the
+ * month balanced depended on how somebody worded a description.
+ *
+ * Two questions: the day, and every bag kind. No supplier, no price. The monthly
+ * report values bags from the price list, so a figure typed here could only be
+ * a second number to disagree with it, and the delivery note is the record of
+ * who supplied them.
+ *
+ * This is the RECEIVED side of the bag balance. The other three sides already
+ * exist: the opening balance, the daily usage report (used), and the PP Bag
+ * count block of the daily production report (counted on the floor).
+ */
+const PP_BAG_RECEIPT_STEPS: AssetStep[] = [
+  { id: "date", prompt: "📅 ከረጢቶቹ የገቡበትን ቀን ይምረጡ።", type: "date" },
+  {
+    id: "paste",
+    prompt:
+      "🧺 የሚከተለውን ቅጂ ሞልተው ይመልሱት።\n\n" +
+      "<i>የገባውን ብዛት (ቁጥር) ከ = በኋላ ይፃፉ። ለምሳሌ፦</i>\n" +
+      "<code>25KG Yellow = 400</code>\n" +
+      "<i>ያልገባውን ባዶ ይተዉት።</i>",
+    type: "paste",
+  },
+];
+
 /* ──────────────── Whiteness quality check, 4× daily (production) ─────────── */
 
 /** The six readings taken at each check. */
@@ -1120,6 +1198,7 @@ const SALES_INVOICE_STEPS: AssetStep[] = [
 const STEPS: Record<AssetFlowKind, AssetStep[]> = {
   raw_material: RAW_MATERIAL_STEPS,
   store_count: STORE_COUNT_STEPS,
+  pp_bag_receipt: PP_BAG_RECEIPT_STEPS,
   delivery: DELIVERY_STEPS,
   tool_request: TOOL_REQUEST_STEPS,
   pp_bag_damage: PP_BAG_DAMAGE_STEPS,
@@ -1152,6 +1231,7 @@ export function pasteTemplate(
   if (kind === "price_list") return priceListTemplate();
   if (kind === "sales_invoice") return salesTemplate(draft);
   if (kind === "raw_material") return rawMaterialTemplate();
+  if (kind === "pp_bag_receipt") return ppBagTemplate();
   // The store count is the one flow with several paste steps, so its template
   // depends on WHICH block is being asked for, not just the flow.
   if (kind === "store_count") {
@@ -1396,6 +1476,21 @@ export function assetPreview(state: AssetFlowState): string {
       block("🏭 <b>ወጪ / ለምርት (Issue, ቶን)</b>", "issued") +
       "\n" +
       block("📦 <b>ክምችት (Stock, ቶን)</b>", "stock")
+    );
+  }
+
+  if (state.kind === "pp_bag_receipt") {
+    const lines = BAG_KINDS.map(({ size, colour }) => {
+      const v = d[ppBagKey(size, colour)];
+      // A kind with no figure is shown as a dash, not as 0: none of that colour
+      // arrived, which is different from a delivery of none.
+      return `  • ${bagLabel(size, colour)}: ${v === undefined || v === "" ? "—" : qty(Number(v))}`;
+    }).join("\n");
+    return (
+      head +
+      `📅 Date: ${esc(d.date)}\n\n` +
+      `🧺 <b>የገቡ ከረጢቶች (ቁጥር)</b>\n${lines}\n` +
+      `  ─────────\n  <b>ጠቅላላ: ${qty(ppBagTotal(d))}</b>\n`
     );
   }
 
@@ -1833,6 +1928,18 @@ export async function saveAssetReport(
         updated_at = now()
       returning id`;
     return { id: row.id, table: "raw_material_daily" };
+  }
+
+  if (state.kind === "pp_bag_receipt") {
+    // `pp_bag_purchases` already means exactly this — bags bought and received,
+    // per kind — and the monthly finance report already reads it as the bag
+    // received column. It simply had no writer between the Goods Receiving
+    // Voucher taking the job and this form taking it back.
+    const [row] = await sql<{ id: string }[]>`
+      insert into pp_bag_purchases (date, bags, reported_by, source)
+      values (${reportDate(d.date)}, ${sql.json(bagsReceived(d))}, ${reportedBy}, 'telegram')
+      returning id`;
+    return { id: row.id, table: "pp_bag_purchases" };
   }
 
   if (state.kind === "store_count") {

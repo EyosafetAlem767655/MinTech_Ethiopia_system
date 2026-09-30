@@ -1,10 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import sql, { first, isUuid } from "@/lib/sql";
 import { hashPassword, normalizeFullName, passwordProblem } from "@/lib/password";
-import { isCapabilityKey, isPositionKey } from "@/lib/positions";
+import { isCapabilityKey, isPositionKey, resolveCapabilities } from "@/lib/positions";
 import { revokeUserSessions } from "@/lib/bot-auth";
 
 export const dynamic = "force-dynamic";
+
+/** The bot menu a roster row produces, as one comparable string. */
+function menuOf(positions: string[], capabilities: string[] | null): string {
+  return resolveCapabilities(positions, capabilities)
+    .map((c) => c.key)
+    .join("|");
+}
 
 export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {
   if (!isUuid(params.id)) return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -25,37 +32,48 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     await sql`update telegram_users set full_name = ${fullName}, full_name_key = ${fullNameKey} where id = ${user.id}`;
   }
 
-  if (Array.isArray(body.positions)) {
-    const positions = body.positions.filter(isPositionKey);
-    if (positions.length === 0) return NextResponse.json({ error: "Pick at least one position." }, { status: 400 });
-    // Read the current positions so we only disrupt the bot session when the role
-    // set actually changed. A live session caches the role menu, so on any change
-    // we bump session_epoch — the next bot action fails resolveSession and the
-    // user is forced to sign out and /start again, picking up the new positions.
-    const before = first(await sql<{ positions: string[] }[]>`
-      select positions from telegram_users where id = ${user.id}
-    `);
-    await sql`update telegram_users set positions = ${positions} where id = ${user.id}`;
-    const changed =
-      !before ||
-      before.positions.length !== positions.length ||
-      [...positions].sort().join("|") !== [...before.positions].sort().join("|");
-    if (changed) await revokeUserSessions(user.id);
-  }
+  /**
+   * Positions and capabilities are decided TOGETHER, against the menu they
+   * produce.
+   *
+   * They used to be compared separately and as raw arrays, which missed the one
+   * edit that changes the bot most: clearing a capability override sends `[]`,
+   * which compares equal to a stored `null` — so a user handed back their
+   * positions' defaults kept the old keyboard and was never signed out. What
+   * matters is not whether the stored arrays differ but whether the BUTTONS do,
+   * so that is what is compared.
+   */
+  const wantsPositions = Array.isArray(body.positions);
+  const wantsCaps = Array.isArray(body.capabilities);
 
-  if (Array.isArray(body.capabilities)) {
-    const caps = body.capabilities.filter(isCapabilityKey);
-    // An empty array is meaningful: it clears the override and returns the
-    // employee to their positions' defaults. It must never mean "no buttons",
-    // which would leave them with an empty menu and no way to report.
-    const before = first(await sql<{ capabilities: string[] | null }[]>`
-      select capabilities from telegram_users where id = ${user.id}
+  if (wantsPositions || wantsCaps) {
+    const before = first(await sql<{ positions: string[]; capabilities: string[] | null }[]>`
+      select positions, capabilities from telegram_users where id = ${user.id}
     `);
-    await sql`update telegram_users set capabilities = ${caps.length > 0 ? caps : null} where id = ${user.id}`;
-    const prev = before?.capabilities || [];
-    const changed = prev.length !== caps.length || [...caps].sort().join("|") !== [...prev].sort().join("|");
-    // Same reason as positions: a live session caches the keyboard.
-    if (changed) await revokeUserSessions(user.id);
+    const menuBefore = menuOf(before?.positions || [], before?.capabilities || null);
+
+    let positions = before?.positions || [];
+    if (wantsPositions) {
+      positions = body.positions.filter(isPositionKey);
+      if (positions.length === 0) {
+        return NextResponse.json({ error: "Pick at least one position." }, { status: 400 });
+      }
+      await sql`update telegram_users set positions = ${positions} where id = ${user.id}`;
+    }
+
+    let caps = before?.capabilities || null;
+    if (wantsCaps) {
+      const picked = body.capabilities.filter(isCapabilityKey);
+      // An empty array is meaningful: it clears the override and returns the
+      // employee to their positions' defaults. It must never mean "no buttons",
+      // which would leave them with an empty menu and no way to report.
+      caps = picked.length > 0 ? picked : null;
+      await sql`update telegram_users set capabilities = ${caps} where id = ${user.id}`;
+    }
+
+    if (menuOf(positions, caps) !== menuBefore) {
+      await revokeUserSessions(user.id, "የሚሠሩባቸው ተግባራት ተቀይረዋል።");
+    }
   }
 
   if (typeof body.note === "string") {
@@ -71,7 +89,7 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
          set password_hash = ${await hashPassword(body.password)}, failed_attempts = 0, locked_until = null
        where id = ${user.id}
     `;
-    await revokeUserSessions(user.id);
+    await revokeUserSessions(user.id, "የይለፍ ቃልዎ ተቀይሯል።");
   }
 
   if (typeof body.active === "boolean" && body.active !== user.active) {
@@ -85,7 +103,7 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     await sql`update telegram_users set archived_at = null, active = true where id = ${user.id}`;
   }
 
-  if (body.forceLogout === true) await revokeUserSessions(user.id);
+  if (body.forceLogout === true) await revokeUserSessions(user.id, "ከአስተዳዳሪው በኩል ከሲስተሙ ወጥተዋል።");
 
   if (body.unlock === true) {
     await sql`update telegram_users set failed_attempts = 0, locked_until = null where id = ${user.id}`;

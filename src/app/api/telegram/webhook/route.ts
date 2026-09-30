@@ -35,6 +35,8 @@ import {
   pasteTemplate,
   saveAssetReport,
   storeBlockOfStep,
+  ticked,
+  toggleTick,
   stepsFor,
   type AssetFlowKind,
   type AssetFlowState,
@@ -47,6 +49,8 @@ import { insertRow } from "@/lib/insert";
 import { runAfter } from "@/lib/after";
 import { whitenessAlert } from "@/lib/whiteness-alert";
 import { parseRawMaterialPaste } from "@/lib/raw-material-paste";
+import { parsePpBagPaste } from "@/lib/pp-bag-paste";
+import { reconcileBags } from "@/lib/stock-reconciliation";
 import { parseStoreCountPaste } from "@/lib/store-count-paste";
 import { applySalesExtraction, parseSalesPaste, salesMissing } from "@/lib/sales-invoice";
 import { applyFlowEdit, describeFlowChanges, editableFields, renderFieldList } from "@/lib/flow-edit";
@@ -60,6 +64,7 @@ import {
   BACK_KEYBOARD,
   deleteMessage,
   downloadTelegramFile,
+  editMessageReplyMarkup,
   ENTRY_BUTTONS,
   NAV_BUTTONS,
   sendDocument,
@@ -164,7 +169,7 @@ const MSG = {
   loginInvalid: "❌ ሙሉ ስም ወይም የይለፍ ቃል ትክክል አይደለም። እባክዎ ድጋሚ ይሞክሩ።",
   loginInactive: "⛔ መለያዎ ታግዷል። እባክዎ ከአስተዳዳሪው ጋር ይነጋገሩ።",
   loginCancelled: "↩️ ተመልሰዋል።",
-  loggedOut: "👋 ከመለያዎ ወጥተዋል።",
+  loggedOut: "👋 ከሲስተሙ ወጥተዋል።",
   sessionRevoked: "🔒 ክፍለ ጊዜዎ ተዘግቷል። እባክዎ ድጋሚ ይግቡ።",
   noPermission: "⛔ ይህን ሪፖርት ለማስገባት ፈቃድ የለዎትም።",
   receiverOnly: "📊 ይህ መለያ ሪፖርት አይልክም። የቀኑን ማጠቃለያ በዚህ ቦት ይቀበላሉ።",
@@ -809,6 +814,7 @@ const ASSET_FLOW_BY_CAP: Record<string, AssetFlowKind | undefined> = {
   pp_bag_used: "pp_bag_used",
   whiteness_check: "whiteness_check",
   store_count: "store_count",
+  pp_bag_receipt: "pp_bag_receipt",
   base_balance: "base_balance",
   store_issue: "store_issue",
   grv: "grv",
@@ -956,6 +962,64 @@ async function handleCalendarCallback(
   await advanceAsset(session, chatId, state);
 }
 
+/**
+ * One tap on a tick-list: toggle a value, or finish the step.
+ *
+ * The keyboard is redrawn in place on every toggle rather than sent again, so
+ * the message does not grow a new copy of itself per tap — and the tick the
+ * person just made is visible where they made it.
+ */
+async function handlePickCallback(
+  data: string,
+  callbackId: string,
+  chatId: string,
+  userName: string,
+  messageId: number
+): Promise<void> {
+  const [, flow, stepId, value] = data.split(":");
+  if (!flow || !stepId || !value) {
+    await answerCallbackQuery(callbackId, "");
+    return;
+  }
+
+  const session = await loadSession(chatId, userName);
+  const state = session.assetFlow as AssetFlowState | undefined;
+  if (!state || session.state !== "asset_entry" || state.step !== stepId) {
+    await answerCallbackQuery(callbackId, "⌛ ይህ ምርጫ ጊዜው አልፎበታል።");
+    return;
+  }
+
+  const step = findStep(state.kind, stepId, state.draft);
+  if (!step || step.type !== "multichoice") {
+    await answerCallbackQuery(callbackId, "");
+    return;
+  }
+
+  if (value === PICK_DONE) {
+    // Nothing ticked is a legitimate answer on a step like this — it means
+    // "none of these today" — but it would walk straight past every block and
+    // save an empty count, so it is turned back with a reason rather than
+    // silently obeyed.
+    if (ticked(state.draft, stepId).length === 0) {
+      await answerCallbackQuery(callbackId, "▫️ ቢያንስ አንድ ክፍል ይምረጡ።");
+      return;
+    }
+    session.assetFlow = { ...state };
+    await persist(session);
+    await answerCallbackQuery(callbackId, "✅");
+    await advanceAsset(session, chatId, state);
+    return;
+  }
+
+  state.draft[stepId] = toggleTick(String(state.draft[stepId] || ""), value);
+  session.assetFlow = { ...state };
+  await persist(session);
+
+  const chosen = ticked(state.draft, stepId);
+  await answerCallbackQuery(callbackId, chosen.includes(value) ? "✅" : "▫️");
+  await editMessageReplyMarkup(chatId, messageId, tickKeyboard(state, step)).catch(() => {});
+}
+
 /** Ask the current step, or show the review card when the flow is finished. */
 /**
  * A choice step's buttons, in rows a phone can show.
@@ -973,6 +1037,32 @@ function choiceKeyboard(step: { choices?: { label: string }[] }) {
     keyboard: [...rows, [{ text: NAV_BUTTONS.cancel }]],
     resize_keyboard: true,
     one_time_keyboard: false,
+  };
+}
+
+/**
+ * A tick-list, for a step where several answers are right at once.
+ *
+ * An inline keyboard rather than a reply keyboard, because the buttons have to
+ * REDRAW as they are tapped — a tick you cannot see is a tick nobody trusts.
+ * Callback data is `pick:<flow>:<step>:<value>`, which stays well inside
+ * Telegram's 64-byte cap for the values used here.
+ */
+const PICK_DONE = "done";
+
+function tickKeyboard(state: AssetFlowState, step: { id: string; choices?: { label: string; value: string }[] }) {
+  const chosen = ticked(state.draft, step.id);
+  const rows = (step.choices || []).map((c) => [
+    {
+      text: `${chosen.includes(c.value) ? "✅" : "▫️"} ${c.label}`,
+      callback_data: `pick:${state.kind}:${step.id}:${c.value}`,
+    },
+  ]);
+  return {
+    inline_keyboard: [
+      ...rows,
+      [{ text: "✅ ጨርሻለሁ", callback_data: `pick:${state.kind}:${step.id}:${PICK_DONE}` }],
+    ],
   };
 }
 
@@ -998,6 +1088,10 @@ async function askAssetStep(chatId: string, state: AssetFlowState): Promise<void
     });
     return;
   }
+  if (step.type === "multichoice") {
+    await sendMessage(chatId, step.prompt, { reply_markup: tickKeyboard(state, step) });
+    return;
+  }
   if (step.type === "choice") {
     await sendMessage(chatId, step.prompt, { reply_markup: choiceKeyboard(step) });
     return;
@@ -1016,6 +1110,39 @@ async function askAssetStep(chatId: string, state: AssetFlowState): Promise<void
   }
   const hint = step.skippable ? '\n<i>ከሌለ "-" ይላኩ።</i>' : "";
   await sendMessage(chatId, step.prompt + hint, { reply_markup: CHANGE_CANCEL_KEYBOARD });
+}
+
+/**
+ * What the bag balance says now, sent after a delivery is filed.
+ *
+ * Not a verdict and not a blocker: the reconciliation is the month to date, and
+ * a gap here usually means production has not counted since the delivery
+ * arrived. It is sent because the one moment a mistyped 4000 can be spotted is
+ * while the person who typed it is still standing next to the pallet.
+ */
+async function sendBagBalanceNote(chatId: string): Promise<void> {
+  try {
+    const rec = await reconcileBags();
+    const lines = rec.rows
+      .filter((r) => r.received > 0 || r.expected > 0)
+      .map(
+        (r) =>
+          `  • ${r.label}: <b>${Math.round(r.expected).toLocaleString()}</b>` +
+          (r.counted === null ? "" : ` · ተቆጥሯል ${Math.round(r.counted).toLocaleString()}`)
+      );
+    if (lines.length === 0) return;
+    await sendMessage(
+      chatId,
+      `📦 <b>የከረጢት ሒሳብ · ${rec.month}</b>\n${lines.join("\n")}\n\n` +
+        (rec.countedOn
+          ? `<i>የመጨረሻው ቆጠራ ${rec.countedOn}።</i>`
+          : "<i>በዚህ ወር ቆጠራ አልተመዘገበም።</i>")
+    );
+  } catch (e) {
+    // The balance is a courtesy. A missing table or a slow query must never
+    // turn a saved delivery into a failed one.
+    console.warn("sendBagBalanceNote skipped:", e);
+  }
 }
 
 /**
@@ -1152,6 +1279,18 @@ export async function POST(req: NextRequest) {
         await handleCalendarCallback(cal, String(cb.id), chatId, userName);
       } catch (e) {
         console.error("telegram calendar callback error:", e);
+        await answerCallbackQuery(String(cb.id), MSG.genericError);
+      }
+      return NextResponse.json({ ok: true });
+    }
+
+    /* Tick-list taps — above the owner-only gate for the same reason as the
+       date picker: the people filing these reports are not the CEO. */
+    if (data.startsWith("pick:")) {
+      try {
+        await handlePickCallback(data, String(cb.id), chatId, userName, Number(cb.message?.message_id));
+      } catch (e) {
+        console.error("telegram pick callback error:", e);
         await answerCallbackQuery(String(cb.id), MSG.genericError);
       }
       return NextResponse.json({ ok: true });
@@ -1484,6 +1623,14 @@ export async function POST(req: NextRequest) {
             runAfter(whitenessAlert(saved.id));
           }
 
+          // A bag delivery moves the month's expected balance, so the person
+          // who just filed it is shown what it now says against the last count
+          // — while they are still holding the delivery note and can fix a
+          // mistyped figure. Behind the reply, like everything else here.
+          if (state.kind === "pp_bag_receipt") {
+            runAfter(sendBagBalanceNote(chatId));
+          }
+
           // Answer first, analyse after — see backgroundPpDamageCheck.
           if (ppPiles.length > 0) {
             await backgroundPpDamageCheck({
@@ -1736,6 +1883,8 @@ export async function POST(req: NextRequest) {
               ? parseSalesPaste(val)
               : state.kind === "raw_material"
                 ? parseRawMaterialPaste(val)
+                : state.kind === "pp_bag_receipt"
+                  ? parsePpBagPaste(val)
                 : parseFinancePaste(val, { usdRate: state.kind === "price_list" });
         const filled = Object.keys(parsed.values).length;
         // The sales block may be answered by "-" instead: the reporter would
@@ -1783,7 +1932,8 @@ export async function POST(req: NextRequest) {
           const templateOnly =
             state.kind === "production_daily" ||
             state.kind === "base_balance" ||
-            state.kind === "raw_material";
+            state.kind === "raw_material" ||
+            state.kind === "pp_bag_receipt";
           await sendMessage(
             chatId,
             `⚠️ እነዚህ መስመሮች አልተነበቡም፦\n${problems.map((p) => `• ${escapeHtml(p)}`).join("\n")}\n\n` +

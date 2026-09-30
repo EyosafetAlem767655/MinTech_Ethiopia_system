@@ -406,8 +406,17 @@ function SubmissionsTab() {
   };
   const specOf = (row: SubmissionRow): SubmissionSpecLite => SUBMISSIONS[collectionOf(row)];
 
+  /**
+   * Reload WITHOUT blanking the screen.
+   *
+   * It used to start with `setRows(null)`, which swapped the whole list for a
+   * skeleton on every reload — including the one that follows a delete. With
+   * twenty-odd collections to read, that left the screen apparently empty for
+   * as long as the round trip took, and the report was that deleting one
+   * submission hides the rest. The skeleton now belongs to the FIRST load only;
+   * after that the old rows stay up until the new ones arrive.
+   */
   const load = useCallback(async () => {
-    setRows(null);
     setError("");
     const p = new URLSearchParams({ collection });
     // An explicit date range wins over the quick one — otherwise picking dates
@@ -421,16 +430,23 @@ function SubmissionsTab() {
     if (q.trim()) p.set("q", q.trim());
     p.set("limit", "200");
 
-    const res = await fetch(`/api/submissions?${p}`);
-    if (!res.ok) {
-      setError((await res.json().catch(() => ({}))).error || "Could not load submissions.");
-      setRows([]);
-      return;
+    try {
+      const res = await fetch(`/api/submissions?${p}`);
+      if (!res.ok) {
+        setError((await res.json().catch(() => ({}))).error || "Could not load submissions.");
+        setRows((prev) => prev ?? []);
+        return;
+      }
+      const json = await res.json();
+      setCounts(json.counts || {});
+      setUnavailable(json.unavailableCollections || (json.unavailable ? [collection] : []));
+      setRows(Array.isArray(json.rows) ? json.rows : []);
+    } catch {
+      // A failed reload must never leave `rows` at null — that is the state
+      // that renders as a skeleton for ever and reads as "everything is gone".
+      setError("Could not reach the server. What is on screen may be out of date.");
+      setRows((prev) => prev ?? []);
     }
-    const json = await res.json();
-    setCounts(json.counts || {});
-    setUnavailable(json.unavailableCollections || (json.unavailable ? [collection] : []));
-    setRows(Array.isArray(json.rows) ? json.rows : []);
   }, [collection, range, from, to, q]);
 
   const loadBin = useCallback(async () => {
@@ -502,8 +518,11 @@ function SubmissionsTab() {
       setError((await res.json().catch(() => ({}))).error || "Delete failed.");
       return;
     }
+    // Gone from the screen the moment the server says it is gone, rather than
+    // when a reload of every other collection finishes. The reload still runs,
+    // to pick up anything else that changed.
+    setRows((prev) => (prev ?? []).filter((r) => String(r.id) !== String(row.id)));
     await Promise.all([load(), loadBin()]);
-    setShowBin(true);
   };
 
   const restore = async (entry: BinRow) => {

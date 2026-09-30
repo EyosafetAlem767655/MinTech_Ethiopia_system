@@ -23,6 +23,8 @@ export type CapabilityKey =
   | "finished_goods_delivery"
   // The spare-parts store, counted block by block.
   | "store_count"
+  // A delivery of PP bags.
+  | "pp_bag_receipt"
   | "purchase_items"
   | "sales_report"
   | "pp_bag_damage"
@@ -138,6 +140,13 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
     captureMode: "asset_entry",
     input: "any",
     question: "🧱 የቀኑን የጥሬ ዕቃ ገቢ፣ ወጪና ክምችት እናስገባለን።",
+  },
+  pp_bag_receipt: {
+    key: "pp_bag_receipt",
+    button: "🧺 የPP ከረጢት ገቢ",
+    captureMode: "asset_entry",
+    input: "any",
+    question: "🧺 የገቡትን የPP ከረጢቶች በዓይነት እናስገባለን።",
   },
   store_count: {
     key: "store_count",
@@ -343,8 +352,10 @@ export const POSITIONS: Record<PositionKey, Position> = {
       "raw_material_received",
       "finished_goods_delivery",
       // The managers asked for every item in the store to be counted. It is the
-      // storekeeper who counts it, so it sits with the other store reports.
+      // storekeeper who counts it, so it sits with the other store reports —
+      // as does the bag delivery they sign for.
       "store_count",
+      "pp_bag_receipt",
       "pp_bag_damage",
       // Both feed the monthly finance report: the store issue voucher fills its
       // consumption column, and the base balance opens each month.

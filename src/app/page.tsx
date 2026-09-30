@@ -177,9 +177,10 @@ export default function OwnerDashboard() {
           {!summaries && !error && (
             <div className="space-y-3 lg:grid lg:grid-cols-2 lg:gap-3 lg:space-y-0 xl:grid-cols-4">
               {[0, 1, 2, 3].map((i) => (
-                // h-44 is the height of a real summary card, so the grid
-                // does not jump a hundred pixels when the counts land.
-                <div key={i} className="card h-44 animate-pulse bg-clay-50" />
+                // The height of a real summary card — the grid stretches every
+                // card to the tallest, and Asset carries four tiles — so the
+                // page does not jump when the counts land.
+                <div key={i} className="card h-60 animate-pulse bg-clay-50" />
               ))}
             </div>
           )}
@@ -222,7 +223,9 @@ function SummaryCard({ summary }: { summary: DepartmentSummary }) {
   return (
     <Link
       href={`/departments/${summary.department}`}
-      className="card block overflow-hidden p-0 text-left transition active:scale-[0.99]"
+      // h-full + column layout so a card with four tiles and one with two still
+      // line up top and bottom in the grid — the Asset card carries four.
+      className="card flex h-full flex-col overflow-hidden p-0 text-left transition active:scale-[0.99]"
     >
       {/* Header strip.
 
@@ -246,13 +249,14 @@ function SummaryCard({ summary }: { summary: DepartmentSummary }) {
         </span>
       </div>
 
-      <div className="p-4">
+      <div className="flex flex-1 flex-col p-4">
         <div className="grid grid-cols-2 gap-2">
           {summary.headline.map((k) => (
             <MiniKpi key={k.label} kpi={k} />
           ))}
         </div>
-        <p className="mt-3 text-right text-xs font-bold text-clay-700">Open {meta.name} →</p>
+        {/* mt-auto pins this to the bottom whatever the tile count above it. */}
+        <p className="mt-auto pt-3 text-right text-xs font-bold text-clay-700">Open {meta.name} →</p>
       </div>
     </Link>
   );

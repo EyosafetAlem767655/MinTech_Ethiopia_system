@@ -119,6 +119,25 @@ export async function deleteMessage(chatId: string | number, messageId: number) 
 }
 
 /**
+ * Swap the buttons under a message that is already sent.
+ *
+ * A tick-list has to redraw where it stands: sending the keyboard again would
+ * leave a column of near-identical messages behind, and the tick somebody just
+ * made would be the one thing not visible at the point they made it.
+ */
+export async function editMessageReplyMarkup(
+  chatId: string | number,
+  messageId: number,
+  replyMarkup: unknown
+) {
+  return call("editMessageReplyMarkup", {
+    chat_id: chatId,
+    message_id: messageId,
+    reply_markup: replyMarkup,
+  });
+}
+
+/**
  * Uploads a file to a chat. Unlike every other call here this must be
  * multipart/form-data rather than JSON, because the bytes ride along with it.
  * Telegram caps bot uploads at 50 MB.

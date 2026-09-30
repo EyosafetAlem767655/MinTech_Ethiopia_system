@@ -60,10 +60,25 @@ export async function GET(req: NextRequest) {
   const results: { collection: SubmissionCollection; rows: Record<string, unknown>[] }[] = [];
   const unavailable: string[] = [];
 
+  // Which columns each table actually has, in ONE catalogue query.
+  //
+  // It used to be asked per collection, which on the default "all" view meant
+  // two round trips per type — fifty-six before a single row came back. That is
+  // what made the list look like it had lost everything for a second or two
+  // after a delete, because the screen blanked itself to reload.
+  const columnsByTable = await tableColumns(targets.map((k) => SUBMISSIONS[k].table));
+
   for (const key of targets) {
     const spec = SUBMISSIONS[key];
     try {
-      const rows = await queryCollection(spec, { limit: perCollection, from, to, since, q });
+      const rows = await queryCollection(spec, {
+        limit: perCollection,
+        from,
+        to,
+        since,
+        q,
+        present: columnsByTable.get(spec.table) ?? new Set<string>(),
+      });
       if (rows === null) unavailable.push(key);
       else results.push({ collection: key, rows });
     } catch (e) {
@@ -124,26 +139,42 @@ function sortInstant(row: Record<string, unknown>): number {
   return isNaN(t) ? 0 : t;
 }
 
+/**
+ * Every listed table's columns, in one query.
+ *
+ * Deployments routinely run ahead of their migrations here, and a single column
+ * added by an unapplied migration would otherwise blank the whole screen with a
+ * 42703. Knowing what is really there means a report stays listable, editable
+ * and deletable while a migration is outstanding — the newest field simply does
+ * not show yet.
+ */
+async function tableColumns(tables: string[]): Promise<Map<string, Set<string>>> {
+  const out = new Map<string, Set<string>>();
+  const rows = await sql<{ table_name: string; column_name: string }[]>`
+    select table_name, column_name from information_schema.columns
+     where table_schema = 'public' and table_name = any(${[...new Set(tables)]})
+  `;
+  for (const r of rows) {
+    const set = out.get(r.table_name) ?? new Set<string>();
+    set.add(r.column_name);
+    out.set(r.table_name, set);
+  }
+  return out;
+}
+
 /** One collection's rows, or null when the table is not in this database. */
 async function queryCollection(
   spec: SubmissionSpec,
-  opts: { limit: number; from: string; to: string; since: Date | null; q: string }
+  opts: {
+    limit: number;
+    from: string;
+    to: string;
+    since: Date | null;
+    q: string;
+    present: Set<string>;
+  }
 ): Promise<Record<string, unknown>[] | null> {
-  // Which columns this database actually has.
-  //
-  // Deployments routinely run ahead of their migrations here, and a single
-  // column added by an unapplied migration used to blank the entire screen with
-  // a 42703. Asking first costs one cheap catalogue query and means a report is
-  // still listable, editable and deletable while a migration is outstanding —
-  // the newest field simply does not show yet.
-  const present = new Set(
-    (
-      await sql<{ column_name: string }[]>`
-        select column_name from information_schema.columns
-         where table_schema = 'public' and table_name = ${spec.table}
-      `
-    ).map((r) => r.column_name)
-  );
+  const { present } = opts;
   if (present.size === 0) return null;
 
   const columns = Array.from(

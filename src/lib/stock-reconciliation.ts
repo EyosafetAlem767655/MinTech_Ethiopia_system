@@ -87,7 +87,7 @@ const n = (v: unknown) => Number(v) || 0;
 export async function reconcileBags(month = monthLabel()): Promise<ReconciliationResult> {
   const { start, end } = monthBounds(month);
 
-  const [base, grvLines, sivLines, usedLines, latestCount] = await Promise.all([
+  const [base, grvLines, sivLines, bagReceipts, usedLines, latestCount] = await Promise.all([
     sql<{ bags: Record<string, number> }[]>`
       select bags from monthly_base_balances where month = ${month}
     `.catch(() => []),
@@ -106,6 +106,12 @@ export async function reconcileBags(month = monthLabel()): Promise<Reconciliatio
        where v.date >= ${start} and v.date < ${end}
          and i.ledger_kind = 'bag' and i.ledger_key is not null
        group by i.ledger_key
+    `.catch(() => []),
+    // Bags received on the PP bag receiving form. It writes the nested
+    // { kg25: { Yellow: n } } shape asset management has always counted in, so
+    // it is flattened to ledger keys below rather than in SQL.
+    sql<{ bags: BagCounts }[]>`
+      select bags from pp_bag_purchases where date >= ${start} and date < ${end}
     `.catch(() => []),
     // The daily PP bag usage report, per kind. See usedLines below.
     sql<{ ledger_key: string; qty: string }[]>`
@@ -136,8 +142,25 @@ export async function reconcileBags(month = monthLabel()): Promise<Reconciliatio
   const received: Record<string, number> = Object.fromEntries(BAG_KIND_KEYS.map((k) => [k, 0]));
   const issued: Record<string, number> = Object.fromEntries(BAG_KIND_KEYS.map((k) => [k, 0]));
 
+  /**
+   * Bags received, from BOTH records — and they cannot overlap.
+   *
+   * The Goods Receiving Voucher classified bag lines until the PP bag receiving
+   * form took the job; it no longer asks, and the form had no writer before it.
+   * So every month has one of the two, never both, and summing them keeps every
+   * past month reproducing exactly what it was signed off with.
+   */
   for (const row of grvLines) {
     if (row.ledger_key in received) received[row.ledger_key] += n(row.qty);
+  }
+  for (const receipt of bagReceipts) {
+    for (const [size, value] of Object.entries(receipt.bags || {})) {
+      if (!value || typeof value !== "object") continue;
+      for (const [colour, pieces] of Object.entries(value)) {
+        const key = `${size}:${colour}`;
+        if (key in received) received[key] += n(pieces);
+      }
+    }
   }
   /**
    * ONE SOURCE FOR BAGS ISSUED, never two.

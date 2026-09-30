@@ -423,47 +423,71 @@ async function departmentActivityCounts(
       };
     }
     case "asset_management": {
-      // Split in two on purpose: the second group of tables arrives in 0014,
-      // 0019 and 0022, and a database one migration behind must still show the
-      // raw material and delivery counts rather than an empty card.
+      // Four tiles, because this tab is four things and a card showing two of
+      // them describes a quarter of the department.
+      //
+      // "Raw material loads" used to head this card, counting
+      // `raw_material_receipts` — the per-TRUCK table that nothing has written
+      // since the daily raw-material report replaced it. The figure could only
+      // ever be stale or zero, and nobody could say what it was counting. It is
+      // gone from here; the rows stay readable under Settings → Submissions.
+      //
+      // Split in two queries on purpose: the second group of tables arrives in
+      // 0014, 0019, 0022 and 0033, and a database a migration behind must still
+      // show the counts it does have rather than an empty card.
       const [[a], [b]] = await Promise.all([
-        sql<{ raw: string; deliveries: string; purchases: string; claims: string }[]>`
+        sql<{ deliveries: string; purchases: string; claims: string }[]>`
           select
-            (select count(*) from raw_material_receipts where date >= ${start} and date < ${end})               as raw,
-            (select count(*) from delivery_reports      where date >= ${start} and date < ${end})               as deliveries,
-            (select count(*) from purchase_requests     where created_at >= ${start} and created_at < ${end})   as purchases,
-            (select count(*) from damage_claims         where created_at >= ${start} and created_at < ${end})   as claims`.catch(
+            (select count(*) from delivery_reports  where date >= ${start} and date < ${end})             as deliveries,
+            (select count(*) from purchase_requests where created_at >= ${start} and created_at < ${end}) as purchases,
+            (select count(*) from damage_claims     where created_at >= ${start} and created_at < ${end}) as claims`.catch(
           (e) => {
             missing(e);
-            return [{ raw: "0", deliveries: "0", purchases: "0", claims: "0" }];
+            return [{ deliveries: "0", purchases: "0", claims: "0" }];
           }
         ),
-        sql<{ grv: string; siv: string; usage: string; damage: string; stock: string }[]>`
+        sql<{
+          raw: string;
+          grv: string;
+          bags: string;
+          siv: string;
+          usage: string;
+          damage: string;
+          stock: string;
+        }[]>`
           select
+            (select count(*) from raw_material_daily      where date >= ${start} and date < ${end}) as raw,
             (select count(*) from goods_receiving_vouchers where date >= ${start} and date < ${end}) as grv,
+            (select count(*) from pp_bag_purchases        where date >= ${start} and date < ${end}) as bags,
             (select count(*) from store_issue_vouchers     where date >= ${start} and date < ${end}) as siv,
             (select count(*) from pp_bag_usage             where date >= ${start} and date < ${end}) as usage,
             (select count(*) from pp_bag_damage_reports    where date >= ${start} and date < ${end}) as damage,
             (select count(*) from daily_ops_reports        where date >= ${start} and date < ${end}) as stock`.catch(
-          () => [{ grv: "0", siv: "0", usage: "0", damage: "0", stock: "0" }]
+          () => [{ raw: "0", grv: "0", bags: "0", siv: "0", usage: "0", damage: "0", stock: "0" }]
         ),
       ]);
-      const raw = Number(a.raw) || 0;
       const purchases = Number(a.purchases) || 0;
+      const raw = Number(b.raw) || 0;
+      const siv = Number(b.siv) || 0;
+      // Goods received is both ways they arrive: the voucher, and the PP bag
+      // receiving form that took the bags off it.
+      const received = (Number(b.grv) || 0) + (Number(b.bags) || 0);
       const total =
         raw +
         purchases +
+        received +
+        siv +
         (Number(a.deliveries) || 0) +
         (Number(a.claims) || 0) +
-        (Number(b.grv) || 0) +
-        (Number(b.siv) || 0) +
         (Number(b.usage) || 0) +
         (Number(b.damage) || 0) +
         (Number(b.stock) || 0);
       return {
         total,
         headline: [
-          { icon: "🚚", label: "Raw material loads", value: raw },
+          { icon: "🧱", label: "Raw material days", value: raw },
+          { icon: "📥", label: "Goods received", value: received },
+          { icon: "📤", label: "Store issues", value: siv },
           { icon: "🛒", label: "Purchase requests", value: purchases },
         ],
       };

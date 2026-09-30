@@ -1,5 +1,6 @@
 import sql, { first, jsonb } from "@/lib/sql";
 import { normalizeFullName, verifyPassword } from "@/lib/password";
+import { runAfter } from "@/lib/after";
 
 /**
  * Telegram bot authentication.
@@ -163,10 +164,17 @@ export async function logoutUser(session: any) {
 
 /**
  * Revokes every live bot session for a user. Called on password change,
- * deactivation, force-logout and delete. Bumping session_epoch is what makes
- * the next inbound message from that chat fail resolveSession().
+ * deactivation, force-logout, delete, and any change to what they may file.
+ * Bumping session_epoch is what makes the next inbound message from that chat
+ * fail resolveSession().
+ *
+ * `reason` is what the person is TOLD. Without it the revocation was silent:
+ * their keyboard kept the buttons it was drawn with, and they found out by
+ * tapping one and being asked to sign in — which reads as the bot breaking
+ * rather than as their access having changed. The message goes out behind the
+ * response, so a slow Telegram call never holds up the dashboard.
  */
-export async function revokeUserSessions(userId: string) {
+export async function revokeUserSessions(userId: string, reason?: string) {
   const [user] = await sql<{ chat_id: string | null }[]>`
     update telegram_users
        set session_epoch = session_epoch + 1, logged_in = false
@@ -180,6 +188,19 @@ export async function revokeUserSessions(userId: string) {
              state = 'idle', mode = 'unknown', history = '[]'::jsonb
        where chat_id = ${user.chat_id}
     `.catch(() => {});
+
+    if (reason) {
+      const chatId = user.chat_id;
+      // Imported here rather than at the top of the file: bot-auth is pulled in
+      // by middleware-adjacent code paths, and the Telegram client brings its
+      // own fetch plumbing with it.
+      runAfter(
+        (async () => {
+          const { sendEntryMenu } = await import("@/lib/telegram");
+          await sendEntryMenu(chatId, `🔄 ${reason}\n\nእባክዎ ድጋሚ ይግቡ።`).catch(() => {});
+        })()
+      );
+    }
   }
 }
 
