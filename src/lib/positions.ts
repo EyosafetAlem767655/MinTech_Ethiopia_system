@@ -198,7 +198,7 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
   },
   price_list: {
     key: "price_list",
-    button: "💲 የወሩ የዋጋ ዝርዝር",
+    button: "💲 የወሩ unit price ዝርዝር",
     captureMode: "asset_entry",
     input: "any",
     question: "💲 የወሩን የነጠላ ዋጋ ዝርዝር በደረጃ እናስገባለን።",

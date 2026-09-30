@@ -389,6 +389,7 @@ function SubmissionsTab() {
   const [error, setError] = useState("");
   const [bin, setBin] = useState<BinRow[] | null>(null);
   const [showBin, setShowBin] = useState(false);
+  const [loading, setLoading] = useState(false);
 
   /**
    * The registry entry for one row.
@@ -416,8 +417,14 @@ function SubmissionsTab() {
    * submission hides the rest. The skeleton now belongs to the FIRST load only;
    * after that the old rows stay up until the new ones arrive.
    */
-  const load = useCallback(async () => {
+  const load = useCallback(async (opts: { replace?: boolean } = {}) => {
     setError("");
+    setLoading(true);
+    // A filter change REPLACES the list wholesale, so the old rows are already
+    // wrong and the skeleton is the honest thing to show. A background reload
+    // (after a delete, say) keeps them up and only dims them — that was the
+    // fix for "deleting one submission hides the rest" and must not regress.
+    if (opts.replace) setRows(null);
     const p = new URLSearchParams({ collection });
     // An explicit date range wins over the quick one — otherwise picking dates
     // would silently keep filtering by "last 7 days" as well.
@@ -446,6 +453,8 @@ function SubmissionsTab() {
       // that renders as a skeleton for ever and reads as "everything is gone".
       setError("Could not reach the server. What is on screen may be out of date.");
       setRows((prev) => prev ?? []);
+    } finally {
+      setLoading(false);
     }
   }, [collection, range, from, to, q]);
 
@@ -459,8 +468,10 @@ function SubmissionsTab() {
     setBin(Array.isArray(json.rows) ? json.rows : []);
   }, []);
 
+  // `load` is rebuilt whenever a filter changes, which is exactly when the list
+  // should be replaced rather than refreshed underneath.
   useEffect(() => {
-    load();
+    load({ replace: true });
   }, [load]);
   useEffect(() => {
     loadBin();
@@ -581,11 +592,12 @@ function SubmissionsTab() {
       <div className="card space-y-3 p-4">
         <select
           value={collection}
+          disabled={loading}
           onChange={(e) => {
             setEditing(null);
             setCollection(e.target.value as CollectionFilter);
           }}
-          className="w-full rounded-lg border border-clay-100 bg-white px-3 py-2 text-sm font-bold"
+          className="w-full rounded-lg border border-clay-100 bg-white px-3 py-2 text-sm font-bold disabled:opacity-60"
         >
           <option value="all">📋 All submissions</option>
           {SUBMISSION_COLLECTIONS.map((c) => (
@@ -597,14 +609,16 @@ function SubmissionsTab() {
         </select>
 
         {/* Quick ranges. Disabled while explicit dates are set, so the screen
-            never shows one filter while obeying another. */}
-        <div className="flex flex-wrap gap-1">
+            never shows one filter while obeying another — and while a load is
+            in flight, so a second tap cannot queue an answer that arrives after
+            the first one and leaves the list disagreeing with the pills. */}
+        <div className="flex flex-wrap items-center gap-1">
           {(Object.keys(SUBMISSION_RANGES) as SubmissionRange[]).map((k) => (
             <button
               key={k}
-              disabled={usingDates}
+              disabled={usingDates || loading}
               onClick={() => setRange(k)}
-              className={`rounded-full px-3 py-1 text-[11px] font-bold transition ${
+              className={`rounded-full px-3 py-1 text-[11px] font-bold transition disabled:opacity-60 ${
                 usingDates
                   ? "bg-clay-50 text-stone-300"
                   : range === k
@@ -615,6 +629,11 @@ function SubmissionsTab() {
               {SUBMISSION_RANGES[k].label}
             </button>
           ))}
+          {loading && (
+            <span className="ml-1 flex items-center gap-1 text-[11px] font-bold text-stone-400">
+              <span className="inline-block animate-spin">⟳</span> Loading…
+            </span>
+          )}
         </div>
 
         <div className="flex flex-wrap gap-2">
@@ -669,14 +688,20 @@ function SubmissionsTab() {
       )}
 
       {rows === null ? (
-        <div className="card h-32 animate-pulse bg-clay-50" />
+        // Three skeleton cards rather than one grey slab: the shape of what is
+        // coming, so a range change reads as loading rather than as emptiness.
+        <div className="space-y-2">
+          {[0, 1, 2].map((i) => (
+            <div key={i} className="card h-24 animate-pulse bg-clay-50" />
+          ))}
+        </div>
       ) : rows.length === 0 ? (
         <p className="card p-4 text-sm text-stone-400">
           Nothing filed in this period. Widen the range above — it is set to{" "}
           {usingDates ? "the dates you picked" : SUBMISSION_RANGES[range].label.toLowerCase()}.
         </p>
       ) : (
-        <div className="space-y-2">
+        <div className={`space-y-2 transition-opacity ${loading ? "opacity-50" : ""}`}>
           <p className="px-1 text-[11px] font-bold text-stone-400">{rows.length} submission(s)</p>
           {rows.map((row) => {
             const spec = specOf(row);

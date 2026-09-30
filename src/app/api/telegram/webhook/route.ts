@@ -1606,6 +1606,7 @@ export async function POST(req: NextRequest) {
           await logActivity({
             chatId,
             actor: submitterName,
+            userId: user._id,
             action: "submission",
             detail: `${state.kind} ${saved.id}`,
             ok: true,

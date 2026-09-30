@@ -175,18 +175,18 @@ export default function OwnerDashboard() {
           )}
 
           {!summaries && !error && (
-            <div className="space-y-3 lg:grid lg:grid-cols-2 lg:gap-3 lg:space-y-0 xl:grid-cols-4">
+            <div className="space-y-3 lg:grid lg:grid-cols-2 lg:items-start lg:gap-3 lg:space-y-0 xl:grid-cols-4">
               {[0, 1, 2, 3].map((i) => (
-                // The height of a real summary card — the grid stretches every
-                // card to the tallest, and Asset carries four tiles — so the
-                // page does not jump when the counts land.
-                <div key={i} className="card h-60 animate-pulse bg-clay-50" />
+                // A two-tile card, which three of the four are. Asset grows a
+                // row when its counts land; sizing every placeholder for the
+                // tallest would leave the other three visibly shrinking.
+                <div key={i} className="card h-44 animate-pulse bg-clay-50" />
               ))}
             </div>
           )}
 
           {summaries && (
-            <div className="space-y-3 lg:grid lg:grid-cols-2 lg:gap-3 lg:space-y-0 xl:grid-cols-4">
+            <div className="space-y-3 lg:grid lg:grid-cols-2 lg:items-start lg:gap-3 lg:space-y-0 xl:grid-cols-4">
               {summaries.map((s) => (
                 <SummaryCard key={s.department} summary={s} />
               ))}
@@ -223,9 +223,11 @@ function SummaryCard({ summary }: { summary: DepartmentSummary }) {
   return (
     <Link
       href={`/departments/${summary.department}`}
-      // h-full + column layout so a card with four tiles and one with two still
-      // line up top and bottom in the grid — the Asset card carries four.
-      className="card flex h-full flex-col overflow-hidden p-0 text-left transition active:scale-[0.99]"
+      // No h-full, and the grid above does not stretch its rows: a card is
+      // exactly as tall as its own tiles. Asset carries four and is taller for
+      // it; making the other three match would only add white space under
+      // figures that are not there.
+      className="card flex flex-col overflow-hidden p-0 text-left transition active:scale-[0.99]"
     >
       {/* Header strip.
 

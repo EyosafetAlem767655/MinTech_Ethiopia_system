@@ -1775,7 +1775,7 @@ export function assetPreview(state: AssetFlowState): string {
       (it) => `${it.label}: <b>${money(Number(d[priceKey(it.key)]) || 0)}</b>`
     );
     return [
-      `💲 <b>የ${monthLabel()} የዋጋ ዝርዝር</b>`,
+      `💲 <b>የ${monthLabel()} unit price ዝርዝር</b>`,
       "",
       ...rows,
       "",
@@ -1935,9 +1935,14 @@ export async function saveAssetReport(
     // per kind — and the monthly finance report already reads it as the bag
     // received column. It simply had no writer between the Goods Receiving
     // Voucher taking the job and this form taking it back.
+    // `filed_by_dept` tells the two copies of one purchase apart: an 'asset'
+    // row carries the counts by size and colour, a 'finance' row only the
+    // receipt. This form is filed by the store, and the column defaults to
+    // 'finance' — so it has to be said, or every delivery would be filed under
+    // a department that did not file it.
     const [row] = await sql<{ id: string }[]>`
-      insert into pp_bag_purchases (date, bags, reported_by, source)
-      values (${reportDate(d.date)}, ${sql.json(bagsReceived(d))}, ${reportedBy}, 'telegram')
+      insert into pp_bag_purchases (date, bags, reported_by, filed_by_dept, source)
+      values (${reportDate(d.date)}, ${sql.json(bagsReceived(d))}, ${reportedBy}, 'asset', 'telegram')
       returning id`;
     return { id: row.id, table: "pp_bag_purchases" };
   }

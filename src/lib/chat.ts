@@ -12,6 +12,12 @@ import { getLotBalances } from "@/lib/metrics";
 import { eatDateLabel } from "@/lib/dates";
 import { requiresDailyReport, resolveCapabilities } from "@/lib/positions";
 import { splitByCompliance } from "@/lib/compliance";
+import { buildFinanceReport, monthLabel } from "@/lib/finance-report";
+import { reconcileBags } from "@/lib/stock-reconciliation";
+import { rawMaterialCheck } from "@/lib/raw-material-stock";
+import { ALARM_TONNES, creditFigures, customerExposure } from "@/lib/credit";
+import { STALE_DAYS, groupStatuses, itemStatuses, recentCounts } from "@/lib/store-inventory";
+import { WHITENESS_SPECS, bandLabel, belowSpec, specFor } from "@/lib/whiteness-spec";
 
 /**
  * Company chatbot with full data access via tool-calling. The model decides
@@ -45,6 +51,9 @@ const READABLE_TABLES = {
   stock_status_reports: "created_at",
   raw_material_receipts: "date",
   raw_material_daily: "date",
+  sales_receipts: "created_at",
+  sales_credit_payments: "collected_on",
+  daily_sales_summaries: "date",
   store_counts: "date",
   delivery_reports: "date",
   purchase_item_reports: "date",
@@ -90,7 +99,25 @@ const READABLE_TABLES = {
   telegram_users: "created_at",
   bot_activity: "created_at",
   briefs: "created_at",
+  system_errors: "created_at",
+  // The recycle bin: what was deleted, by whom, and the whole row as it was.
+  deleted_submissions: "deleted_at",
 } as const;
+
+/**
+ * DELIBERATELY UNREADABLE, and not an oversight.
+ *
+ * `web_sessions` and `telegram_sessions` hold live session tokens and auth
+ * state; `push_subscriptions` holds browser push keys; `stored_files` is
+ * storage plumbing. "Give the assistant every table" cannot mean handing
+ * credential material to a model that is one prompt away from repeating it
+ * back — the same reason `telegram_users` is read through SAFE_COLUMNS below
+ * rather than with `select *`.
+ *
+ * Also absent because they answer nothing anyone would ask: `telegram_updates`
+ * (redelivery dedupe), `sales_scan_jobs` (a worker queue) and `ai_chat_usage`
+ * (this assistant metering itself).
+ */
 
 type ReadableTable = keyof typeof READABLE_TABLES;
 
@@ -303,6 +330,84 @@ const tools: OpenAI.Chat.ChatCompletionTool[] = [
         "they have, whether the account is active and signed in, and when they were last seen. " +
         "Use this for questions about who works here, who can report what, or who is inactive.",
       parameters: { type: "object", properties: {} },
+    },
+  },
+  /* ── The figures that are CALCULATED, not stored ──────────────────────────
+     Every one of these wraps a function the dashboard already renders, so the
+     assistant and the screen cannot quote different numbers for the same
+     question. None of them is answerable by reading a table: they join an
+     opening balance to movements, or a reported figure to a counted one. */
+  {
+    type: "function",
+    function: {
+      name: "get_finance_report",
+      description:
+        "The monthly asset/finance report: opening balance, received, issued, stock on hand and " +
+        "net worth for every product, raw material and PP bag kind, plus the month's totals. Use " +
+        "this for questions about stock value, what is on hand, or what a month consumed.",
+      parameters: {
+        type: "object",
+        properties: {
+          month: { type: "string", description: 'Month as "YYYY-MM". Defaults to the current month.' },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_stock_checks",
+      description:
+        "Whether what is on the floor agrees with the paperwork: the PP bag stock check (opening + " +
+        "received - used vs counted, per bag kind) and the raw material stock check (per material, " +
+        "in tonnes). Use this for questions about missing stock, gaps, or whether the counts add up.",
+      parameters: {
+        type: "object",
+        properties: {
+          month: { type: "string", description: 'Month as "YYYY-MM". Defaults to the current month.' },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_credit_exposure",
+      description:
+        "Credit sales: which customers owe money, how much is outstanding, how many days are left " +
+        "to collect, what is overdue, and who is carrying more than the 100 tonne alarm on unpaid " +
+        "stock. Use this for any question about debts, collections or who has not paid.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_store_inventory",
+      description:
+        "The spare-parts store: how many of each item are on the shelf, when each was last " +
+        "counted, and which groups are overdue a count. Use this for questions about bearings, " +
+        "V-belts, breakers, contactors, fuses, electrodes, oils and other workshop items.",
+      parameters: {
+        type: "object",
+        properties: {
+          search: { type: "string", description: "Only items whose name or code matches (optional)." },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_whiteness_quality",
+      description:
+        "Whiteness readings against each product's published band: which checks came in below " +
+        "spec, by how much, and the average per product. Use this for questions about product " +
+        "quality, whiteness or whether a batch met its grade.",
+      parameters: {
+        type: "object",
+        properties: { days: { type: "number", default: 30 } },
+      },
     },
   },
   {
@@ -611,6 +716,104 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<unk
       }));
     }
 
+    case "get_finance_report": {
+      const month = typeof args.month === "string" && /^\d{4}-\d{2}$/.test(args.month)
+        ? args.month
+        : monthLabel();
+      try {
+        return await buildFinanceReport(month);
+      } catch (e) {
+        return { month, error: "The monthly report could not be built.", detail: String(e).slice(0, 200) };
+      }
+    }
+    case "get_stock_checks": {
+      const month = typeof args.month === "string" && /^\d{4}-\d{2}$/.test(args.month)
+        ? args.month
+        : monthLabel();
+      const [bags, materials] = await Promise.all([
+        reconcileBags(month).catch(() => null),
+        rawMaterialCheck(month).catch(() => null),
+      ]);
+      return { month, bags, rawMaterials: materials };
+    }
+    case "get_credit_exposure": {
+      try {
+        const rows = await sql<{ customer: string; qty: string; date: string; credit: string; paid: string }[]>`
+          select i.customer, i.qty, i.date, i.invoice_credit as credit,
+                 coalesce((select sum(p.amount) from sales_credit_payments p where p.invoice_id = i.id), 0) as paid
+            from sales_invoices i
+           where i.invoice_credit > 0
+           order by i.date desc`;
+        const invoices = rows.map((r) => {
+          const f = creditFigures({ date: r.date, invoiceCredit: Number(r.credit), paid: Number(r.paid) });
+          return {
+            customer: r.customer,
+            date: r.date,
+            // `qty` is the tonnes on the invoice — the name customerExposure
+            // reads it by, and the 100 t alarm is counted in it.
+            qty: Number(r.qty) || 0,
+            credit: Number(r.credit) || 0,
+            paid: Number(r.paid) || 0,
+            outstanding: f.outstanding,
+            status: f.status,
+            daysLeft: f.daysLeft,
+          };
+        });
+        return {
+          alarmTonnes: ALARM_TONNES,
+          customers: customerExposure(invoices),
+          invoices: invoices.slice(0, 100),
+        };
+      } catch (e) {
+        return { error: "Credit data is unavailable.", detail: String(e).slice(0, 200) };
+      }
+    }
+    case "get_store_inventory": {
+      const counts = await recentCounts().catch(() => []);
+      const needle = String(args.search || "").trim().toLowerCase();
+      const items = itemStatuses(counts)
+        .filter((s) =>
+          needle
+            ? s.item.name.toLowerCase().includes(needle) || s.item.key.toLowerCase().includes(needle)
+            : true
+        )
+        .map((s) => ({
+          item: s.item.name,
+          key: s.item.key,
+          group: s.item.group,
+          unit: s.item.unit,
+          quantity: s.qty,
+          previous: s.previous,
+          countedAt: s.countedAt,
+          unchangedForCounts: s.unchangedFor,
+        }));
+      return { items, groups: groupStatuses(counts), staleAfterDays: STALE_DAYS };
+    }
+    case "get_whiteness_quality": {
+      const days = Math.min(Number(args.days) || 30, 365);
+      const since = new Date(Date.now() - days * 86400_000);
+      try {
+        const rows = await sql<
+          { date_label: string; quarter: number; product_code: string; line: number; readings: Record<string, string>; avg: string | null }[]
+        >`
+          select date_label, quarter, product_code, line, readings, avg
+            from whiteness_checks where date >= ${since} order by date desc limit 500`;
+        const breaches = rows
+          .map((r) => ({ row: r, below: belowSpec(r.product_code, r.readings) }))
+          .filter((x) => x.below.length > 0)
+          .map((x) => ({
+            date: x.row.date_label,
+            quarter: x.row.quarter,
+            product: x.row.product_code,
+            line: x.row.line,
+            below: x.below,
+            band: specFor(x.row.product_code) ? bandLabel(specFor(x.row.product_code)!) : null,
+          }));
+        return { days, checks: rows.length, belowSpec: breaches, specs: WHITENESS_SPECS };
+      } catch (e) {
+        return { days, error: "Whiteness data is unavailable.", detail: String(e).slice(0, 200) };
+      }
+    }
     case "search_records": {
       const limit = Math.min(Number(args.limit) || 20, 50);
       const table = args.collection;

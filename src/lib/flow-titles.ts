@@ -47,7 +47,7 @@ export const FLOW_TITLE: Record<AssetFlowKind, string> = {
   whiteness_check: "⚪ የነጭነት ጥራት ምርመራ",
   store_count: "🧰 የመጋዘን ዕቃዎች ቆጠራ",
   pp_bag_receipt: "🧺 የPP ከረጢት ገቢ",
-  price_list: "💲 የወሩ የዋጋ ዝርዝር",
+  price_list: "💲 የወሩ unit price ዝርዝር",
   wht_holder: "📄 WHT ደረሰኝ ያዢ",
   sales_invoice: "🧾 የሽያጭ ሪፖርት",
 };
