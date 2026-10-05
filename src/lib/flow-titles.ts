@@ -28,6 +28,12 @@ export type AssetFlowKind =
   | "store_count"
   // A delivery of PP bags, on its own form.
   | "pp_bag_receipt"
+  // Hours the plant was stopped, and why.
+  | "downtime"
+  // Money collected against a credit sale.
+  | "credit_payment"
+  // What came in through each bank, once a month.
+  | "bank_collection"
   // Finance.
   | "price_list"
   | "wht_holder"
@@ -47,6 +53,9 @@ export const FLOW_TITLE: Record<AssetFlowKind, string> = {
   whiteness_check: "⚪ የነጭነት ጥራት ምርመራ",
   store_count: "🧰 የመጋዘን ዕቃዎች ቆጠራ",
   pp_bag_receipt: "🧺 የPP ከረጢት ገቢ",
+  downtime: "⏱ የምርት መቋረጥ ሪፖርት",
+  credit_payment: "💳 የብድር ክፍያ መከታተያ",
+  bank_collection: "🏦 የወሩ የባንክ ገቢ",
   price_list: "💲 የወሩ unit price ዝርዝር",
   wht_holder: "📄 WHT ደረሰኝ ያዢ",
   sales_invoice: "🧾 የሽያጭ ሪፖርት",

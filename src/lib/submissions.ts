@@ -39,6 +39,8 @@ export const SUBMISSION_COLLECTIONS = [
   "pp_bag_usage",
   "whiteness",
   "store_count",
+  "downtime",
+  "bank_collection",
   // Finance, rebuilt.
   "tool_purchase",
   "pp_bag_purchase",
@@ -474,6 +476,35 @@ export const SUBMISSIONS: Record<SubmissionCollection, SubmissionSpec> = {
     searchColumns: ["date_label", "counted_by"],
     displayFields: [TEXT("date_label", "Date"), TEXT("counted_by", "By")],
     // 132 quantities in one jsonb map; the same argument as above.
+    editableKeys: [],
+  },
+  downtime: {
+    table: "downtime_reports",
+    label: "Downtime",
+    icon: "⏱",
+    dateColumn: "date",
+    authorColumn: "reported_by",
+    searchColumns: ["date_label", "reason", "note", "reported_by"],
+    displayFields: [
+      TEXT("date_label", "Date"),
+      NUM("hours", "Hours"),
+      TEXT("reason", "Reason"),
+      TEXT("maintenance_kind", "Maintenance"),
+      LONG("note", "Note"),
+      TEXT("reported_by", "By"),
+    ],
+    editableKeys: ["hours", "note"],
+  },
+  bank_collection: {
+    table: "bank_collections",
+    label: "Bank collections",
+    icon: "🏦",
+    dateColumn: "created_at",
+    authorColumn: "reported_by",
+    searchColumns: ["month", "reported_by"],
+    displayFields: [TEXT("month", "Month"), NUM("total", "Total"), TEXT("reported_by", "By")],
+    // The per-bank figures are a jsonb map answered as one sheet; correcting
+    // one of them means re-filing the month, which upserts.
     editableKeys: [],
   },
   whiteness: {

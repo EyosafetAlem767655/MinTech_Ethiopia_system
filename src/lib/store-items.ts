@@ -1,7 +1,7 @@
 /**
  * The spare-parts store, as the managers wrote it down.
  *
- * 132 items in three blocks and ten groups. Nothing in the system recorded any
+ * 153 items in three blocks and fourteen groups. Nothing in the system recorded any
  * of this before; the count that fills it arrives from the bot one block at a
  * time (src/lib/store-count-paste.ts) and is displayed on the asset tab.
  *
@@ -25,7 +25,11 @@
  * list.
  */
 
-export type StoreUnit = "pcs" | "l" | "m";
+/**
+ * `roll` and `pak` arrived with the opening count: cable comes on a roll and
+ * electrodes in a packet, and counting either in pieces would mean nothing.
+ */
+export type StoreUnit = "pcs" | "l" | "m" | "roll" | "pak";
 
 export interface StoreItem {
   /** Permanent. See rule 1 above. */
@@ -77,8 +81,12 @@ export const STORE_GROUPS: StoreGroup[] = [
   { key: "fus", label: "FUSE", block: "electrical" },
   { key: "fsh", label: "Feus holder", block: "electrical" },
   { key: "elc", label: "Electrical other", block: "electrical" },
+  // Added with the opening count: the fittings and consumables the store
+  // actually holds, which the managers' original list did not reach.
+  { key: "elec2", label: "Electrical fittings", block: "electrical" },
   { key: "oil", label: "Oils", block: "workshop" },
   { key: "wsh", label: "Work shop item", block: "workshop" },
+  { key: "cons", label: "Consumables", block: "workshop" },
 ];
 
 /** Shorthand so the list below reads like the list it came from. */
@@ -239,7 +247,10 @@ export const STORE_ITEMS: StoreItem[] = [
   it("oil:industrial-320", "oil", "INDUSTRIAL OIL 320", "l"),
   it("oil:compressor-46", "oil", "Compress OIL No 46", "l"),
 
-  // Work shop item — 17. The bars are counted in metres, the rest in pieces.
+  // Work shop item. The bars are counted in PIECES — one 6 m length is one
+  // piece, which is how the store counts them and how they are priced on the
+  // opening count sheet (3 × 25,652 for a 30*30*6). They were briefly
+  // catalogued in metres; a count of "3" against that unit read as 3 metres.
   it("wsh:electrod-3.2", "wsh", "Electrod 3.2 mm"),
   it("wsh:electrod-2.5", "wsh", "Electrod 2.5 mm"),
   it("wsh:ok48-3.2", "wsh", "OK48 Electrod 3.2mm2"),
@@ -251,12 +262,42 @@ export const STORE_ITEMS: StoreItem[] = [
   it("wsh:cut-350x3.2x25.4", "wsh", "Cutting disck 350*3.2*25.4"),
   it("wsh:grind-180x5.5x22.2", "wsh", "Grinding disck 180*5.5*22.2"),
   it("wsh:cut-180x3.2x22.23", "wsh", "Cutting disck 180*3.2*22.23"),
-  it("wsh:sqbar-40", "wsh", "Square bar 40*40*6m", "m"),
-  it("wsh:sqbar-30", "wsh", "Square bar 30*30*6m", "m"),
-  it("wsh:sqbar-10", "wsh", "Square bar 10*10*6m", "m"),
-  it("wsh:rbar-40", "wsh", "Round bar #40mm", "m"),
-  it("wsh:rbar-30", "wsh", "Round bar #30mm", "m"),
+  it("wsh:sqbar-40", "wsh", "Square bar 40*40*6m"),
+  it("wsh:sqbar-30", "wsh", "Square bar 30*30*6m"),
+  it("wsh:sqbar-10", "wsh", "Square bar 10*10*6m"),
+  it("wsh:rbar-40", "wsh", "Round bar #40mm"),
+  it("wsh:rbar-30", "wsh", "Round bar #30mm"),
   it("wsh:tyre-loader", "wsh", "Tyere for Loader"),
+
+  /* ── Added with the opening count (October 2026) ───────────────────────── */
+
+  // ⚡ Electrical fittings — 11
+  it("elec2:led-18w", "elec2", "Led 18W"),
+  it("elec2:lamp", "elec2", "Lamp"),
+  it("elec2:lamp-holder", "elec2", "Lamp holder"),
+  it("elec2:cable-2.5", "elec2", "Electric cable #2.5", "roll"),
+  it("elec2:on-off-switch", "elec2", "On Off swich"),
+  it("elec2:conduit", "elec2", "conduet"),
+  it("elec2:limit-switch", "elec2", "Limite swich"),
+  it("elec2:socket", "elec2", "socket"),
+  it("elec2:capacitor", "elec2", "Capaciter"),
+  it("elec2:cable-lag-35", "elec2", "Cable lag #35"),
+  it("elec2:cable-lag-25", "elec2", "Cable lag #25"),
+
+  // 🛢 Consumables — 10. "China electrod #3.2" is kept apart from the
+  // "Electrod 3.2 mm" above: they are priced and bought as different products,
+  // and merging two things that turn out to be one is recoverable where
+  // splitting one that turns out to be two is not.
+  it("cons:silicone", "cons", "silcone sealant"),
+  it("cons:epoxy", "cons", "Epoxy"),
+  it("cons:grease-nipple", "cons", "Greas Nipple"),
+  it("cons:sewing-thread", "cons", "Sewing theared"),
+  it("cons:leather-glove", "cons", "Lather vglove"),
+  it("cons:hammer-6kg", "cons", "Hammer 6kg"),
+  it("cons:broom", "cons", "plastic broom"),
+  it("cons:mop", "cons", "Mop"),
+  it("cons:china-electrod-3.2", "cons", "China electrod #3.2", "pak"),
+  it("cons:rbar-25", "cons", "Round bar #25"),
 ];
 
 /* ──────────────────────────────── lookups ─────────────────────────────────── */

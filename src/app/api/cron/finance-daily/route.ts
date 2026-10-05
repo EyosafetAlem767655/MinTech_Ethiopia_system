@@ -4,10 +4,12 @@ import { logActivity } from "@/lib/bot-auth";
 import { hasPosition, resolveCapabilities } from "@/lib/positions";
 import { smsGatewayConfigured } from "@/lib/sms";
 import { dailyHeartbeat } from "@/lib/heartbeat";
-import { sendMessage } from "@/lib/telegram";
+import { reportKeyboardFor, sendMessage } from "@/lib/telegram";
 import { describeGap, reconcileBags } from "@/lib/stock-reconciliation";
 import {
+  bankReportMonth,
   eatDayOfMonth,
+  isBankReportWindow,
   isBaseBalanceReminderWindow,
   monthLabel,
   nextMonth,
@@ -218,6 +220,42 @@ export async function GET(req: NextRequest) {
     console.warn("finance-daily: bag reconciliation unavailable", e);
   }
 
+  /* ──────────── 3. The month that just closed, and its bank sheet ────────── */
+  //
+  // Chased at the START of a month, not the end: the sheet covers a month that
+  // has already finished. Repeated through the window rather than sent once,
+  // for the same reason the opening balance is — a report taken once a month
+  // gets one chance to land, and a phone that was off that morning used to mean
+  // nobody was told at all.
+  const bankMonth = bankReportMonth(now);
+  let bankReminders = 0;
+  const [bankFiled] = await sql<{ month: string }[]>`
+    select month from bank_collections where month = ${bankMonth}
+  `.catch(() => []);
+
+  if (isBankReportWindow(now) && !bankFiled) {
+    const financeStaff = employees.filter((u) =>
+      resolveCapabilities(u.positions, u.capabilities).some((c) => c.key === "bank_collection")
+    );
+    const text =
+      `🏦 <b>የ${bankMonth} የባንክ ገቢ</b>
+
+` +
+      `ወሩ ተጠናቋል። በየባንኩ የገባውን ገቢ ያስገቡ።
+` +
+      `<i>የወሩን ሉህ ፎቶ ይላኩ — ተነብቦ ይሞላል።</i>`;
+    await Promise.all(
+      financeStaff.map((u) =>
+        sendMessage(String(u.chat_id), text, {
+          reply_markup: reportKeyboardFor(
+            resolveCapabilities(u.positions, u.capabilities).map((c) => c.button)
+          ),
+        }).catch(() => {})
+      )
+    );
+    bankReminders = financeStaff.length;
+  }
+
   return NextResponse.json({
     ok: true,
     date: today,
@@ -229,6 +267,7 @@ export async function GET(req: NextRequest) {
       failed: smsFailed,
       alreadySentToday: smsSkipped,
     },
+    bankCollections: { month: bankMonth, filed: Boolean(bankFiled), reminded: bankReminders },
     baseBalance: {
       month: upcoming,
       inReminderWindow: inWindow,

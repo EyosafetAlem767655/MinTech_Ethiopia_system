@@ -25,6 +25,12 @@ export type CapabilityKey =
   | "store_count"
   // A delivery of PP bags.
   | "pp_bag_receipt"
+  // Hours the plant was stopped, and why.
+  | "downtime"
+  // Money collected against a credit sale.
+  | "credit_payment"
+  // What came in through each bank, once a month.
+  | "bank_collection"
   | "purchase_items"
   | "sales_report"
   | "pp_bag_damage"
@@ -140,6 +146,27 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
     captureMode: "asset_entry",
     input: "any",
     question: "🧱 የቀኑን የጥሬ ዕቃ ገቢ፣ ወጪና ክምችት እናስገባለን።",
+  },
+  bank_collection: {
+    key: "bank_collection",
+    button: "🏦 የወሩ የባንክ ገቢ",
+    captureMode: "asset_entry",
+    input: "any",
+    question: "🏦 የወሩን የባንክ ገቢ ከሉሁ እናስገባለን።",
+  },
+  credit_payment: {
+    key: "credit_payment",
+    button: "💳 የብድር ክፍያ መከታተያ",
+    captureMode: "asset_entry",
+    input: "any",
+    question: "💳 በብድር የተሸጠውን ክፍያ እንመዘግባለን።",
+  },
+  downtime: {
+    key: "downtime",
+    button: "⏱ የምርት መቋረጥ ሪፖርት",
+    captureMode: "asset_entry",
+    input: "any",
+    question: "⏱ ምርቱ የቆመበትን ሰዓትና ምክንያት እናስገባለን።",
   },
   pp_bag_receipt: {
     key: "pp_bag_receipt",
@@ -333,7 +360,7 @@ export const POSITIONS: Record<PositionKey, Position> = {
     // column by column — five ways to record the same day, none of them
     // agreeing. Shift analysis and stone traceability are gone from the system
     // entirely; their historic rows stay readable under Settings → Submissions.
-    capabilities: ["production_report", "pp_bag_used", "whiteness_check"],
+    capabilities: ["production_report", "pp_bag_used", "whiteness_check", "downtime"],
     dailyRequired: true,
     // production_reports is written on every submission; daily_ops_reports only
     // when the stock half is non-empty, so it cannot stand in as the signal.
@@ -410,7 +437,7 @@ export const POSITIONS: Record<PositionKey, Position> = {
       "Files the goods receiving voucher for every purchase, the monthly price list, and registers the customers who still owe a WHT receipt.",
     // The GRV replaced the tool purchase report and the PP bag receipt: one
     // voucher covers every kind of purchase, PP bags included as line items.
-    capabilities: ["grv", "price_list", "wht_holder"],
+    capabilities: ["grv", "price_list", "wht_holder", "credit_payment", "bank_collection"],
     // Purchases are on-demand and the price list is monthly, so there is no
     // daily obligation to chase. The WHT chase is its own cron, not a reminder.
     dailyRequired: false,

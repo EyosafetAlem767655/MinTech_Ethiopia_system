@@ -18,12 +18,13 @@ import {
  *   2. The monthly asset report — production and raw materials.
  *   3. Credit sales: what is owed, when it falls due, and who is over-extended.
  *   4. WHT receipt holders, and the daily SMS chasing them.
+ *   5. What came in through each bank, once a month, off one sheet.
  *
  * One component so the four share a tab strip rather than stacking into a page
  * nobody scrolls to the bottom of.
  */
 
-type Tab = "purchases" | "monthly" | "credit" | "wht";
+type Tab = "purchases" | "monthly" | "credit" | "wht" | "banks";
 
 const fmt = (n: number | null | undefined, dp = 2) =>
   n == null ? "—" : (Math.round(n * 10 ** dp) / 10 ** dp).toLocaleString(undefined, { maximumFractionDigits: dp });
@@ -40,6 +41,7 @@ export default function FinancePanels() {
             ["monthly", "📊 Monthly"],
             ["credit", "💳 Credit"],
             ["wht", "📄 WHT"],
+            ["banks", "🏦 Banks"],
           ] as const
         ).map(([k, label]) => (
           <button
@@ -58,6 +60,7 @@ export default function FinancePanels() {
       {tab === "monthly" && <MonthlyTab />}
       {tab === "credit" && <CreditTab />}
       {tab === "wht" && <WhtTab />}
+      {tab === "banks" && <BankCollectionsTab />}
     </div>
   );
 }
@@ -1157,6 +1160,141 @@ function WhtTab() {
             </div>
           ))}
         </div>
+      )}
+    </section>
+  );
+}
+
+
+/* ───────────────────────── 5. Bank cash collection ────────────────────────── */
+
+interface BankMonth {
+  month: string;
+  banks: Record<string, number>;
+  total: number;
+  photoIds: string[];
+  reportedBy: string;
+  filedAt: string;
+}
+
+const MONTH_NAMES = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+const monthName = (m: string) => {
+  const [y, mo] = m.split("-").map(Number);
+  return `${MONTH_NAMES[(mo || 1) - 1]} ${y}`;
+};
+
+/**
+ * What came in through each bank, month by month.
+ *
+ * Months down the page and banks across, because the question this answers is
+ * "is CBE still carrying most of it" — which is read down a column, not along a
+ * row. The change on the total is shown against the month before it, since a
+ * figure with nothing to compare it to is just a number.
+ */
+function BankCollectionsTab() {
+  const [data, setData] = useState<{ months: BankMonth[]; banks: string[]; unavailable?: boolean } | null>(null);
+
+  useEffect(() => {
+    fetch("/api/finance/bank-collections")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => setData(d ?? { months: [], banks: [] }))
+      .catch(() => setData({ months: [], banks: [] }));
+  }, []);
+
+  if (!data) return <div className="card h-56 animate-pulse bg-clay-50" />;
+
+  const { months, banks } = data;
+
+  return (
+    <section className="space-y-3">
+      <div className="flex flex-wrap items-baseline justify-between gap-2 px-1">
+        <h2 className="font-display text-lg font-bold">🏦 Bank collections</h2>
+        <p className="text-[11px] text-stone-400">ETB · one sheet a month</p>
+      </div>
+
+      {data.unavailable && (
+        <p className="card p-3 text-xs text-amber-700">
+          The bank collections table is not in the database yet — apply migration 0035.
+        </p>
+      )}
+
+      {months.length === 0 ? (
+        <p className="card p-4 text-sm text-stone-400">
+          No month has been filed yet. Finance files it from the bot with 🏦 የወሩ የባንክ ገቢ.
+        </p>
+      ) : (
+        <>
+          <div className="card overflow-x-auto p-0">
+            <table className="w-full min-w-[560px] text-right text-xs">
+              <thead className="bg-clay-50/70 text-[10px] uppercase tracking-wide text-stone-500">
+                <tr>
+                  <th className="p-2 text-left font-bold">Month</th>
+                  {banks.map((b) => (
+                    <th key={b} className="p-2 font-bold">
+                      {b}
+                    </th>
+                  ))}
+                  <th className="p-2 font-bold">Total</th>
+                  <th className="p-2 font-bold">vs prev.</th>
+                </tr>
+              </thead>
+              <tbody>
+                {months.map((m, i) => {
+                  // `months` is newest first, so the month before this one is
+                  // the NEXT row down.
+                  const prev = months[i + 1];
+                  const delta = prev ? m.total - prev.total : null;
+                  return (
+                    <tr key={m.month} className="border-t border-clay-50">
+                      <td className="p-2 text-left font-semibold text-stone-800">{monthName(m.month)}</td>
+                      {banks.map((b) => (
+                        <td key={b} className="p-2 tabular-nums text-stone-700">
+                          {m.banks[b] ? fmt(m.banks[b], 0) : <span className="text-stone-300">—</span>}
+                        </td>
+                      ))}
+                      <td className="p-2 font-bold tabular-nums text-clay-900">{fmt(m.total, 0)}</td>
+                      <td
+                        className={`p-2 tabular-nums ${
+                          delta === null ? "text-stone-300" : delta >= 0 ? "text-green-700" : "text-amber-700"
+                        }`}
+                      >
+                        {delta === null ? "—" : `${delta >= 0 ? "+" : ""}${fmt(delta, 0)}`}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="space-y-1.5">
+            {months.slice(0, 3).map((m) => (
+              <p key={m.month} className="px-1 text-[11px] text-stone-400">
+                {monthName(m.month)} · filed by {m.reportedBy} on {fmtDate(m.filedAt)}
+                {m.photoIds.length > 0 && (
+                  <>
+                    {" · "}
+                    {m.photoIds.map((id, i) => (
+                      <a
+                        key={id}
+                        href={`/api/files/${id}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="font-bold text-clay-700 underline"
+                      >
+                        sheet{m.photoIds.length > 1 ? ` ${i + 1}` : ""}
+                      </a>
+                    ))}
+                  </>
+                )}
+              </p>
+            ))}
+          </div>
+        </>
       )}
     </section>
   );

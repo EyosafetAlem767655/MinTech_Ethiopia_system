@@ -49,6 +49,7 @@ const ASSET_TABLES = [
   "raw_material_receipts",
   "raw_material_daily",
   "store_counts",
+  "downtime_reports",
   "delivery_reports",
   "purchase_item_reports",
   "material_counts",

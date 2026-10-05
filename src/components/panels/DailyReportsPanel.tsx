@@ -131,11 +131,9 @@ export default function DailyReportsPanel() {
   // Missing first, then whoever is furthest behind.
   // Whoever has done least, first: nothing at all, then a daily report owing,
   // then everyone up to date.
+  // Whoever has done least, first.
   const rows = [...(data.compliance ?? [])].sort(
-    (a, b) =>
-      Number(a.activeToday) - Number(b.activeToday) ||
-      Number(a.submittedToday) - Number(b.submittedToday) ||
-      a.activeDays7 - b.activeDays7
+    (a, b) => Number(a.activeToday) - Number(b.activeToday) || a.activeDays7 - b.activeDays7
   );
   const fmtLast = (d: string | null) => (d ? d.slice(5) : "never");
 
@@ -198,15 +196,13 @@ export default function DailyReportsPanel() {
                   <tr key={c._id} className="border-t border-stone-100">
                     <td className="py-2 font-semibold text-stone-800">{c.fullName}</td>
                     <td className="py-2 text-center">
-                      {c.submittedToday ? (
+                      {/* ANY submission counts. Most of these roles have no
+                          such thing as "the daily report" — they file a
+                          production report, a whiteness check, a store count —
+                          so the tick follows whether they used the bot at all
+                          today. */}
+                      {c.activeToday ? (
                         <span className="font-bold text-green-700">✓</span>
-                      ) : c.activeToday ? (
-                        <span
-                          title="Filed something else today, but not this role's daily report"
-                          className="rounded-full bg-amber-50 px-2 py-0.5 font-bold text-amber-700"
-                        >
-                          other
-                        </span>
                       ) : (
                         <span className="rounded-full bg-amber-100 px-2 py-0.5 font-bold text-amber-800">missing</span>
                       )}
@@ -239,9 +235,8 @@ export default function DailyReportsPanel() {
         {/* Two different questions, so the panel says which is which rather
             than letting one stand in for the other. */}
         <p className="mt-2 text-[10px] leading-snug text-stone-400">
-          <b>Today</b> is the daily report this role owes. <b>Active</b> counts days with any
-          submission at all — a whiteness check or a store count is work, and used to read as
-          nothing here. Both are bot submissions.
+          Any submission counts as the day done — a production report, a whiteness check, a store
+          count. Bot submissions only.
         </p>
         </>
         )}

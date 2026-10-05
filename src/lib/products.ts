@@ -264,23 +264,34 @@ export function rollUpMaterials(assetMaterials: Record<string, number> | null | 
 }
 
 /**
- * Product colours — a palette validated as a set (lightness band, chroma floor,
- * CVD + normal-vision separation, contrast). The ordering keeps neighbouring
- * stacked-bar segments apart, so keep it aligned with the alphabetical order the
- * API returns. Talc is stock-only and always directly labelled, so it takes the
- * neutral.
+ * Product colours — one permanent hue per brand, for the production chart.
+ *
+ * Assigned in PRODUCT_ORDER and never re-assigned: a brand keeps its colour
+ * whatever else is on screen. A window where ETL-6 happened to produce nothing
+ * must not repaint every other line, which is exactly what ranking by tonnage
+ * would do.
+ *
+ * Validated as a SET, in this order, against the light chart surface:
+ * lightness band, chroma floor, adjacent CVD separation (worst ΔE 9.1 protan)
+ * and adjacent normal-vision separation (worst ΔE 19.6) all pass. Three of them
+ * sit under 3:1 contrast on the light surface, which obliges relief — the
+ * per-brand table under the chart is it, and must stay.
+ *
+ * The previous assignment was alphabetical by code, which put ETL-15 orange
+ * beside ETL-9 red: ΔE 7.1 to normal vision, 5.6 to a deuteranope, and those
+ * two run together more than any other pair in the plant.
  */
 export const PRODUCT_COLOR: Record<string, string> = {
-  "2EL": "#2a78d6", // blue
-  "3EL": "#008300", // green
-  "5EL": "#e87ba4", // magenta
-  EC15: "#eda100", // yellow
-  EC90: "#1baf7a", // aqua
-  ETL15: "#eb6834", // orange
-  ETL6: "#4a3aa7", // violet
-  ETL9: "#e34948", // red
-  W2EL: "#00868b", // teal — sits between the blue (2EL) and aqua (EC90) bands
-  Talk: "#6b6a66", // neutral — stock-only, always directly labelled
+  ETL15: "#2a78d6", // blue
+  ETL9: "#eb6834", // orange
+  ETL6: "#1baf7a", // aqua
+  "5EL": "#eda100", // yellow
+  "3EL": "#e87ba4", // magenta
+  W2EL: "#008300", // green
+  "2EL": "#4a3aa7", // violet
+  Talk: "#e34948", // red
+  EC15: "#0f9b9b", // teal
+  EC90: "#a65a14", // brown
 };
 
 export const BAG_COLORS: Record<string, string> = {

@@ -33,6 +33,16 @@ import {
 } from "@/lib/sales-invoice";
 import { BANK_OTHER } from "@/lib/banks";
 import { eatDateLabel } from "@/lib/dates";
+import { chosenInvoice, customerChoices, invoiceChoices } from "@/lib/credit-bot";
+import { bankAmounts, bankTemplate, bankTotal } from "@/lib/bank-collection-paste";
+import { BANKS } from "@/lib/banks";
+import { SETTLED_TOLERANCE_ETB } from "@/lib/credit";
+import {
+  DOWNTIME_REASONS,
+  HOURS_PER_DAY,
+  MAINTENANCE_KINDS,
+  reasonText,
+} from "@/lib/downtime";
 import {
   bagKey as ppBagKey,
   bagTotal as ppBagTotal,
@@ -150,6 +160,13 @@ export interface AssetStep {
    */
   type: "date" | "month" | "text" | "number" | "choice" | "multichoice" | "photo" | "photos" | "paste";
   choices?: { label: string; value: string }[];
+  /**
+   * Choices computed from the draft, for a step whose options are whatever the
+   * database holds right now — the unpaid invoices, say. The list is seeded
+   * into the draft when the flow starts, so this stays synchronous and the
+   * keyboard builder does not have to know it was dynamic.
+   */
+  choicesFrom?: (draft: Record<string, string | number>) => { label: string; value: string }[];
   /** Skip the step unless this holds — used for the maintenance/new-item branch. */
   when?: (draft: Record<string, string | number>) => boolean;
   /** Accept "-" / "የለም" as empty instead of demanding a value. */
@@ -985,6 +1002,135 @@ export function bagUsageItems(draft: Record<string, string | number>): BagUsageI
   return out;
 }
 
+/* ─────────────── Monthly bank cash collection (finance) ─────────────────── */
+
+/**
+ * What came in through each bank, once a month, off one sheet.
+ *
+ * The sheet is photographed and read, but the read is a prefill: every figure
+ * lands on the review card and can be corrected. A sheet that will not read is
+ * not a dead end either — the block below lists every bank, and the same
+ * figures can be typed into it.
+ *
+ * Every bank is listed, including the ones that collected nothing. A sheet that
+ * only names the banks with money on it cannot tell "nothing came through
+ * Dashen" from "Dashen was forgotten".
+ */
+const BANK_COLLECTION_STEPS: AssetStep[] = [
+  { id: "month", label: "Month", prompt: "📅 የየትኛው ወር ገቢ ነው?", type: "month" },
+  {
+    id: "photos",
+    prompt:
+      `🏦 የወሩን የባንክ ገቢ ሉህ ፎቶ ይላኩ — እስከ ${MAX_FLOW_PHOTOS} ፎቶ። ከጨረሱ በኋላ "✅ ጨርሻለሁ" ይጫኑ።
+` +
+      "<i>ፎቶው ተነብቦ ይሞላል — እርስዎ አርመው ያረጋግጣሉ። ፎቶ ከሌለ ዝለሉት።</i>",
+    type: "photos",
+  },
+  {
+    id: "paste",
+    prompt:
+      "📋 የሚከተለውን ቅጂ ሞልተው ይመልሱት።\n\n" +
+      "<i>የገባውን በብር ከ = በኋላ ይፃፉ። ለምሳሌ፦</i>\n" +
+      "<code>CBE = 1240000</code>\n" +
+      "<i>ምንም ያልገባበትን ባዶ ይተዉት።</i>",
+    type: "paste",
+  },
+];
+
+/* ──────────────────── Credit collection (finance) ────────────────────────── */
+
+/**
+ * Money collected against a credit sale, recorded where it was collected.
+ *
+ * The invoice is chosen, not guessed. A customer can be carrying three unpaid
+ * sales, and applying a payment to the wrong one leaves two figures wrong — the
+ * one that looks settled and the one that still looks overdue — with a receipt
+ * that explains neither.
+ *
+ * The customer and invoice lists are seeded into the draft when the flow starts
+ * (see credit-bot.ts), because what is outstanding is a question for the moment
+ * the person opens the form, not for the moment the code was written.
+ */
+const CREDIT_PAYMENT_STEPS: AssetStep[] = [
+  { id: "date", prompt: "📅 ገንዘቡ የገባበትን ቀን ይምረጡ።", type: "date" },
+  {
+    id: "customer",
+    label: "Customer",
+    prompt: "👤 ከየትኛው ደንበኛ ነው?",
+    type: "choice",
+    choicesFrom: customerChoices,
+  },
+  {
+    id: "invoiceId",
+    label: "Invoice",
+    prompt: "🧾 የትኛውን ሽያጭ ነው የከፈሉት? <i>(ቀን · ቀሪ ብር)</i>",
+    type: "choice",
+    choicesFrom: invoiceChoices,
+  },
+  {
+    id: "photos",
+    prompt:
+      "📷 የክፍያውን ደረሰኝ ፎቶ ይላኩ — እስከ " +
+      `${MAX_FLOW_PHOTOS} ፎቶ። ከጨረሱ በኋላ "✅ ጨርሻለሁ" ይጫኑ።
+` +
+      "<i>መጠኑ ከደረሰኙ ተነቦ ይሞላል — እርስዎ ያረጋግጣሉ።</i>",
+    type: "photos",
+  },
+  {
+    id: "amount",
+    label: "Amount",
+    prompt: "💰 የተከፈለውን መጠን በብር ይፃፉ።",
+    type: "number",
+  },
+  { id: "note", label: "Note", prompt: "🗒 ማስታወሻ ካለ ይፃፉ።", type: "text", skippable: true },
+];
+
+/* ───────────────────────── Downtime (production) ─────────────────────────── */
+
+/**
+ * How long the plant was stopped, and why.
+ *
+ * Hours rather than a start and end time: that is how the floor reports it, and
+ * a day that stopped twice is one figure to them. Two separate stoppages for
+ * two different reasons are two reports, which is why the table has no unique
+ * key on the day.
+ */
+const DOWNTIME_STEPS: AssetStep[] = [
+  { id: "date", prompt: "📅 ምርቱ የቆመበትን ቀን ይምረጡ።", type: "date" },
+  {
+    id: "hours",
+    label: "Hours",
+    prompt: `⏱ ምርቱ ለስንት ሰዓት ቆመ? <i>(የቀኑ የሥራ ሰዓት ${HOURS_PER_DAY} ነው — ለምሳሌ 2.5)</i>`,
+    type: "number",
+    // A stoppage longer than the working day is a typo, and one that reached
+    // the dashboard would read as days lost rather than hours.
+    validate: (raw: string) => {
+      const n = Number(String(raw).replace(/[^0-9.]/g, ""));
+      if (!isFinite(n) || n <= 0) return { ok: false, error: "⚠️ ከዜሮ በላይ ቁጥር ይፃፉ — ለምሳሌ 2.5።" };
+      if (n > HOURS_PER_DAY) {
+        return { ok: false, error: `⚠️ የቀኑ የሥራ ሰዓት ${HOURS_PER_DAY} ብቻ ነው። ከዚያ በታች ይፃፉ።` };
+      }
+      return { ok: true, value: String(Math.round(n * 100) / 100) };
+    },
+  },
+  {
+    id: "reason",
+    label: "Reason",
+    prompt: "❓ ለምን ቆመ?",
+    type: "choice",
+    choices: DOWNTIME_REASONS,
+  },
+  {
+    id: "maintenanceKind",
+    label: "Maintenance",
+    prompt: "🔧 ጥገናው የምን ነበር?",
+    type: "choice",
+    choices: MAINTENANCE_KINDS,
+    when: (d) => d.reason === "maintenance",
+  },
+  { id: "note", label: "Note", prompt: "🗒 ተጨማሪ ማብራሪያ ካለ ይፃፉ።", type: "text", skippable: true },
+];
+
 /* ─────────────────── PP bags received (asset management) ─────────────────── */
 
 /**
@@ -1199,6 +1345,9 @@ const STEPS: Record<AssetFlowKind, AssetStep[]> = {
   raw_material: RAW_MATERIAL_STEPS,
   store_count: STORE_COUNT_STEPS,
   pp_bag_receipt: PP_BAG_RECEIPT_STEPS,
+  downtime: DOWNTIME_STEPS,
+  credit_payment: CREDIT_PAYMENT_STEPS,
+  bank_collection: BANK_COLLECTION_STEPS,
   delivery: DELIVERY_STEPS,
   tool_request: TOOL_REQUEST_STEPS,
   pp_bag_damage: PP_BAG_DAMAGE_STEPS,
@@ -1232,6 +1381,7 @@ export function pasteTemplate(
   if (kind === "sales_invoice") return salesTemplate(draft);
   if (kind === "raw_material") return rawMaterialTemplate();
   if (kind === "pp_bag_receipt") return ppBagTemplate();
+  if (kind === "bank_collection") return bankTemplate();
   // The store count is the one flow with several paste steps, so its template
   // depends on WHICH block is being asked for, not just the flow.
   if (kind === "store_count") {
@@ -1476,6 +1626,64 @@ export function assetPreview(state: AssetFlowState): string {
       block("🏭 <b>ወጪ / ለምርት (Issue, ቶን)</b>", "issued") +
       "\n" +
       block("📦 <b>ክምችት (Stock, ቶን)</b>", "stock")
+    );
+  }
+
+  if (state.kind === "bank_collection") {
+    const amounts = bankAmounts(d);
+    const ex = state.extraction;
+    // Only the banks with something reported. Listing all nineteen with a dash
+    // against sixteen of them buries the three figures that matter.
+    const lines = BANKS.filter((b) => amounts[b] !== undefined)
+      .map((b) => `  • ${b}: <b>${money(amounts[b])}</b>`)
+      .join("\n");
+    return (
+      head +
+      `📅 ወር: <b>${esc(d.month)}</b>\n\n` +
+      `🏦 <b>የባንክ ገቢ (ብር)</b>\n${lines || "  —"}\n` +
+      `  ─────────\n  <b>ጠቅላላ: ${money(bankTotal(d))}</b>\n` +
+      `📷 ፎቶ: <b>${state.photoFileIds?.length || 0}</b>\n` +
+      (ex?.checked ? `<i>🤖 ከሉሁ የተነበበ (እርግጠኝነት ${ex.confidence}%)። ስህተት ካለ ያስተካክሉ።</i>\n` : "")
+    );
+  }
+
+  if (state.kind === "credit_payment") {
+    const inv = chosenInvoice(d);
+    const paid = Number(d.amount) || 0;
+    const left = inv ? Math.round((inv.outstanding - paid) * 100) / 100 : 0;
+    const ex = state.extraction;
+    const read = new Set(ex?.filled || []);
+    return (
+      head +
+      `📅 Date: ${esc(d.date)}\n` +
+      `👤 ደንበኛ: <b>${esc(d.customer)}</b>\n` +
+      (inv ? `🧾 ሽያጭ: ${esc(inv.date)} · ቀሪ ${money(inv.outstanding)}\n` : "") +
+      `💰 የተከፈለ: <b>${money(paid)}</b>${read.has("amount") ? " 🤖" : ""}\n` +
+      (inv
+        ? left <= 0
+          ? "✅ ይህ ሽያጭ ሙሉ በሙሉ ተከፍሏል።\n"
+          : `⏳ ከክፍያ በኋላ የሚቀር: <b>${money(left)}</b>\n`
+        : "") +
+      `📷 ፎቶ: <b>${state.photoFileIds?.length || 0}</b>\n` +
+      `🗒 ማስታወሻ: ${esc(d.note) || "—"}\n` +
+      (read.has("amount") ? "<i>🤖 ምልክት ያለው ከደረሰኙ የተነበበ ነው። ስህተት ካለ ያስተካክሉ።</i>\n" : "")
+    );
+  }
+
+  if (state.kind === "downtime") {
+    const hours = Number(d.hours) || 0;
+    const share = Math.round((hours / HOURS_PER_DAY) * 1000) / 10;
+    const reason = reasonText(String(d.reason || ""), String(d.maintenanceKind || "") || null);
+    return (
+      head +
+      `📅 Date: ${esc(d.date)}
+` +
+      `⏱ የቆመበት ሰዓት: <b>${qty(hours)}</b> / ${HOURS_PER_DAY} (${share}%)
+` +
+      `❓ ምክንያት: <b>${esc(reason)}</b>
+` +
+      `🗒 ማስታወሻ: ${esc(d.note) || "—"}
+`
     );
   }
 
@@ -1928,6 +2136,74 @@ export async function saveAssetReport(
         updated_at = now()
       returning id`;
     return { id: row.id, table: "raw_material_daily" };
+  }
+
+  if (state.kind === "bank_collection") {
+    const month = String(d.month || "") || monthLabel();
+    const amounts = bankAmounts(d);
+    // One row per month, upserted: re-filing a month corrects it rather than
+    // leaving two versions nobody can tell apart.
+    const [row] = await insertRowReturning();
+    async function insertRowReturning() {
+      return sql<{ id: string }[]>`
+        insert into bank_collections (month, banks, total, extraction, tg_file_ids, reported_by, source)
+        values (${month}, ${sql.json(amounts)}, ${bankTotal(d)},
+                ${state.extraction ? sql.json({ ...state.extraction }) : null},
+                ${state.photoFileIds || []}, ${reportedBy}, 'telegram')
+        on conflict (month) do update set
+          banks = excluded.banks,
+          total = excluded.total,
+          extraction = excluded.extraction,
+          tg_file_ids = excluded.tg_file_ids,
+          reported_by = excluded.reported_by,
+          updated_at = now()
+        returning id`;
+    }
+    return { id: row.id, table: "bank_collections" };
+  }
+
+  if (state.kind === "credit_payment") {
+    const invoiceId = String(d.invoiceId || "");
+    const amount = Math.round((Number(d.amount) || 0) * 100) / 100;
+    if (!invoiceId) throw new Error("No sale was chosen for this payment.");
+    if (!(amount > 0)) throw new Error("A payment has to be more than zero.");
+
+    // What is outstanding is read again HERE, not trusted from the draft: the
+    // list was seeded when the flow opened, and somebody else may have recorded
+    // a collection against the same sale while this one was being filled in.
+    const [live] = await sql<{ credit: string; paid: string }[]>`
+      select i.invoice_credit as credit,
+             coalesce((select sum(p.amount) from sales_credit_payments p where p.invoice_id = i.id), 0) as paid
+        from sales_invoices i where i.id = ${invoiceId}::uuid
+    `;
+    if (!live) throw new Error("That sale no longer exists.");
+    const outstanding = Math.round(((Number(live.credit) || 0) - (Number(live.paid) || 0)) * 100) / 100;
+    if (amount > outstanding + SETTLED_TOLERANCE_ETB) {
+      // Named rather than clamped. Over-paying an invoice is either a typo or a
+      // payment against a different sale, and both are things the person
+      // holding the receipt can sort out in a second.
+      throw new Error(
+        `That is more than is owed on this sale — ${money(outstanding)} ETB is outstanding.`
+      );
+    }
+
+    const [row] = await sql<{ id: string }[]>`
+      insert into sales_credit_payments (invoice_id, amount, collected_on, note, recorded_by)
+      values (${invoiceId}::uuid, ${amount}, ${eatDateLabel(reportDate(d.date))}::date,
+              ${String(d.note || "") || null}, ${reportedBy})
+      returning id`;
+    return { id: row.id, table: "sales_credit_payments" };
+  }
+
+  if (state.kind === "downtime") {
+    const date = reportDate(d.date);
+    const [row] = await sql<{ id: string }[]>`
+      insert into downtime_reports (date, date_label, hours, reason, maintenance_kind, note, reported_by, source)
+      values (${date}, ${eatDateLabel(date)}, ${Number(d.hours) || 0}, ${String(d.reason || "")},
+              ${d.reason === "maintenance" ? String(d.maintenanceKind || "") || null : null},
+              ${String(d.note || "") || null}, ${reportedBy}, 'telegram')
+      returning id`;
+    return { id: row.id, table: "downtime_reports" };
   }
 
   if (state.kind === "pp_bag_receipt") {

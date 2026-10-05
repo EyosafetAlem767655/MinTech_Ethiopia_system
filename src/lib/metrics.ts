@@ -5,6 +5,8 @@ import { alarmingCustomers, creditFigures } from "@/lib/credit";
 import { productLabel } from "@/lib/products";
 import { bandLabel, belowSpec, specFor } from "@/lib/whiteness-spec";
 import { STALE_DAYS, groupStatuses, recentCounts } from "@/lib/store-inventory";
+import { downtimeShare, reasonText } from "@/lib/downtime";
+import { bankReportMonth, isBankReportWindow } from "@/lib/finance-report";
 
 /**
  * All dashboard numbers. Previously 10 MongoDB aggregation pipelines; now SQL.
@@ -617,6 +619,56 @@ export async function detectExceptions(
   } catch (e) {
     // whiteness_checks arrives in 0022. Its absence may not cost the rest.
     console.warn("detectExceptions: whiteness spec check unavailable", e);
+  }
+
+  // 2c-ii. The plant stopped.
+  //
+  //     Named at any size and worded the same whether it is twenty minutes or
+  //     eight hours, which is what the owner asked for: a short stop that keeps
+  //     happening is the thing nobody notices, and a list that only shows the
+  //     disasters teaches people the small ones do not count.
+  try {
+    const twoDays = addDays(eatDayStart(now), -1);
+    const stops = await sql<
+      { date_label: string; hours: string; reason: string; maintenance_kind: string | null }[]
+    >`
+      select date_label, hours, reason, maintenance_kind
+        from downtime_reports
+       where date >= ${twoDays}
+       order by date desc, created_at desc
+       limit 20
+    `;
+    for (const s of stops) {
+      exceptions.push(
+        `Production stopped on ${s.date_label}: ${downtimeShare(Number(s.hours) || 0)} — ` +
+          `${reasonText(s.reason, s.maintenance_kind)}.`
+      );
+    }
+  } catch (e) {
+    // downtime_reports arrives in 0035.
+    console.warn("detectExceptions: downtime unavailable", e);
+  }
+
+  // 2c-iii. A month closed without its bank collection sheet.
+  //
+  //     Raised only while it is still being chased. An alert that repeats for
+  //     four weeks stops being read long before the person who could act on it
+  //     sees it — the same bound the base-balance escalation carries.
+  try {
+    if (isBankReportWindow(now)) {
+      const month = bankReportMonth(now);
+      const filed = await sql<{ month: string }[]>`
+        select month from bank_collections where month = ${month}
+      `;
+      if (filed.length === 0) {
+        exceptions.push(
+          `No bank collection sheet has been filed for ${month}, so what came in through each bank that month is unrecorded.`
+        );
+      }
+    }
+  } catch (e) {
+    // bank_collections arrives in 0035.
+    console.warn("detectExceptions: bank collections unavailable", e);
   }
 
   // 2d. A shelf in the spare-parts store has not been counted.

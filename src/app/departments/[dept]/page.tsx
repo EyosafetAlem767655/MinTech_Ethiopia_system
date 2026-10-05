@@ -11,6 +11,7 @@ import StoreInventoryPanel from "@/components/panels/StoreInventoryPanel";
 import DeliveryReportPanel from "@/components/panels/DeliveryReportPanel";
 import ProductionPanels from "@/components/panels/ProductionPanels";
 import StockOnHandPanel from "@/components/panels/StockOnHandPanel";
+import DowntimePanel from "@/components/panels/DowntimePanel";
 import WhitenessPanel from "@/components/panels/WhitenessPanel";
 import FinancePanels from "@/components/panels/FinancePanels";
 import VoucherPanels from "@/components/panels/VoucherPanels";
@@ -39,6 +40,7 @@ const FinanceVouchers = () => <VoucherPanels showStockCheck={false} />;
 const FULL_WIDTH = new Set<ComponentType>([
   ProductionPanels,
   WhitenessPanel,
+  DowntimePanel,
   StockOnHandPanel,
   RawMaterialDailyPanel,
   StoreInventoryPanel,
@@ -56,7 +58,7 @@ const PANELS: Record<DepartmentKey, ComponentType[]> = {
   // was. Stock levels and the empty-bag counts used to sit here too; they are
   // inventory rather than output and now live on the asset tab, beside the
   // vouchers that predict them.
-  production: [ProductionPanels, WhitenessPanel],
+  production: [ProductionPanels, DowntimePanel, WhitenessPanel],
   // The three reports the asset manager files come first, then the wider bag /
   // purchase context. Stock status and purchased items are gone: the asset role
   // no longer files either, so a panel for them would only ever show stale rows.

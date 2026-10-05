@@ -8,6 +8,7 @@ import {
   checkReceiptQRCode,
   classifyIngestion,
   extractReceiptGemini,
+  extractBankCollections,
   extractSalesInvoice,
   verifyRequestLegitimacy,
   type GeminiReceipt,
@@ -50,6 +51,10 @@ import { runAfter } from "@/lib/after";
 import { whitenessAlert } from "@/lib/whiteness-alert";
 import { parseRawMaterialPaste } from "@/lib/raw-material-paste";
 import { parsePpBagPaste } from "@/lib/pp-bag-paste";
+import { bankKey, parseBankSheet } from "@/lib/bank-collection-paste";
+import { matchBank } from "@/lib/banks";
+import { INVOICES_KEY, encodeInvoices, openCreditInvoices } from "@/lib/credit-bot";
+import { SETTLED_TOLERANCE_ETB } from "@/lib/credit";
 import { reconcileBags } from "@/lib/stock-reconciliation";
 import { parseStoreCountPaste } from "@/lib/store-count-paste";
 import { applySalesExtraction, parseSalesPaste, salesMissing } from "@/lib/sales-invoice";
@@ -815,6 +820,9 @@ const ASSET_FLOW_BY_CAP: Record<string, AssetFlowKind | undefined> = {
   whiteness_check: "whiteness_check",
   store_count: "store_count",
   pp_bag_receipt: "pp_bag_receipt",
+  downtime: "downtime",
+  credit_payment: "credit_payment",
+  bank_collection: "bank_collection",
   base_balance: "base_balance",
   store_issue: "store_issue",
   grv: "grv",
@@ -1028,6 +1036,20 @@ async function handlePickCallback(
  * was fine for two or three answers and unusable for the bank list, which has
  * nineteen. Short lists keep one row; anything longer wraps three to a row.
  */
+/**
+ * The options a step offers right now.
+ *
+ * A step either declares its choices or computes them from the draft — the
+ * credit collection lists whatever is unpaid, which is a question for the
+ * moment the form is opened. Everything downstream treats the two the same.
+ */
+function choicesOf(
+  step: { choices?: { label: string; value: string }[]; choicesFrom?: (d: Record<string, string | number>) => { label: string; value: string }[] },
+  draft: Record<string, string | number>
+): { label: string; value: string }[] {
+  return step.choicesFrom ? step.choicesFrom(draft) : step.choices || [];
+}
+
 function choiceKeyboard(step: { choices?: { label: string }[] }) {
   const buttons = (step.choices || []).map((c) => ({ text: c.label }));
   const perRow = buttons.length > 4 ? 3 : buttons.length || 1;
@@ -1093,7 +1115,14 @@ async function askAssetStep(chatId: string, state: AssetFlowState): Promise<void
     return;
   }
   if (step.type === "choice") {
-    await sendMessage(chatId, step.prompt, { reply_markup: choiceKeyboard(step) });
+    const choices = choicesOf(step, state.draft);
+    if (choices.length === 0) {
+      // Nothing to choose from is a real answer, not a broken screen: no unpaid
+      // sale means there is nothing to collect against.
+      await sendMessage(chatId, "ℹ️ አሁን ምንም የሚመረጥ የለም።", { reply_markup: CHANGE_CANCEL_KEYBOARD });
+      return;
+    }
+    await sendMessage(chatId, step.prompt, { reply_markup: choiceKeyboard({ choices }) });
     return;
   }
   if (step.type === "photos") {
@@ -1110,6 +1139,35 @@ async function askAssetStep(chatId: string, state: AssetFlowState): Promise<void
   }
   const hint = step.skippable ? '\n<i>ከሌለ "-" ይላኩ።</i>' : "";
   await sendMessage(chatId, step.prompt + hint, { reply_markup: CHANGE_CANCEL_KEYBOARD });
+}
+
+/**
+ * What this sale still owes, sent after a collection is filed.
+ *
+ * Read back from the database rather than worked out from the draft: the
+ * payment has landed by now, and the figure that matters is the one the Finance
+ * tab will show, not the one the bot had in mind a moment ago.
+ */
+async function sendCreditBalanceNote(chatId: string, invoiceId: string): Promise<void> {
+  if (!invoiceId) return;
+  try {
+    const [row] = await sql<{ customer: string; credit: string; paid: string }[]>`
+      select i.customer, i.invoice_credit as credit,
+             coalesce((select sum(p.amount) from sales_credit_payments p where p.invoice_id = i.id), 0) as paid
+        from sales_invoices i where i.id = ${invoiceId}::uuid
+    `;
+    if (!row) return;
+    const left = Math.round(((Number(row.credit) || 0) - (Number(row.paid) || 0)) * 100) / 100;
+    const money = (n: number) => Math.round(n).toLocaleString("en-US");
+    await sendMessage(
+      chatId,
+      left <= SETTLED_TOLERANCE_ETB
+        ? `✅ <b>${escapeHtml(row.customer)}</b> — ይህ ሽያጭ ሙሉ በሙሉ ተከፍሏል።`
+        : `💳 <b>${escapeHtml(row.customer)}</b> — ከዚህ ሽያጭ የሚቀር: <b>${money(left)}</b> ብር።`
+    );
+  } catch (e) {
+    console.warn("sendCreditBalanceNote skipped:", e);
+  }
 }
 
 /**
@@ -1204,6 +1262,166 @@ async function extractSalesIntoDraft(
   } else {
     await sendMessage(chatId, "ℹ️ ደረሰኙን ማንበብ አልተቻለም። ቅጹን ሞልተው ይመልሱት።");
   }
+  await askAssetStep(chatId, state);
+}
+
+/**
+ * Read the monthly bank sheet into the bank list, then carry on.
+ *
+ * The model copies each bank name exactly as printed; `matchBank` turns that
+ * into one of the nineteen entries the rest of the system knows, so "ንግድ ባንክ"
+ * and "CBE" land on the same line. A name it cannot place is REPORTED rather
+ * than dropped — a bank quietly missing from a month is a figure nobody can
+ * find afterwards.
+ *
+ * Fenced like every other AI call here: whatever fails, the flow carries on to
+ * the fill-in block and the month can be typed.
+ */
+async function extractBankSheetIntoDraft(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  session: any,
+  chatId: string,
+  state: AssetFlowState
+): Promise<void> {
+  const fileIds = (state.photoFileIds || []).slice(0, MAX_FLOW_PHOTOS);
+  await sendMessage(chatId, "🔎 ሉሁን እያነበብኩ ነው…");
+
+  let read: Awaited<ReturnType<typeof extractBankCollections>> | null = null;
+  try {
+    const images: { base64: string; contentType: string }[] = [];
+    for (const id of fileIds) {
+      const bytes = await getPhotoBase64(id).catch(() => null);
+      if (bytes) images.push(bytes);
+    }
+    if (images.length > 0) read = await extractBankCollections(images);
+  } catch (e) {
+    console.error("extractBankSheetIntoDraft failed:", e);
+  }
+
+  const filled: string[] = [];
+  const unplaced: string[] = [];
+  if (read?.ok) {
+    for (const line of read.data.lines) {
+      const bank = matchBank(line.bank);
+      if (!bank) {
+        unplaced.push(`${line.bank}: ${Math.round(line.amount).toLocaleString("en-US")}`);
+        continue;
+      }
+      const key = bankKey(bank);
+      // Two lines for one bank on the same sheet are two deposits, not a
+      // correction — they add up.
+      state.draft[key] = (Number(state.draft[key]) || 0) + line.amount;
+      if (!filled.includes(key)) filled.push(key);
+    }
+  }
+
+  state.extraction = read?.ok
+    ? {
+        checked: true,
+        confidence: read.data.confidence,
+        notes: read.data.notes,
+        unmatched: [...read.data.unmatched, ...unplaced].slice(0, 10),
+        filled,
+      }
+    : {
+        checked: false,
+        confidence: 0,
+        notes: "",
+        unmatched: [],
+        filled: [],
+        error: read && !read.ok ? read.error : "no sheet could be read back",
+      };
+
+  // Straight to the card when something was read; otherwise the block, which is
+  // the same list with nothing in it.
+  state.step = filled.length > 0 ? "review" : "paste";
+  session.assetFlow = { ...state };
+  await persist(session);
+
+  if (filled.length > 0) {
+    await sendMessage(
+      chatId,
+      `✅ ${filled.length} ባንክ ከሉሁ ተነብቧል (እርግጠኝነት ${state.extraction.confidence}%)።` +
+        (unplaced.length > 0
+          ? `\n⚠️ እነዚህ አልታወቁም፦\n${unplaced.map((u) => `• ${escapeHtml(u)}`).join("\n")}`
+          : "") +
+        "\n<i>ከመመዝገብዎ በፊት ያረጋግጡ።</i>"
+    );
+  } else {
+    await sendMessage(chatId, "ℹ️ ሉሁን ማንበብ አልተቻለም። ከታች ያለውን ቅጂ ሞልተው ይመልሱት።");
+  }
+  await askAssetStep(chatId, state);
+}
+
+/**
+ * Read a collection receipt for its amount, then carry on.
+ *
+ * One figure, not a form: what was paid. Everything else about this payment is
+ * already known — which customer, which sale, which day — so the model is asked
+ * for the only thing the paper adds, and the person confirms it on the card.
+ *
+ * Fenced like every other AI call in this handler: a dead provider, an
+ * unreadable photo or an exception all land in the same place, with the amount
+ * simply asked for by hand.
+ */
+async function extractPaymentIntoDraft(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  session: any,
+  chatId: string,
+  state: AssetFlowState
+): Promise<void> {
+  const fileIds = (state.photoFileIds || []).slice(0, MAX_FLOW_PHOTOS);
+  await sendMessage(chatId, "🔎 ደረሰኙን እያነበብኩ ነው…");
+
+  let read: Awaited<ReturnType<typeof extractReceiptGemini>> | null = null;
+  try {
+    const images: { base64: string; contentType: string }[] = [];
+    for (const id of fileIds) {
+      const bytes = await getPhotoBase64(id).catch(() => null);
+      if (bytes) images.push(bytes);
+    }
+    if (images.length > 0) read = await extractReceiptGemini(images);
+  } catch (e) {
+    console.error("extractPaymentIntoDraft failed:", e);
+  }
+
+  // `netPay` is what the customer actually handed over; `grandTotal` is the
+  // invoice face value. A collection is the former, and taking the latter would
+  // over-credit the account by the withholding every time.
+  const amount = read?.ok ? Number(read.data.netPay) || Number(read.data.grandTotal) || 0 : 0;
+  if (amount > 0) {
+    state.draft.amount = Math.round(amount * 100) / 100;
+    state.extraction = {
+      checked: true,
+      confidence: read?.ok ? read.data.confidence : 0,
+      notes: read?.ok ? read.data.notes : "",
+      unmatched: [],
+      filled: ["amount"],
+    };
+  } else {
+    state.extraction = {
+      checked: false,
+      confidence: 0,
+      notes: "",
+      unmatched: [],
+      filled: [],
+      error: read && !read.ok ? read.error : "no amount could be read",
+    };
+  }
+
+  // Resume at the amount either way: a figure read off a receipt is still a
+  // figure somebody has to agree to before it moves a balance.
+  state.step = "amount";
+  session.assetFlow = { ...state };
+  await persist(session);
+
+  await sendMessage(
+    chatId,
+    state.extraction.checked
+      ? `✅ ከደረሰኙ <b>${Math.round(Number(state.draft.amount)).toLocaleString("en-US")}</b> ብር ተነብቧል። ` +
+          "ትክክል ከሆነ ያንኑ ይፃፉ፣ ካልሆነ ትክክለኛውን ያስገቡ።"
+      : "ℹ️ ከደረሰኙ መጠኑን ማንበብ አልተቻለም። በእጅ ያስገቡ።"
+  );
   await askAssetStep(chatId, state);
 }
 
@@ -1632,6 +1850,13 @@ export async function POST(req: NextRequest) {
             runAfter(sendBagBalanceNote(chatId));
           }
 
+          // What this collection leaves owing, so the person at the counter
+          // knows before they put the phone down.
+          if (state.kind === "credit_payment") {
+            const invoiceId = String(state.draft.invoiceId || "");
+            runAfter(sendCreditBalanceNote(chatId, invoiceId));
+          }
+
           // Answer first, analyse after — see backgroundPpDamageCheck.
           if (ppPiles.length > 0) {
             await backgroundPpDamageCheck({
@@ -1807,9 +2032,10 @@ export async function POST(req: NextRequest) {
         }
         state.draft.date = val;
       } else if (step.type === "choice") {
-        const match = step.choices?.find((c) => normaliseChoice(c.label) === normText);
+        const choices = choicesOf(step, state.draft);
+        const match = choices.find((c) => normaliseChoice(c.label) === normText);
         if (!match) {
-          await sendMessage(chatId, step.prompt, { reply_markup: choiceKeyboard(step) });
+          await sendMessage(chatId, step.prompt, { reply_markup: choiceKeyboard({ choices }) });
           return NextResponse.json({ ok: true });
         }
         state.draft[step.id] = match.value;
@@ -1886,6 +2112,8 @@ export async function POST(req: NextRequest) {
                 ? parseRawMaterialPaste(val)
                 : state.kind === "pp_bag_receipt"
                   ? parsePpBagPaste(val)
+                  : state.kind === "bank_collection"
+                    ? parseBankSheet(val)
                 : parseFinancePaste(val, { usdRate: state.kind === "price_list" });
         const filled = Object.keys(parsed.values).length;
         // The sales block may be answered by "-" instead: the reporter would
@@ -1934,7 +2162,8 @@ export async function POST(req: NextRequest) {
             state.kind === "production_daily" ||
             state.kind === "base_balance" ||
             state.kind === "raw_material" ||
-            state.kind === "pp_bag_receipt";
+            state.kind === "pp_bag_receipt" ||
+            state.kind === "bank_collection";
           await sendMessage(
             chatId,
             `⚠️ እነዚህ መስመሮች አልተነበቡም፦\n${problems.map((p) => `• ${escapeHtml(p)}`).join("\n")}\n\n` +
@@ -2046,7 +2275,20 @@ export async function POST(req: NextRequest) {
       if (cap.captureMode === "asset_entry") {
         const kind = ASSET_FLOW_BY_CAP[cap.key];
         if (kind) {
-          const state: AssetFlowState = { kind, step: firstStep(kind), draft: {} };
+          // The credit collection chooses from whatever is unpaid RIGHT NOW, so
+          // the list is read once here and carried in the draft. Read before the
+          // first question rather than at each step: the person should not be
+          // offered a sale that was settled while they were typing.
+          const draft: Record<string, string | number> = {};
+          if (kind === "credit_payment") {
+            const open = await openCreditInvoices().catch(() => []);
+            if (open.length === 0) {
+              await sendReportMenu(chatId, userCapabilities(user).map((c) => c.button), "✅ አሁን ያልተከፈለ የብድር ሽያጭ የለም።");
+              return NextResponse.json({ ok: true });
+            }
+            draft[INVOICES_KEY] = encodeInvoices(open);
+          }
+          const state: AssetFlowState = { kind, step: firstStep(kind), draft };
           session.state = "asset_entry";
           session.draft = undefined;
           session.capture = undefined;

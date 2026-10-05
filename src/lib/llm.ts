@@ -894,6 +894,86 @@ export async function extractReceiptGemini(
   }
 }
 
+/* ─────────────── The monthly bank collection sheet (Gemini) ─────────────────
+ *
+ * One sheet a month: the banks down one side, what was collected through each
+ * against them. A PREFILL, not a verdict — every figure lands on a review card
+ * the person corrects before anything is saved, and a bank name the matcher
+ * does not recognise is reported rather than guessed at.
+ */
+
+export interface BankCollectionLine {
+  /** As printed on the sheet. Resolved to a known bank by the caller. */
+  bank: string;
+  amount: number;
+}
+
+export interface BankCollectionRead {
+  /** "YYYY-MM" if the sheet names its month; the picker decides regardless. */
+  month: string;
+  lines: BankCollectionLine[];
+  confidence: number;
+  notes: string;
+  /** Rows it could not read cleanly, copied as printed. */
+  unmatched: string[];
+}
+
+export type BankCollectionResult =
+  | { ok: true; data: BankCollectionRead }
+  | { ok: false; error: string };
+
+const GEMINI_BANK_SYSTEM =
+  "You read ONE monthly cash-collection sheet for an Ethiopian minerals company and return STRICT " +
+  "JSON only. The sheet lists banks and the money collected through each of them in that month.\n" +
+  'Return: {"month":"YYYY-MM or empty","lines":[{"bank":"name exactly as printed","amount":number}],' +
+  '"confidence":0-100,"notes":"","unmatched":["rows you could not read, copied as printed"]}\n' +
+  "Rules: amounts are Ethiopian birr — strip thousands separators and currency words, never round. " +
+  "Copy each bank name EXACTLY as it is printed, in whatever script it is printed in; do not " +
+  "translate, expand or abbreviate it. Ignore any total or subtotal row — totals are computed, not " +
+  "read. A row you cannot read goes in `unmatched` rather than into `lines` with a guessed figure. " +
+  "If the sheet is unreadable return empty lines with a low confidence and say why in `notes`.";
+
+export async function extractBankCollections(
+  images: { base64: string; contentType: string }[],
+  caption?: string
+): Promise<BankCollectionResult> {
+  if (images.length === 0) return { ok: false, error: "no images to read" };
+
+  const parts: GeminiPart[] = images.slice(0, 5).map((img) => ({
+    inline_data: { mime_type: img.contentType || "image/jpeg", data: img.base64 },
+  }));
+  parts.push({ text: GEMINI_BANK_SYSTEM + (caption ? `
+Note: ${caption}` : "") });
+
+  const res = await geminiGenerate([{ role: "user", parts }], { json: true });
+  if (!res.ok) return { ok: false, error: res.error || "Gemini call failed" };
+  if (!res.text.trim()) return { ok: false, error: "Gemini returned an empty response" };
+
+  try {
+    const p = extractJson(res.text);
+    const rawLines = Array.isArray(p.lines) ? p.lines : [];
+    return {
+      ok: true,
+      data: {
+        month: /^\d{4}-\d{2}$/.test(String(p.month || "")) ? String(p.month) : "",
+        lines: rawLines
+          .map((l: Record<string, unknown>) => ({
+            bank: String(l?.bank || "").trim(),
+            amount: receiptNum(l?.amount),
+          }))
+          // A line with no name or no money is not a reading, it is noise.
+          .filter((l: BankCollectionLine) => l.bank !== "" && l.amount > 0),
+        confidence: Math.max(0, Math.min(100, Math.round(Number(p.confidence) || 50))),
+        notes: String(p.notes || ""),
+        unmatched: Array.isArray(p.unmatched) ? p.unmatched.map((u: unknown) => String(u)).slice(0, 10) : [],
+      },
+    };
+  } catch (e) {
+    console.error("extractBankCollections could not parse the response:", e);
+    return { ok: false, error: "Gemini returned an unreadable response" };
+  }
+}
+
 /* The voucher reader lived here. Both paper vouchers are typed now: the GRV
  * opened with a camera and filled itself from the photograph, which put an AI
  * read between the reporter and a form they could simply fill in — and every

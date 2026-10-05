@@ -48,6 +48,8 @@ const READABLE_TABLES = {
   material_counts: "created_at",
   daily_ops_reports: "date",
   production_reports: "date",
+  downtime_reports: "date",
+  bank_collections: "created_at",
   stock_status_reports: "created_at",
   raw_material_receipts: "date",
   raw_material_daily: "date",

@@ -1,0 +1,180 @@
+/**
+ * Generates supabase/seed/0005_store_opening_count.sql from the store's
+ * opening count sheet.
+ *
+ *   node scripts/generate-store-seed.mjs
+ *
+ * Why a generator rather than hand-written SQL, as with the ops and production
+ * history: every row has to land on a catalogue KEY, and a name typed twice is
+ * a name typed differently once. The mapping below is the only place the
+ * sheet's spelling meets the catalogue's, and a row that maps to nothing aborts
+ * the whole file rather than quietly going missing from the shelf.
+ *
+ * Duplicated items are SUMMED. The sheet lists what left on each voucher, so
+ * "Sewing theared" appears twice; on a shelf they are one pile.
+ */
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const SOURCE = path.join(ROOT, "scripts", "store-opening-count.csv");
+const CATALOGUE = path.join(ROOT, "src", "lib", "store-items.ts");
+const OUT = path.join(ROOT, "supabase", "seed", "0005_store_opening_count.sql");
+
+/** Marks the row this import writes, so re-running clears its own work. */
+const COUNTED_BY = "opening count";
+
+/**
+ * Sheet spelling → catalogue key.
+ *
+ * Eight rows land on items that already existed; the rest were added to the
+ * catalogue with this count. Written out rather than fuzzy-matched: a near
+ * match that is wrong puts a figure against the wrong part, and nothing
+ * afterwards can tell.
+ */
+const KEY_BY_ITEM = {
+  "Led 18W": "elec2:led-18w",
+  Lamp: "elec2:lamp",
+  "Lamp holder": "elec2:lamp-holder",
+  "Electric cable #2.5": "elec2:cable-2.5",
+  "On Off swich": "elec2:on-off-switch",
+  conduet: "elec2:conduit",
+  "Contactor 50A": "con:50A",
+  "Breaker 3 pha 10A": "brk:10A",
+  "Limite swich": "elec2:limit-switch",
+  "silcone sealant": "cons:silicone",
+  "China electrod #3.2": "cons:china-electrod-3.2",
+  "cutting disk 180*1.6*22": "wsh:cut-180x1.6x22",
+  "cuting disc 230*2*22": "wsh:cut-230x2x22.2",
+  Epoxy: "cons:epoxy",
+  "Greas Nipple": "cons:grease-nipple",
+  "Square bar 30*30*6": "wsh:sqbar-30",
+  "Square bar10*10*6": "wsh:sqbar-10",
+  "Round bar #25": "cons:rbar-25",
+  "Sewing theared": "cons:sewing-thread",
+  "Lather vglove": "cons:leather-glove",
+  "Cable lag #35": "elec2:cable-lag-35",
+  socket: "elec2:socket",
+  "Contactor 32A": "con:32A",
+  "Cable lag #25": "elec2:cable-lag-25",
+  "Hammer 6kg": "cons:hammer-6kg",
+  "plastic broom": "cons:broom",
+  Mop: "cons:mop",
+  Capaciter: "elec2:capacitor",
+  "Contactor 40A": "con:40A",
+};
+
+/* ── The catalogue, read out of the TypeScript so the two cannot drift ─────── */
+
+const catalogue = new Map();
+for (const line of fs.readFileSync(CATALOGUE, "utf8").split(/\r?\n/)) {
+  // it("brg:6210", "brg", "6210"),  /  it("oil:gas", "oil", "Gas OIL", "l"),
+  const m = line.match(/^\s*it\("([^"]+)",\s*"([^"]+)",\s*"([^"]*)"/);
+  if (m) catalogue.set(m[1], { group: m[2], name: m[3] });
+}
+if (catalogue.size === 0) throw new Error("Could not read the catalogue — has store-items.ts moved?");
+
+/* ── The sheet ─────────────────────────────────────────────────────────────── */
+
+const rows = fs
+  .readFileSync(SOURCE, "utf8")
+  .split(/\r?\n/)
+  .map((l) => l.trim())
+  .filter(Boolean)
+  .slice(1)
+  .map((l) => l.split(","));
+
+const problems = [];
+/** key → { qty, refs:Set, departments:Set } */
+const counted = new Map();
+
+for (const [item, , amount, , , ref, remark] of rows) {
+  const key = KEY_BY_ITEM[item];
+  if (!key) {
+    problems.push(`"${item}" maps to no catalogue item`);
+    continue;
+  }
+  if (!catalogue.has(key)) {
+    problems.push(`"${item}" maps to ${key}, which is not in the catalogue`);
+    continue;
+  }
+  const qty = Number(amount);
+  if (!isFinite(qty) || qty < 0) {
+    problems.push(`"${item}" has an unreadable quantity "${amount}"`);
+    continue;
+  }
+  const entry = counted.get(key) ?? { qty: 0, refs: new Set(), departments: new Set() };
+  entry.qty += qty;
+  if (ref) entry.refs.add(ref);
+  if (remark) entry.departments.add(remark);
+  counted.set(key, entry);
+}
+
+if (problems.length) {
+  console.error(`\n${problems.length} problem(s) in the sheet — nothing written:\n`);
+  for (const p of problems) console.error(` ✗ ${p}`);
+  process.exit(1);
+}
+
+const groups = [...new Set([...counted.keys()].map((k) => catalogue.get(k).group))].sort();
+const items = Object.fromEntries([...counted.entries()].map(([k, v]) => [k, v.qty]));
+const today = new Date(Date.now() + 3 * 3600_000).toISOString().slice(0, 10);
+
+const lines = [...counted.entries()]
+  .sort(([a], [b]) => a.localeCompare(b))
+  .map(([key, v]) => {
+    const { name } = catalogue.get(key);
+    const refs = [...v.refs].join("/");
+    return `--   ${name.padEnd(26)} ${String(v.qty).padStart(4)}   ref ${refs}  ${[...v.departments].join("/")}`;
+  });
+
+const sql = `-- MinTech Ethiopia — the store's OPENING COUNT.
+-- GENERATED by scripts/generate-store-seed.mjs from
+-- scripts/store-opening-count.csv — do not edit by hand.
+--
+-- ${counted.size} items across ${groups.length} groups, from ${rows.length} sheet rows: items listed
+-- twice (they left on two vouchers) are summed into the one pile they are.
+--
+-- This is what is on the shelf TODAY. Every count filed from the bot after it
+-- supersedes these figures item by item, exactly as one count supersedes
+-- another — nothing here is special except that it came first.
+--
+-- Paste into the Supabase SQL editor and Run. SAFE TO RE-RUN: the delete below
+-- clears only the row this seed wrote (counted_by = '${COUNTED_BY}'), so a
+-- count filed from the bot is never touched.
+--
+${lines.join("\n")}
+
+begin;
+
+delete from store_counts where counted_by = '${COUNTED_BY}';
+
+insert into store_counts (date, date_label, groups, items, counted_by, source)
+values (
+  '${today}T00:00:00.000Z',
+  '${today}',
+  '{${groups.join(",")}}',
+  '${JSON.stringify(items)}'::jsonb,
+  '${COUNTED_BY}',
+  'app'
+);
+
+commit;
+
+-- Expect: one row, ${counted.size} items.
+select date_label, counted_by, groups,
+       (select count(*) from jsonb_object_keys(items)) as items
+  from store_counts
+ where counted_by = '${COUNTED_BY}';
+`;
+
+fs.mkdirSync(path.dirname(OUT), { recursive: true });
+fs.writeFileSync(OUT, sql, "utf8");
+
+console.log(`Wrote ${path.relative(ROOT, OUT)}`);
+console.log(`  ${rows.length} rows → ${counted.size} items across ${groups.length} groups`);
+for (const [key, v] of [...counted.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+  const dup = v.refs.size > 1 ? `  (summed from ${v.refs.size} vouchers)` : "";
+  console.log(`  ${catalogue.get(key).name.padEnd(26)} ${String(v.qty).padStart(4)}${dup}`);
+}

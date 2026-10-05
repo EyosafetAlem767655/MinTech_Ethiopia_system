@@ -138,8 +138,12 @@ export async function GET(req: NextRequest) {
     };
   });
 
+  // Missing means "has not used the bot today". `submittedToday` is still on
+  // every row — the morning chase asks a narrower question — but the panel and
+  // this summary count any submission, because most of these roles have no
+  // single report that could stand for the day.
   const missingToday = compliance
-    .filter((c) => !c.submittedToday)
+    .filter((c) => !c.activeToday)
     .map((c) => ({ _id: c._id, fullName: c.fullName, positions: c.positions }));
 
   // The calendar covers EVERY active employee, not just those owing a daily

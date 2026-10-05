@@ -25,6 +25,8 @@ const SOURCES: Record<string, { who: string; when: string }> = {
   material_counts: { who: "counted_by", when: "created_at" },
   daily_ops_reports: { who: "reported_by", when: "created_at" },
   production_reports: { who: "reported_by", when: "created_at" },
+  downtime_reports: { who: "reported_by", when: "created_at" },
+  bank_collections: { who: "reported_by", when: "created_at" },
   stock_status_reports: { who: "reported_by", when: "created_at" },
   purchase_item_reports: { who: "reported_by", when: "created_at" },
   raw_material_daily: { who: "reported_by", when: "created_at" },
