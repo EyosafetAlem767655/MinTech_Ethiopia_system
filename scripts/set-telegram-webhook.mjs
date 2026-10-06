@@ -1,4 +1,4 @@
-import { readFileSync, existsSync } from "fs";
+import { loadEnv } from "./load-env.mjs";
 
 // Points your Telegram bot at the deployed webhook.
 // Usage:
@@ -12,20 +12,7 @@ import { readFileSync, existsSync } from "fs";
 // It permanently discards genuine unprocessed messages too, so it is opt-in.
 const dropPending = process.argv.includes("--drop-pending");
 
-for (const file of [".env.local", ".env"]) {
-  if (!existsSync(file)) continue;
-  for (const rawLine of readFileSync(file, "utf8").split("\n")) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("#")) continue;
-    const m = line.match(/^([A-Z0-9_]+)\s*=\s*(.*)$/);
-    if (!m || process.env[m[1]]) continue;
-    let value = m[2].trim();
-    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-      value = value.slice(1, -1);
-    }
-    process.env[m[1]] = value;
-  }
-}
+loadEnv();
 
 const { TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET, APP_URL } = process.env;
 

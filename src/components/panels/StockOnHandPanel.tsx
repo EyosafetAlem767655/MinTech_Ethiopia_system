@@ -71,7 +71,7 @@ const bucketLabel = (key: string, bucket: Bucket) =>
     : fmtDate(key);
 
 export default function StockOnHandPanel() {
-  const [range, setRange] = useState<RangeKey>("daily");
+  const [range, setRange] = useState<RangeKey>("weekly");
   const [ops, setOps] = useState<OpsRow[] | null>(null);
 
   useEffect(() => {

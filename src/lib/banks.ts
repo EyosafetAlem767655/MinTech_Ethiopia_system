@@ -32,15 +32,27 @@ export const BANKS: readonly string[] = [
   "Tsehay",
   "ZamZam",
   "Hijra",
+  // Not a bank, but money genuinely lands here and the sales sheet records it
+  // beside the banks. Leaving it out meant every telebirr sale read as "no bank".
+  "telebirr",
   BANK_OTHER,
 ];
 
 /** The names a person or a receipt might use for each entry, lower-cased. */
 const ALIASES: Record<string, string[]> = {
   CBE: ["cbe", "commercial bank", "commercial bank of ethiopia", "የኢትዮጵያ ንግድ ባንክ", "ንግድ ባንክ"],
-  Awash: ["awash", "awash bank", "awash international", "አዋሽ"],
-  Dashen: ["dashen", "dashen bank", "ዳሽን"],
-  Abyssinia: ["abyssinia", "bank of abyssinia", "boa", "አቢሲኒያ"],
+  // "aib" is Awash International Bank, as the sales sheets write it. Spelled out
+  // here rather than relying on containment: `loose()` deletes the word
+  // "international", so no alias of Awash's own ever spells "aib".
+  Awash: ["awash", "awash bank", "awash international", "aib", "አዋሽ"],
+  // "db" is two characters, so it can only ever match exactly — which is what
+  // we want. A two-character containment rule would find it inside half the
+  // list.
+  Dashen: ["dashen", "dashen bank", "db", "ዳሽን"],
+  // "A.B/Dukem" and "B.A/Dukem" are the Dukem branch, written both ways on the
+  // sheets. The bare word "dukem" is deliberately NOT an alias: it is a town
+  // with more than one bank in it.
+  Abyssinia: ["abyssinia", "bank of abyssinia", "boa", "ab/dukem", "ba/dukem", "አቢሲኒያ"],
   Zemen: ["zemen", "zemen bank", "ዘመን"],
   Wegagen: ["wegagen", "wegagen bank", "ወጋገን"],
   Nib: ["nib", "nib international", "nib bank", "ንብ"],
@@ -55,6 +67,7 @@ const ALIASES: Record<string, string[]> = {
   Tsehay: ["tsehay", "tsehay bank", "ፀሐይ", "ጸሐይ"],
   ZamZam: ["zamzam", "zam zam", "zamzam bank"],
   Hijra: ["hijra", "hijra bank"],
+  telebirr: ["telebirr", "tele birr", "tellbirr", "tell birr", "ቴሌብር", "ተሌብር"],
   [BANK_OTHER]: ["other", "ሌላ"],
 };
 
@@ -63,7 +76,9 @@ function loose(s: string): string {
   return String(s || "")
     .toLowerCase()
     .replace(/\b(bank|s\.?c\.?|share company|international)\b/g, "")
-    .replace(/[\s\-_.,()'"]/g, "");
+    // The slash counts as punctuation too: the sales sheets write a branch as
+    // "A.B/Dukem", and without this that name matched nothing at all.
+    .replace(/[\s\-_.,()'"\/]/g, "");
 }
 
 const LOOKUP: Map<string, string> = (() => {

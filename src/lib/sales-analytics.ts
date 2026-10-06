@@ -18,9 +18,17 @@ import { rangeWindow, type RangeKey } from "@/lib/ranges";
 
 const EAT = "Africa/Addis_Ababa";
 
-/** The windows this tab offers. A subset of RANGES on purpose: a day or a week
- *  of sales is a list, not a pattern. */
-export const SALES_ANALYTICS_RANGES: RangeKey[] = ["monthly", "d90", "d180", "yearly"];
+/**
+ * The windows this tab offers. Still a subset of RANGES: a single DAY of sales
+ * is a list of invoices, not a pattern, and the invoice list below already shows
+ * it row by row.
+ *
+ * The week is in by decision — it is the window every section now opens on, and
+ * a tab that silently showed a different period than the rest of the dashboard
+ * was worse than a thin sample. A week of sales does swing more between views,
+ * which is a property of the week and not of the chart.
+ */
+export const SALES_ANALYTICS_RANGES: RangeKey[] = ["weekly", "monthly", "d90", "d180", "yearly"];
 
 export interface CustomerStat {
   customer: string;

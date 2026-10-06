@@ -54,7 +54,7 @@ const t = (n: number | null) =>
   n === null ? "—" : `${(Math.round(n * 1000) / 1000).toLocaleString()}`;
 
 export default function RawMaterialDailyPanel() {
-  const [range, setRange] = useState<RangeKey>("monthly");
+  const [range, setRange] = useState<RangeKey>("weekly");
   const [rows, setRows] = useState<Row[] | null>(null);
   const [check, setCheck] = useState<Check | null>(null);
   const [unavailable, setUnavailable] = useState(false);

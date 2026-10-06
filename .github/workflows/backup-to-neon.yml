@@ -1,0 +1,146 @@
+# A nightly copy of the database into Neon, plus a dump file kept as an artifact.
+#
+# WHY THIS AND NOT A SECOND LIVE DATABASE
+# The app writes to one database. It always will: every insert in this system is
+# hand-written SQL, and dual-writing would double all of them, leave the two
+# copies disagreeing whenever one write failed, and require both schemas to
+# migrate in lockstep for ever. What is actually wanted is a RESTORABLE COPY —
+# against a bad migration, a deleted table, a billing lapse or an outage — and
+# that is a dump, taken on a schedule, restored into a database that is already
+# running.
+#
+# Neon is plain Postgres, so the failover is one environment variable:
+# SUPABASE_DB_URL. See docs/RUNBOOK-failover.md.
+#
+# WHY GITHUB ACTIONS, NOT A VERCEL CRON
+# pg_dump is a binary. It is not available inside a serverless function, and
+# streaming a whole database through one would be a strange thing to ask of a
+# 10-second budget. A runner has psql and pg_dump already.
+#
+# WHAT THIS DOES NOT PROTECT
+# Supabase Storage objects — every photograph in the system. A pg_dump carries
+# the ROWS that reference them and not the files themselves. Said again in the
+# runbook, because it is the one gap here.
+
+name: Nightly database backup to Neon
+
+on:
+  schedule:
+    # 00:20 UTC = 03:20 EAT — after the day's reports are in and before anyone
+    # is working. Cron on GitHub is UTC and can run late under load; nothing
+    # here cares about the exact minute.
+    - cron: "20 0 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  # Never two restores into the same database at once. A late run is skipped
+  # rather than queued: tomorrow's dump is more useful than yesterday's.
+  group: backup-to-neon
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Install PostgreSQL 16 client
+        # The version matters: pg_dump refuses to dump a server NEWER than
+        # itself, and ubuntu-latest ships an older client than Supabase runs.
+        run: |
+          sudo sh -c 'echo "deb https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-16
+          pg_dump --version
+
+      - name: Check the secrets are present
+        env:
+          SOURCE: ${{ secrets.SUPABASE_DB_URL_DIRECT }}
+          TARGET: ${{ secrets.NEON_DATABASE_URL }}
+        run: |
+          missing=""
+          [ -n "$SOURCE" ] || missing="$missing SUPABASE_DB_URL_DIRECT"
+          [ -n "$TARGET" ] || missing="$missing NEON_DATABASE_URL"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repository secret(s):$missing — see docs/RUNBOOK-failover.md"
+            exit 1
+          fi
+          # The TRANSACTION pooler (6543) cannot serve pg_dump: it assigns a
+          # different backend per statement, and a dump needs one session with a
+          # held snapshot. Supabase's "Direct connection" host is no good here
+          # either — it is IPv6-only and GitHub's runners have no IPv6. The
+          # SESSION pooler is the one that works: IPv4, port 5432, one session
+          # per client.
+          case "$SOURCE" in
+            *:6543*) echo "::error::SUPABASE_DB_URL_DIRECT points at the transaction pooler (6543). Use the SESSION pooler (Supabase → Connect → Session pooler, port 5432)."; exit 1 ;;
+            *@db.*.supabase.co*) echo "::error::SUPABASE_DB_URL_DIRECT is the IPv6-only direct host, which GitHub runners cannot reach. Use the SESSION pooler (Supabase → Connect → Session pooler, port 5432)."; exit 1 ;;
+          esac
+          # The same mistake on the other side. Neon's pooled hosts carry
+          # "-pooler" in the name; pg_restore needs the direct endpoint for the
+          # same reason pg_dump does. The POOLED string is the one the app uses
+          # after a failover — it belongs in Vercel, not here.
+          case "$TARGET" in
+            *-pooler.*) echo "::error::NEON_DATABASE_URL is Neon's POOLED string. Use the direct one (no '-pooler' in the host) — see docs/RUNBOOK-failover.md."; exit 1 ;;
+          esac
+
+      - name: Dump Supabase
+        env:
+          SOURCE: ${{ secrets.SUPABASE_DB_URL_DIRECT }}
+        # --no-owner / --no-acl: the roles on Neon are not Supabase's, and a dump
+        # that insists on them fails on every GRANT. The schemas Supabase manages
+        # itself are excluded — storage, auth and the rest belong to the platform,
+        # not to this application, and trying to recreate them is how a restore
+        # fails half way through with the application's own tables missing.
+        run: |
+          pg_dump "$SOURCE" \
+            --no-owner --no-acl \
+            --schema=public \
+            --exclude-schema='supabase_*' \
+            --format=custom \
+            --file=backup.dump
+          ls -lh backup.dump
+
+      - name: Restore into Neon
+        env:
+          TARGET: ${{ secrets.NEON_DATABASE_URL }}
+        # --clean --if-exists makes the restore idempotent: last night's copy is
+        # dropped and replaced, so the target is the source as of this run and
+        # never a merge of several. Exit code is checked by hand because
+        # pg_restore reports non-fatal notices as failures.
+        run: |
+          set +e
+          pg_restore --no-owner --no-acl --clean --if-exists --single-transaction \
+            --dbname="$TARGET" backup.dump 2> restore.log
+          code=$?
+          set -e
+          tail -40 restore.log || true
+          if [ "$code" -ne 0 ]; then
+            echo "::error::pg_restore exited $code — the copy may be incomplete. See the log above."
+            exit "$code"
+          fi
+
+      - name: Count what landed
+        env:
+          TARGET: ${{ secrets.NEON_DATABASE_URL }}
+        # A restore that "succeeded" into an empty database is the failure this
+        # catches. Any public table at all is enough of a signal here; the
+        # runbook has the real comparison.
+        run: |
+          tables=$(psql "$TARGET" -tAc "select count(*) from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname='public' and c.relkind='r'")
+          echo "public tables on Neon: $tables"
+          if [ "$tables" -lt 5 ]; then
+            echo "::error::only $tables tables on Neon — that is not this database."
+            exit 1
+          fi
+          echo "### Backup to Neon: $tables tables" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the dump file too
+        uses: actions/upload-artifact@v4
+        with:
+          name: supabase-dump-${{ github.run_id }}
+          path: backup.dump
+          # A month of nightly dumps is a month of points to go back to. A live
+          # copy alone only ever holds last night — which is no help against a
+          # mistake nobody noticed for a week.
+          retention-days: 30
+          if-no-files-found: error

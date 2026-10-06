@@ -33,7 +33,8 @@ import type { SalesAnalytics } from "@/lib/sales-analytics";
  * checked for colour-vision separation.
  */
 
-const RANGE_KEYS: RangeKey[] = ["monthly", "d90", "d180", "yearly"];
+/** Mirrors SALES_ANALYTICS_RANGES, which the server enforces. */
+const RANGE_KEYS: RangeKey[] = ["weekly", "monthly", "d90", "d180", "yearly"];
 
 const INK = "#008300"; // the Sales department accent
 const CASH = "#2a78d6";
@@ -52,7 +53,7 @@ const tons = (v: number) => `${(Math.round(v * 100) / 100).toLocaleString()} t`;
 const compact = (v: number) => (v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)}M` : v >= 1000 ? `${Math.round(v / 1000)}k` : String(Math.round(v)));
 
 export default function SalesAnalyticsPanel() {
-  const [range, setRange] = useState<RangeKey>("monthly");
+  const [range, setRange] = useState<RangeKey>("weekly");
   const [data, setData] = useState<SalesAnalytics | null>(null);
   const [error, setError] = useState("");
 
