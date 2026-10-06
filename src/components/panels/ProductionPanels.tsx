@@ -2,8 +2,10 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { CartesianGrid, Legend, Line, LineChart, Tooltip, XAxis, YAxis } from "recharts";
+import LateReportsNotice from "@/components/LateReportsNotice";
 import RangeSelector from "@/components/RangeSelector";
 import { AXIS, Chart, ScrollTable } from "@/components/panels/TableChart";
+import { lateReports, smallestRangeCovering } from "@/lib/late-reports";
 import { RANGES, rangeWindow, type Bucket, type RangeKey } from "@/lib/ranges";
 import { PRODUCTION_PRODUCTS, PRODUCT_COLOR, orderProducts, productLabel } from "@/lib/products";
 
@@ -28,6 +30,8 @@ interface ProductionRow {
   fgrNo: string | null;
   reportedBy: string;
   products: Record<string, number>;
+  /** When the report reached us, as opposed to the day it is for. */
+  createdAt?: string | null;
 }
 
 const fmtDate = (d: string) => new Date(d).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
@@ -134,6 +138,15 @@ export default function ProductionPanels() {
     });
   }, [production, win]);
 
+  /* Filed, but dated outside the window being looked at.
+
+     A report entered yesterday for the day before is in Settings (which sorts
+     by arrival) and not in "Daily" (which is today) — both correct, and
+     together they read as lost work. The figures keep their own dates; the
+     notice below says what else exists and offers the window that shows it. */
+  const late = useMemo(() => lateReports(production ?? [], win), [production, win]);
+  const lateRange = useMemo(() => smallestRangeCovering(late.map((r) => r.date)), [late]);
+
   /* Production is a FLOW: bucketed tonnage genuinely adds up.
 
      One series PER BRAND, not one total. A single line of total tonnage cannot
@@ -203,6 +216,13 @@ export default function ProductionPanels() {
           {tons(grand)} over {prodRows.length} report{prodRows.length === 1 ? "" : "s"}
         </p>
       </div>
+
+      <LateReportsNotice
+        dates={late.map((r) => r.date)}
+        widenTo={lateRange}
+        onWiden={() => setRange(lateRange)}
+        noun="production report"
+      />
 
       <Chart empty={prodSeries.length === 0} emptyLabel="No production in this period.">
         <LineChart data={prodSeries} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>

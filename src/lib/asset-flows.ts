@@ -114,6 +114,16 @@ export interface AssetFlowState {
   check?: ToolPhotoCheck;
   /** What the AI read off a voucher's photos, kept for the audit trail. */
   extraction?: VoucherExtractionRecord;
+  /**
+   * The capability key of a report the person asked for while THIS one was
+   * still unfinished.
+   *
+   * Set only while the "continue or start over" question is on screen, and
+   * cleared by either answer. It lives on the flow state rather than on the
+   * session because `asset_flow` is already jsonb — a new session column would
+   * be a migration for a field that exists for one exchange.
+   */
+  pendingCap?: string;
 }
 
 /**

@@ -32,8 +32,21 @@ export async function GET(req: NextRequest) {
        order by date desc, quarter desc, product_code, line
        limit 1000
     `;
+    // Checks filed in the last week but dated before the window: reported, and
+    // otherwise invisible on this tab. Dates only — the readings stay in the
+    // days they were taken.
+    const late = await sql<{ date: string }[]>`
+      select distinct date
+        from whiteness_checks
+       where date < ${start}
+         and created_at >= now() - interval '7 days'
+       order by date desc
+       limit 20
+    `.catch(() => []);
+
     return NextResponse.json({
       rows: rows.map((r) => ({ ...r, avg: r.avg === null ? null : Number(r.avg) })),
+      late: late.map((r) => r.date),
     });
   } catch (e) {
     // whiteness_checks arrives in 0022.

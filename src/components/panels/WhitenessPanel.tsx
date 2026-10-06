@@ -2,7 +2,9 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { productLabel } from "@/lib/products";
+import LateReportsNotice from "@/components/LateReportsNotice";
 import RangeSelector from "@/components/RangeSelector";
+import { smallestRangeCovering } from "@/lib/late-reports";
 import { type RangeKey } from "@/lib/ranges";
 import { bandLabel, belowSpec, readingBelow, specFor } from "@/lib/whiteness-spec";
 
@@ -67,6 +69,8 @@ function averageOf(values: (number | null)[]): number | null {
 export default function WhitenessPanel() {
   const [range, setRange] = useState<RangeKey>("weekly");
   const [rows, setRows] = useState<Row[] | null>(null);
+  /** Checks filed in the last week but dated before the window — see the notice. */
+  const [late, setLate] = useState<string[]>([]);
 
   useEffect(() => {
     let alive = true;
@@ -74,7 +78,9 @@ export default function WhitenessPanel() {
     fetch(`/api/whiteness?range=${range}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
-        if (alive) setRows(Array.isArray(d?.rows) ? d.rows : []);
+        if (!alive) return;
+        setRows(Array.isArray(d?.rows) ? d.rows : []);
+        setLate(Array.isArray(d?.late) ? d.late : []);
       })
       .catch(() => {
         if (alive) setRows([]);
@@ -120,6 +126,13 @@ export default function WhitenessPanel() {
       </div>
 
       <RangeSelector value={range} onChange={setRange} keys={WINDOW_KEYS} labels={WINDOW_LABELS} />
+
+      <LateReportsNotice
+        dates={late}
+        widenTo={smallestRangeCovering(late, new Date(), WINDOW_KEYS)}
+        onWiden={() => setRange(smallestRangeCovering(late, new Date(), WINDOW_KEYS))}
+        noun="whiteness check"
+      />
 
       {rows === null ? (
         <div className="card h-64 animate-pulse bg-clay-50" />

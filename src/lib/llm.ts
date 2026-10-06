@@ -12,6 +12,8 @@ import {
 } from "@/lib/products";
 import { BANKS } from "@/lib/banks";
 import type { SalesInvoiceRead } from "@/lib/sales-invoice";
+import type { GeminiCall, GeminiCallResult, GeminiContent, GeminiPart } from "@/lib/llm-types";
+import { fromOpenAiMessage, hasImages, toOpenAiMessages, toOpenAiTools } from "@/lib/llm-crossing";
 
 /* ─────────────────────────────── AI providers ──────────────────────────────
  * Text (chat, morning brief, report extraction) → NVIDIA Nemotron-3.
@@ -439,23 +441,10 @@ export type ReceiptReadResult =
  */
 /* ─────────────────────── Shared Gemini REST transport ──────────────────────── */
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type GeminiPart = Record<string, any>;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type GeminiContent = { role: "user" | "model"; parts: GeminiPart[] };
-
-export interface GeminiCallResult {
-  ok: boolean;
-  /** Concatenated text parts of the first candidate. */
-  text: string;
-  /** Function calls the model asked for, when tools were supplied. */
-  calls: { name: string; args: Record<string, unknown> }[];
-  error?: string;
-  /** HTTP status, when the call reached Google and was refused. */
-  status?: number;
-  /** The model this attempt actually used. */
-  model?: string;
-}
+// The shapes live in llm-types.ts so the cross-provider mapping can be a pure
+// module; re-exported here because every caller already imports them from this
+// file and there is nothing to gain from making them all move.
+export type { GeminiCall, GeminiCallResult, GeminiContent, GeminiPart };
 
 /**
  * One place that knows how to talk to Gemini's native generateContent API.
@@ -564,7 +553,14 @@ async function geminiAttempt(
     }
     const data = (await res.json()) as {
       candidates?: {
-        content?: { parts?: { text?: string; functionCall?: { name?: string; args?: unknown } }[] };
+        content?: {
+          parts?: {
+            text?: string;
+            functionCall?: { name?: string; args?: unknown };
+            thoughtSignature?: string;
+            thought_signature?: string;
+          }[];
+        };
       }[];
     };
     const parts = data.candidates?.[0]?.content?.parts || [];
@@ -576,7 +572,14 @@ async function geminiAttempt(
         .map((pt) => ({
           name: String(pt.functionCall!.name),
           args: (pt.functionCall!.args as Record<string, unknown>) || {},
+          // Carried, never inspected. Gemini 3 refuses the NEXT turn outright
+          // if the signature it minted for a call does not come back on the
+          // part — which is what broke the dashboard chat for every question
+          // that actually reached the database. Both spellings are read
+          // because the REST answer and the proto field differ.
+          thoughtSignature: pt.thoughtSignature ?? pt.thought_signature,
         })),
+      model,
     };
   } catch (e) {
     const aborted = e instanceof Error && e.name === "AbortError";
@@ -609,68 +612,74 @@ async function geminiAttempt(
  * this function's contract is unchanged: it returns a result, never rejects.
  */
 /**
- * The same request, asked of Nemotron instead — when that is possible at all.
+ * The backup providers, when every Gemini model is busy at once.
  *
- * Returns null when this call CANNOT cross providers, which is the important
- * half of the contract:
+ * Two of them, because the jobs differ: Nemotron reads and writes text and can
+ * call functions; Qwen-VL reads images. Both are already configured in this
+ * system for other work, both speak the OpenAI-compatible API, and the mapping
+ * between the two request shapes lives in llm-crossing.ts where it can be
+ * tested without a network.
  *
- *  - an `inline_data` part means the request carries a photograph, and Nemotron
- *    is a text model. Sending it the prompt without the image would produce a
- *    confident answer about a receipt it never saw, which is far worse than a
- *    failure;
- *  - `tools` means the caller wants a function call back, and the two providers
- *    describe those differently. Guessing at that mapping to save an outage is
- *    how a tool call comes back subtly wrong;
- *  - no NVIDIA key configured — nothing to cross to.
+ * This is not a nicety. Gemini has gone fully busy — all five models, inside
+ * one minute — and before this that meant the dashboard chat, the receipt
+ * reader and the free-text editor all stopped at once with nothing to fall
+ * back to.
  *
- * Everything else is plain text in and text out, which is exactly what the
- * free-text edit parser and the brief need.
+ * Returns null when there is nothing to cross to (no key), which is different
+ * from an attempt that failed: the caller reports the two cases differently.
  */
-async function nemotronFallback(
+async function crossProvider(
   contents: GeminiContent[],
   opts: NonNullable<Parameters<typeof geminiAttempt>[1]>
 ): Promise<GeminiCallResult | null> {
-  if (opts.tools) return null;
-  if (contents.some((c) => c.parts?.some((p) => p && typeof p === "object" && "inline_data" in p))) return null;
-  if (!nvidiaKey()) return null;
+  const images = hasImages(contents);
 
-  // Gemini's contents → OpenAI messages. The system instruction is its own
-  // field there and an ordinary system message here.
-  const messages: { role: "system" | "user" | "assistant"; content: string }[] = [];
-  if (opts.systemInstruction) messages.push({ role: "system", content: opts.systemInstruction });
-  // JSON mode is a generationConfig flag for Gemini; for an OpenAI-compatible
-  // endpoint it is safer to ASK in words than to rely on response_format, which
-  // not every model behind this base URL honours. The callers all strip fences
-  // before parsing anyway.
-  if (opts.json) {
-    messages.push({ role: "system", content: "Reply with strict JSON only. No prose, no markdown fences." });
-  }
-  for (const c of contents) {
-    const text = (c.parts || [])
-      .map((p) => (p && typeof p === "object" && typeof p.text === "string" ? p.text : ""))
-      .filter(Boolean)
-      .join("\n");
-    if (text) messages.push({ role: c.role === "model" ? "assistant" : "user", content: text });
-  }
+  // An image goes to the vision model, and only there. Nemotron cannot see one,
+  // and handing it a conversation with the pictures stripped out would answer
+  // confidently about a receipt it never read.
+  const useVision = images;
+  const key = useVision ? envValue("QWEN_API") : nvidiaKey();
+  const model = useVision ? VISION_MODEL : TEXT_MODEL;
+  if (!key) return null;
+
+  // Qwen is not asked to call functions. A vision model being handed a tool
+  // schema is a combination nothing in this system needs, and guessing at how
+  // it would answer is how a tool call comes back subtly wrong.
+  const tools = !useVision && opts.tools ? toOpenAiTools(opts.tools) : [];
+  if (useVision && opts.tools) return null;
+
+  const messages = toOpenAiMessages(contents, {
+    systemInstruction: opts.systemInstruction,
+    // Forced JSON and tools are mutually exclusive for Gemini too — asking for
+    // both would contradict itself here in the same way.
+    json: opts.json && !opts.tools,
+  });
   if (messages.length === 0) return null;
 
   try {
-    const res = await textAI().chat.completions.create({
-      model: TEXT_MODEL,
-      messages,
+    const client = useVision ? visionAI() : textAI();
+    const res = await client.chat.completions.create({
+      model,
+      messages: messages as never,
       temperature: opts.temperature ?? 0,
       ...(opts.maxOutputTokens ? { max_tokens: opts.maxOutputTokens } : {}),
+      ...(tools.length > 0 ? { tools, tool_choice: "auto" as const } : {}),
     });
-    const text = res.choices?.[0]?.message?.content ?? "";
-    if (!text.trim()) return { ok: false, text: "", calls: [], error: "empty response", model: TEXT_MODEL };
-    return { ok: true, text, calls: [], model: TEXT_MODEL };
+
+    const choice = res.choices?.[0]?.message;
+    const { text, calls } = fromOpenAiMessage(choice);
+    // A reply with neither text nor a call is a failure wearing a 200.
+    if (!text.trim() && calls.length === 0) {
+      return { ok: false, text: "", calls: [], error: "empty response", model };
+    }
+    return { ok: true, text, calls, model };
   } catch (e) {
     return {
       ok: false,
       text: "",
       calls: [],
       error: e instanceof Error ? e.message : String(e),
-      model: TEXT_MODEL,
+      model,
     };
   }
 }
@@ -795,20 +804,20 @@ export async function geminiGenerate(
     // classifier — and a free-text correction is a text task like any other.
     // Crossing to it is the difference between "the editor is down this
     // afternoon" and one slower answer.
-    const crossed = await nemotronFallback(contents, opts);
+    const crossed = await crossProvider(contents, opts);
     if (crossed) {
       if (crossed.ok) {
         void logError({
           source,
           kind: "gemini_text_fallback",
-          message: `every Gemini model was busy; answered by ${TEXT_MODEL}.`,
-          detail: { tried, answeredBy: TEXT_MODEL, configured: GEMINI_MODEL, reason: first.error },
+          message: `every Gemini model was busy; answered by ${crossed.model}.`,
+          detail: { tried, answeredBy: crossed.model, configured: GEMINI_MODEL, reason: first.error },
         });
         return crossed;
       }
       // The other provider failed too. Report both, so the log does not blame
       // Gemini for an outage that was wider than Gemini.
-      first = { ...first, error: `${first.error} · ${TEXT_MODEL}: ${crossed.error}` };
+      first = { ...first, error: `${first.error} · ${crossed.model}: ${crossed.error}` };
     }
 
     // Nothing else could take it: fall through to the same-model retry below,
@@ -840,11 +849,37 @@ export async function geminiGenerate(
     return second;
   }
 
+  // LAST RESORT, whatever went wrong.
+  //
+  // The crossing above fires when every Gemini model reports itself busy. This
+  // one fires when Gemini has simply failed twice for any other reason — a dead
+  // key, a 500, a timeout that outlived the retry. Those are rarer and they are
+  // not the request's fault, so there is no reason the work should stop when
+  // another provider could do it. A refusal that IS the request's fault (an
+  // oversized image, a malformed schema) will be refused here too, one attempt
+  // later, and the log then names both.
+  const lastChance = await crossProvider(contents, opts);
+  if (lastChance?.ok) {
+    void logError({
+      source,
+      kind: "gemini_text_fallback",
+      message: `Gemini failed twice (${second.error}); answered by ${lastChance.model}.`,
+      detail: { answeredBy: lastChance.model, configured: GEMINI_MODEL, reason: second.error },
+    });
+    return lastChance;
+  }
+
   void logError({
     source,
     kind: providerErrorKind("gemini", second.error || ""),
     message: second.error || "Gemini call failed",
-    detail: { model: second.model || activeModel, configured: GEMINI_MODEL, retried: true, firstError: first.error },
+    detail: {
+      model: second.model || activeModel,
+      configured: GEMINI_MODEL,
+      retried: true,
+      firstError: first.error,
+      ...(lastChance ? { fallback: lastChance.model, fallbackError: lastChance.error } : {}),
+    },
   });
   return second;
 }

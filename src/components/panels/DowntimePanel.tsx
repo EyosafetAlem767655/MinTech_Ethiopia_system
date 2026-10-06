@@ -1,8 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import LateReportsNotice from "@/components/LateReportsNotice";
 import RangeSelector from "@/components/RangeSelector";
 import { ScrollTable } from "@/components/panels/TableChart";
+import { smallestRangeCovering } from "@/lib/late-reports";
 import { RANGES, type RangeKey } from "@/lib/ranges";
 import { HOURS_PER_DAY, MAINTENANCE_LABEL, REASON_LABEL } from "@/lib/downtime";
 
@@ -43,6 +45,7 @@ const REASON_TONE: Record<string, string> = {
 export default function DowntimePanel() {
   const [range, setRange] = useState<RangeKey>("monthly");
   const [rows, setRows] = useState<Row[] | null>(null);
+  const [late, setLate] = useState<string[]>([]);
   const [unavailable, setUnavailable] = useState(false);
 
   useEffect(() => {
@@ -53,6 +56,7 @@ export default function DowntimePanel() {
       .then((d) => {
         if (!alive) return;
         setRows(Array.isArray(d?.rows) ? d.rows : []);
+        setLate(Array.isArray(d?.late) ? d.late : []);
         setUnavailable(Boolean(d?.unavailable));
       })
       .catch(() => {
@@ -92,6 +96,13 @@ export default function DowntimePanel() {
       </div>
 
       <RangeSelector value={range} onChange={setRange} />
+
+      <LateReportsNotice
+        dates={late}
+        widenTo={smallestRangeCovering(late)}
+        onWiden={() => setRange(smallestRangeCovering(late))}
+        noun="downtime report"
+      />
 
       {unavailable && (
         <p className="card p-3 text-xs text-amber-700">

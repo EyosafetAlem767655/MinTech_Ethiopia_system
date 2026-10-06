@@ -72,6 +72,8 @@ import {
   editMessageReplyMarkup,
   ENTRY_BUTTONS,
   NAV_BUTTONS,
+  RESUME_BUTTONS,
+  RESUME_KEYBOARD,
   sendDocument,
   sendEntryMenu,
   sendMessage,
@@ -162,6 +164,8 @@ const NORM = {
   changeReport: normaliseChoice(NAV_BUTTONS.changeReport),
   back: normaliseChoice(NAV_BUTTONS.back),
   logout: normaliseChoice(NAV_BUTTONS.logout),
+  resume: normaliseChoice(RESUME_BUTTONS.resume),
+  restart: normaliseChoice(RESUME_BUTTONS.restart),
 };
 
 /* ──────────────────────────────── Amharic copy ───────────────────────────── */
@@ -1425,6 +1429,56 @@ async function extractPaymentIntoDraft(
   await askAssetStep(chatId, state);
 }
 
+/** May this person file this report? The menu's rule, in one place. */
+function canUseCapability(user: { positions: string[] }, key: string): boolean {
+  return !isReceiverOnly(user.positions) && userCapabilities(user).some((c) => c.key === key);
+}
+
+/**
+ * Open a guided flow and ask its first question.
+ *
+ * Shared by the menu and by the "start over" answer to the unfinished-report
+ * question, so a flow begins the same way whichever door it came through —
+ * including the credit list, which has to be read before the first question or
+ * not at all.
+ *
+ * Returns false when the flow could not be opened (nothing to collect against),
+ * having already said so.
+ */
+async function startAssetFlow(
+  session: any,
+  chatId: string,
+  cap: { button: string; question: string },
+  kind: AssetFlowKind,
+  menuButtons: string[]
+): Promise<boolean> {
+  // The credit collection chooses from whatever is unpaid RIGHT NOW, so the
+  // list is read once here and carried in the draft. Read before the first
+  // question rather than at each step: the person should not be offered a sale
+  // that was settled while they were typing.
+  const draft: Record<string, string | number> = {};
+  if (kind === "credit_payment") {
+    const open = await openCreditInvoices().catch(() => []);
+    if (open.length === 0) {
+      await sendReportMenu(chatId, menuButtons, "✅ አሁን ያልተከፈለ የብድር ሽያጭ የለም።");
+      return false;
+    }
+    draft[INVOICES_KEY] = encodeInvoices(open);
+  }
+  const state: AssetFlowState = { kind, step: firstStep(kind), draft };
+  session.state = "asset_entry";
+  session.draft = undefined;
+  session.capture = undefined;
+  session.history = [];
+  session.assetFlow = state;
+  await persist(session);
+  await sendMessage(chatId, `<b>${cap.button}</b>\n\n${cap.question}`, {
+    reply_markup: CHANGE_CANCEL_KEYBOARD,
+  });
+  await askAssetStep(chatId, state);
+  return true;
+}
+
 /** Advance past the step just answered and ask the next one. */
 async function advanceAsset(session: any, chatId: string, state: AssetFlowState): Promise<void> {
   state.step = nextStep(state.kind, state.step, state.draft);
@@ -1643,6 +1697,20 @@ export async function POST(req: NextRequest) {
       const user = resolved ? view(resolved) : null;
       if (user) {
         await sendRoleMenu(chatId, user, `👋 እንኳን ደህና መጡ <b>${user.fullName}</b>።`);
+        // /start does not cancel a report, so say what is still open and put the
+        // question back on screen. Otherwise the only sign of a half-filled
+        // report is that the next thing they type is read as an answer to a
+        // question they can no longer see.
+        const open = session.assetFlow as AssetFlowState | undefined;
+        if (session.state === "asset_entry" && open) {
+          await sendMessage(
+            chatId,
+            `⏳ ያልጨረሱት <b>${FLOW_TITLE[open.kind]}</b> ሪፖርት አለ። ለመቀጠል ከታች ያለውን ጥያቄ ይመልሱ፣ ` +
+              `ለማቋረጥ ❌ ሰርዝ ይጫኑ።`,
+            { reply_markup: CHANGE_CANCEL_KEYBOARD }
+          );
+          await askAssetStep(chatId, open);
+        }
       } else {
         // Internal-only bot: an unauthenticated /start goes straight to login.
         if (session.auth) clearAuth(session);
@@ -1760,6 +1828,65 @@ export async function POST(req: NextRequest) {
     if (session.state === "asset_entry" && session.assetFlow) {
       const state = session.assetFlow as AssetFlowState;
       state.draft = state.draft || {};
+
+      /* ── An unfinished report is never thrown away without being asked ──
+
+         People get interrupted half way through: a phone call, a shift change,
+         an AI step that failed on them. Before this, tapping any other report
+         button silently replaced the half-filled draft with an empty one, and
+         there was no way back to it — the work was simply gone. Now both
+         answers are offered and the person decides which one they meant. */
+      if (state.pendingCap) {
+        const wanted = CAPABILITIES[state.pendingCap as keyof typeof CAPABILITIES];
+        const wantedKind = wanted ? ASSET_FLOW_BY_CAP[wanted.key] : undefined;
+
+        if (normText === NORM.restart && wanted && wantedKind && canUseCapability(user, wanted.key)) {
+          await startAssetFlow(
+            session,
+            chatId,
+            wanted,
+            wantedKind,
+            userCapabilities(user).map((c) => c.button)
+          );
+          return NextResponse.json({ ok: true });
+        }
+
+        // Resuming, and also the fallback when the requested report turns out
+        // not to be a guided flow at all: the half-filled one is the thing that
+        // would be lost, so it wins any doubt.
+        if (normText === NORM.resume || !wantedKind) {
+          state.pendingCap = undefined;
+          session.assetFlow = { ...state };
+          await persist(session);
+          await sendMessage(chatId, `▶️ <b>${FLOW_TITLE[state.kind]}</b> ይቀጥላል።`, {
+            reply_markup: CHANGE_CANCEL_KEYBOARD,
+          });
+          await askAssetStep(chatId, state);
+          return NextResponse.json({ ok: true });
+        }
+
+        await sendMessage(chatId, "➡️ እባክዎ ከሁለቱ አንዱን ይጫኑ።", { reply_markup: RESUME_KEYBOARD });
+        return NextResponse.json({ ok: true });
+      }
+
+      const switchCap = CAP_BY_LABEL.get(normText);
+      // Permission is checked HERE as well as on the menu. Otherwise typing the
+      // label of a report you are not allowed to file would open it, simply
+      // because you happened to be inside another one.
+      if (switchCap && canUseCapability(user, switchCap.key)) {
+        state.pendingCap = switchCap.key;
+        session.assetFlow = { ...state };
+        await persist(session);
+        const filled = editableFields(state.kind, state.draft).length;
+        await sendMessage(
+          chatId,
+          `⏳ ያልጨረሱት <b>${FLOW_TITLE[state.kind]}</b> ሪፖርት አለ` +
+            (filled > 0 ? ` (${filled} መስክ ተሞልቷል)` : "") +
+            `።\n\nያልጨረሱትን ይቀጥሉ ወይስ <b>${switchCap.button}</b> አዲስ ይጀምሩ?`,
+          { reply_markup: RESUME_KEYBOARD }
+        );
+        return NextResponse.json({ ok: true });
+      }
 
       if (state.step === "review") {
         // Correcting anything, before any of it is saved. Every answered field
@@ -2219,7 +2346,7 @@ export async function POST(req: NextRequest) {
     const cap = CAP_BY_LABEL.get(normText);
     if (cap) {
       // Admin/HR are receivers — they may never file a report.
-      const allowed = !isReceiverOnly(user.positions) && userCapabilities(user).some((c) => c.key === cap.key);
+      const allowed = canUseCapability(user, cap.key);
 
       if (!allowed) {
         await logActivity({
@@ -2275,30 +2402,13 @@ export async function POST(req: NextRequest) {
       if (cap.captureMode === "asset_entry") {
         const kind = ASSET_FLOW_BY_CAP[cap.key];
         if (kind) {
-          // The credit collection chooses from whatever is unpaid RIGHT NOW, so
-          // the list is read once here and carried in the draft. Read before the
-          // first question rather than at each step: the person should not be
-          // offered a sale that was settled while they were typing.
-          const draft: Record<string, string | number> = {};
-          if (kind === "credit_payment") {
-            const open = await openCreditInvoices().catch(() => []);
-            if (open.length === 0) {
-              await sendReportMenu(chatId, userCapabilities(user).map((c) => c.button), "✅ አሁን ያልተከፈለ የብድር ሽያጭ የለም።");
-              return NextResponse.json({ ok: true });
-            }
-            draft[INVOICES_KEY] = encodeInvoices(open);
-          }
-          const state: AssetFlowState = { kind, step: firstStep(kind), draft };
-          session.state = "asset_entry";
-          session.draft = undefined;
-          session.capture = undefined;
-          session.history = [];
-          session.assetFlow = state;
-          await persist(session);
-          await sendMessage(chatId, `<b>${cap.button}</b>\n\n${cap.question}`, {
-            reply_markup: CHANGE_CANCEL_KEYBOARD,
-          });
-          await askAssetStep(chatId, state);
+          await startAssetFlow(
+            session,
+            chatId,
+            cap,
+            kind,
+            userCapabilities(user).map((c) => c.button)
+          );
           return NextResponse.json({ ok: true });
         }
       }

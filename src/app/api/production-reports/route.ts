@@ -9,7 +9,7 @@ export async function GET() {
     select id as _id, date, fgr_no as "fgrNo", reported_by as "reportedBy", products, created_at as "createdAt"
       from production_reports
      order by date desc, created_at desc
-     limit 200
+     limit 2000
   `;
   return NextResponse.json(rows);
 }

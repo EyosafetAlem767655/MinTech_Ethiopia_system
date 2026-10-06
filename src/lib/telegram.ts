@@ -73,6 +73,25 @@ export const NAV_BUTTONS = {
   logout: "🚪 ውጣ",
 } as const;
 
+/**
+ * The two answers to "you have an unfinished report".
+ *
+ * Tapping another report button half way through a report used to throw the
+ * half away without a word — and people do get interrupted mid-report, by a
+ * phone call or by the AI step failing on them. Now the choice is theirs, and
+ * it is asked in the only two words it can be answered in.
+ */
+export const RESUME_BUTTONS = {
+  resume: "▶️ ያልጨረሱትን ይቀጥሉ",
+  restart: "🔄 አዲስ ይጀምሩ",
+} as const;
+
+export const RESUME_KEYBOARD = {
+  keyboard: [[{ text: RESUME_BUTTONS.resume }], [{ text: RESUME_BUTTONS.restart }], [{ text: NAV_BUTTONS.cancel }]],
+  resize_keyboard: true,
+  one_time_keyboard: false,
+};
+
 /** First screen after /start — internal employees only; a single login door. */
 export const ENTRY_KEYBOARD = {
   keyboard: [[{ text: ENTRY_BUTTONS.internal }]],

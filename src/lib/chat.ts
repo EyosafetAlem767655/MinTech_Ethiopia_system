@@ -962,7 +962,18 @@ export async function companyChat(
     // the calls, or the reconstructed history stops matching what it produced.
     const modelParts: Record<string, unknown>[] = [];
     if (res.text.trim()) modelParts.push({ text: res.text });
-    for (const c of res.calls) modelParts.push({ functionCall: { name: c.name, args: c.args } });
+    for (const c of res.calls) {
+      modelParts.push({
+        functionCall: { name: c.name, args: c.args },
+        // Carried back exactly as it came. Gemini 3 mints a reasoning token for
+        // each call and refuses the next turn without it — "Function call is
+        // missing a thought_signature in functionCall parts" — so every
+        // question that actually reached the database used to fail on the round
+        // after its first tool call. A provider with no such concept returns
+        // none, and the key is simply absent.
+        ...(c.thoughtSignature ? { thoughtSignature: c.thoughtSignature } : {}),
+      });
+    }
     convo.push({ role: "model", parts: modelParts });
 
     const responses = [];

@@ -21,6 +21,7 @@ import {
   type SubmissionSpec,
 } from "@/lib/submissions";
 import { InstallButton } from "@/components/InstallPrompt";
+import AiRecheckPanel from "@/components/panels/AiRecheckPanel";
 import type { SchemaReport } from "@/lib/schema-check";
 
 interface BotUser {
@@ -589,6 +590,10 @@ function SubmissionsTab() {
 
   return (
     <div className="space-y-4 pb-10">
+      {/* First, because it is the one thing on this screen that is a gap rather
+          than a record: submissions whose AI verdict never arrived. */}
+      <AiRecheckPanel />
+
       <div className="card space-y-3 p-4">
         <select
           value={collection}
