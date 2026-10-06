@@ -43,15 +43,23 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Install PostgreSQL 16 client
+      - name: Install PostgreSQL 17 client
         # The version matters: pg_dump refuses to dump a server NEWER than
-        # itself, and ubuntu-latest ships an older client than Supabase runs.
+        # itself. Supabase runs 17; the runner image ships 16. When Supabase
+        # moves to 18, raise PG_MAJOR — the version check below says so in as
+        # many words rather than failing inside pg_dump.
+        env:
+          PG_MAJOR: "17"
         run: |
           sudo sh -c 'echo "deb https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
           curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
           sudo apt-get update -qq
-          sudo apt-get install -y -qq postgresql-client-16
-          pg_dump --version
+          sudo apt-get install -y -qq "postgresql-client-$PG_MAJOR"
+          # Put this version first on PATH explicitly. The runner already has
+          # 16 installed, and which one a bare `pg_dump` finds should not be
+          # left to the wrapper's choice.
+          echo "/usr/lib/postgresql/$PG_MAJOR/bin" >> "$GITHUB_PATH"
+          "/usr/lib/postgresql/$PG_MAJOR/bin/pg_dump" --version
 
       - name: Check the secrets are present
         env:
@@ -82,6 +90,31 @@ jobs:
           case "$TARGET" in
             *-pooler.*) echo "::error::NEON_DATABASE_URL is Neon's POOLED string. Use the direct one (no '-pooler' in the host) — see docs/RUNBOOK-failover.md."; exit 1 ;;
           esac
+
+      - name: Check the Postgres versions line up
+        env:
+          SOURCE: ${{ secrets.SUPABASE_DB_URL_DIRECT }}
+          TARGET: ${{ secrets.NEON_DATABASE_URL }}
+        # Two ways a version difference breaks this, both caught here in plain
+        # words rather than half way through a dump:
+        #   - tools older than Supabase: pg_dump refuses outright;
+        #   - Neon older than Supabase: a dump from a newer server carries
+        #     settings an older one rejects, and the restore fails mid-way.
+        run: |
+          src=$(psql "$SOURCE" -tAc "show server_version_num")
+          dst=$(psql "$TARGET" -tAc "show server_version_num")
+          tool=$(pg_dump --version | grep -oE '[0-9]+' | head -1)
+          src_major=$((src / 10000))
+          dst_major=$((dst / 10000))
+          echo "Supabase: Postgres $src_major · Neon: Postgres $dst_major · tools: $tool"
+          if [ "$tool" -lt "$src_major" ]; then
+            echo "::error::The backup tools are Postgres $tool but Supabase runs $src_major. Raise PG_MAJOR in this workflow to $src_major."
+            exit 1
+          fi
+          if [ "$dst_major" -lt "$src_major" ]; then
+            echo "::error::Neon runs Postgres $dst_major, older than Supabase's $src_major. Create the Neon project on Postgres $src_major (Neon → New project → Postgres version) and update NEON_DATABASE_URL."
+            exit 1
+          fi
 
       - name: Dump Supabase
         env:
