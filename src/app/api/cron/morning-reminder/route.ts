@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
+import { runJob } from "@/lib/system-jobs";
+import { systemDigest } from "@/lib/system-status";
 import sql from "@/lib/sql";
 import { eatDateKey, logActivity } from "@/lib/bot-auth";
 import {
@@ -32,11 +34,28 @@ interface Emp {
 
 const nameList = (list: Emp[]) => (list.length ? list.map((u) => `• ${u.full_name}`).join("\n") : "—");
 
+/** Recorded in system_jobs; see finance-daily for why. */
 export async function GET(req: NextRequest) {
   const secret = process.env.CRON_SECRET;
   if (secret && req.headers.get("authorization") !== `Bearer ${secret}`) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
+  let response: NextResponse = NextResponse.json({ ok: false }, { status: 500 });
+  await runJob("morning-reminder", async () => {
+    response = await handle();
+    const body = (await response.clone().json().catch(() => ({}))) as Record<string, any>;
+    return {
+      ok: response.ok,
+      summary:
+        `${body.submitted ?? 0}/${body.dailyReporters ?? 0} filed, ${body.reminded ?? 0} reminded; ` +
+        `digests to ${body.hrDigests ?? 0} HR and ${body.adminDigests ?? 0} admin`,
+      detail: body,
+    };
+  });
+  return response;
+}
+
+async function handle(): Promise<NextResponse> {
 
   const today = eatDateKey();
 
@@ -162,7 +181,11 @@ export async function GET(req: NextRequest) {
     `✅ ሪፖርት ያስገቡ: <b>${submitted.length}/${dailyEmployees.length}</b>\n` +
     (missing.length ? `❌ ያላስገቡ:\n${nameList(missing)}` : `🎉 ሁሉም ሪፖርት አስገብተዋል!`) +
     `\n🛒 የግዢ ጥያቄዎች: <b>${pendingPurchases}</b>` +
-    toolBlock;
+    toolBlock +
+    // Backup, photo clean-up, database size, errors and the next archive move —
+    // the one daily look at the system itself. Failures are pushed the moment
+    // they happen; this is where "all fine" is said.
+    (await systemDigest());
 
   const adminUsers = employees.filter((u) => hasPosition(u.positions, "admin"));
   await Promise.all(adminUsers.map((u) => sendMessage(String(u.chat_id), adminText).catch(() => {})));

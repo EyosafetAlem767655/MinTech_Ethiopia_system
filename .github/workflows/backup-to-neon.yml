@@ -43,6 +43,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      - name: Note the start time
+        run: echo "JOB_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
+
       - name: Install PostgreSQL 17 client
         # The version matters: pg_dump refuses to dump a server NEWER than
         # itself. Supabase runs 17; the runner image ships 16. When Supabase
@@ -153,6 +156,7 @@ jobs:
           fi
 
       - name: Count what landed
+        id: count
         env:
           TARGET: ${{ secrets.NEON_DATABASE_URL }}
         # A restore that "succeeded" into an empty database is the failure this
@@ -165,7 +169,10 @@ jobs:
             echo "::error::only $tables tables on Neon — that is not this database."
             exit 1
           fi
-          echo "### Backup to Neon: $tables tables" >> "$GITHUB_STEP_SUMMARY"
+          bytes=$(psql "$TARGET" -tAc "select pg_database_size(current_database())")
+          echo "tables=$tables" >> "$GITHUB_OUTPUT"
+          echo "bytes=$bytes" >> "$GITHUB_OUTPUT"
+          echo "### Backup to Neon: $tables tables, $((bytes / 1048576)) MB" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Keep the dump file too
         uses: actions/upload-artifact@v4
@@ -177,3 +184,44 @@ jobs:
           # mistake nobody noticed for a week.
           retention-days: 30
           if-no-files-found: error
+
+      # ── Tell the app how it went ──────────────────────────────────────────
+      # Everything below runs whatever happened above (`if: always()`): a
+      # backup that failed has to be recorded MORE than one that worked. The
+      # row lands in system_jobs, the System Admin view and the morning summary
+      # read it, and a failure is messaged to the admins straight away. With no
+      # row at all by morning, the summary says the backup is missing.
+      - name: Check out the scripts
+        if: always()
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        if: always()
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        if: always()
+        run: npm ci --no-audit --no-fund
+
+      - name: Record the result
+        if: always()
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL_DIRECT }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          STATUS: ${{ job.status }}
+          TABLES: ${{ steps.count.outputs.tables }}
+          BYTES: ${{ steps.count.outputs.bytes }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ "$STATUS" = "success" ]; then
+            result=ok
+            summary="Neon copy restored: ${TABLES:-?} tables, $(( ${BYTES:-0} / 1048576 )) MB"
+          else
+            result=fail
+            summary="Nightly backup failed — $RUN_URL"
+          fi
+          detail="{\"neonTables\": ${TABLES:-0}, \"neonBytes\": ${BYTES:-0}, \"run\": \"$RUN_URL\"}"
+          npx --yes tsx scripts/report-job.ts backup "$result" "$summary" "$detail"

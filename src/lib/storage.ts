@@ -157,116 +157,148 @@ export async function deleteFile(id: string): Promise<void> {
 }
 
 /**
- * Delete uploaded images older than `hours` (default 72) — the raw photos in the
- * bucket, one batch at a time. Only the binary + its stored_files metadata row go;
- * the EXTRACTED data (sales_invoices, daily_reports, …) is untouched, so the
- * numbers/text stay forever and only the heavy image is reclaimed. Returns how
- * many files were removed in this batch (0 = nothing left to purge).
+ * How long an uploaded photo is kept AFTER the thing it evidences is decided.
+ *
+ * The owner's rule (7 Oct 2026): photos go three months after processing. The
+ * image is evidence for a decision — was the damage real, should this be
+ * bought — so the clock starts when that decision is made, not when the photo
+ * arrived. Until then it stays, however old it is: deleting the evidence before
+ * anyone has looked at it would leave the decision to be made blind.
+ *
+ * This replaced two sweeps — 72 hours for dashboard uploads, 90 days from
+ * upload for PP bag damage — and a 730-day one for finance receipts that
+ * nothing writes any more.
  */
+export const PHOTO_KEEP_DAYS = 90;
+
 /**
- * Kinds the short-retention sweep must leave alone.
+ * When each photo's subject was decided, or null while it is still undecided.
  *
- * PP bag damage photos are the evidence the duplicate check compares against for
- * a year; reaping them after 72 hours would make re-submitting an old photo
- * undetectable. They have their own long sweep — purgePpBagPhotos below.
+ *   purchase request → the request decided (`decided_at`)
+ *   PP bag damage    → its report decided (0015's status / decided_at)
+ *   damage claim     → the claim reviewed (`reviewed_at`)
+ *   anything else    → the upload itself (receipts, lot photos, disposals)
  *
- * Nothing else is listed because nothing else is uploaded any more: since
- * migration 0025 every other flow keeps a Telegram file id and the bytes never
- * reach this bucket. purgeFinanceReceipts is kept for the rows filed before that.
+ * A photo no record points at any more is dated by its upload: nothing will
+ * ever decide it, and an orphan kept forever is just a cost.
+ *
+ * `to_jsonb(r)->>…` reads the PP bag report's status and decision time so a
+ * database that has not run 0015 still sweeps instead of failing at parse time.
  */
-const LONG_RETENTION_KINDS = ["pp_bag_damage"];
+function processedPhotos(days: number, withItems: boolean, withBin: boolean) {
+  const ppReports = withItems
+    ? sql`select report_id from pp_bag_damage_photos where file_id = sf.id
+          union select report_id from pp_bag_damage_items where file_id = sf.id`
+    : sql`select report_id from pp_bag_damage_photos where file_id = sf.id`;
+  const notInBin = withBin
+    ? sql`and not exists (select 1 from deleted_submissions d where c.id = any(d.photo_ids))`
+    : sql``;
+  return sql`
+    select c.id, c.storage_path, c.kind, c.processed_at
+      from (
+        select sf.id, sf.storage_path, sf.kind,
+          case
+            when sf.kind = 'purchase_request'
+                 and exists (select 1 from purchase_requests pr where pr.photo_file_id = sf.id) then
+              (select case when bool_or(pr.status in ('pending', 'deferred')) then null
+                           else max(coalesce(pr.decided_at, pr.created_at)) end
+                 from purchase_requests pr where pr.photo_file_id = sf.id)
+            when sf.kind = 'pp_bag_damage'
+                 and exists (${ppReports}) then
+              (select case when bool_or(coalesce(to_jsonb(r)->>'status', 'pending') = 'pending') then null
+                           else max(coalesce((to_jsonb(r)->>'decided_at')::timestamptz, r.created_at)) end
+                 from pp_bag_damage_reports r where r.id in (${ppReports}))
+            when sf.kind = 'claim_photo'
+                 and exists (select 1 from claim_photos cp where cp.file_id = sf.id) then
+              (select case when bool_or(dc.status in ('pending', 'cosign_required')) then null
+                           else max(coalesce(dc.reviewed_at, dc.created_at)) end
+                 from claim_photos cp join damage_claims dc on dc.id = cp.claim_id
+                where cp.file_id = sf.id)
+            else sf.created_at
+          end as processed_at
+          from stored_files sf
+         where sf.created_at < now() - make_interval(days => ${days})
+      ) c
+     where true ${notInBin}
+  `;
+}
 
-export async function purgeOldPhotos(hours = 72, batch = 500): Promise<{ deleted: number }> {
-  // Photos of a report sitting in the recycle bin are spared. The report is
-  // still restorable, and one that came back without its evidence would not be a
-  // restore. They become sweepable again the moment the bin entry is emptied,
-  // which deletes them outright anyway.
-  //
-  // The fallback is not decoration: `deleted_submissions` arrives in 0018, and a
-  // subquery against a missing table fails at PARSE time, so the exclusion
-  // cannot be written as a runtime condition. Without the fallback this whole
-  // sweep would stop running on any database that is one migration behind.
-  const expired = sql`created_at < now() - (${hours} || ' hours')::interval
-       and (kind is null or kind <> all(${LONG_RETENTION_KINDS}))`;
-
-  const rows = await sql<{ id: string; storage_path: string }[]>`
-    select id, storage_path from stored_files
-     where ${expired}
-       and not exists (
-         select 1 from deleted_submissions d where stored_files.id = any(d.photo_ids)
-       )
-     limit ${batch}
-  `.catch(async (e) => {
-    if ((e as { code?: string })?.code !== "42P01") throw e;
-    console.warn("purgeOldPhotos: deleted_submissions not present yet; sweeping without the bin exclusion");
-    return await sql<{ id: string; storage_path: string }[]>`
-      select id, storage_path from stored_files where ${expired} limit ${batch}
-    `;
-  });
-  if (rows.length === 0) return { deleted: 0 };
-
-  await storage()
-    .remove(rows.map((r) => r.storage_path))
-    .catch((e) => console.error("purgeOldPhotos: storage remove failed:", e));
-
-  await sql`delete from stored_files where id = any(${rows.map((r) => r.id)})`;
-  return { deleted: rows.length };
+/** Run a photo query, stepping down to older schemas rather than stopping the sweep. */
+async function withSchemaFallback<T>(run: (withItems: boolean, withBin: boolean) => Promise<T>): Promise<T> {
+  // pp_bag_damage_items arrives in 0022 and deleted_submissions in 0018. A
+  // reference to a missing table fails at PARSE time, so it cannot be a runtime
+  // condition — the query is rebuilt without it instead. Photos of a report in
+  // the recycle bin are spared when the bin exists: a restored report that came
+  // back without its evidence would not be a restore.
+  const attempts: [boolean, boolean][] = [
+    [true, true],
+    [false, true],
+    [false, false],
+  ];
+  let last: unknown;
+  for (const [items, bin] of attempts) {
+    try {
+      return await run(items, bin);
+    } catch (e) {
+      if ((e as { code?: string })?.code !== "42P01") throw e;
+      last = e;
+    }
+  }
+  throw last;
 }
 
 /**
- * Yearly sweep for PP bag damage evidence: the image, its stored_files row, and
- * its perceptual-hash row.
- *
- * Dropping the hash rows is the point, not a side effect — it is what makes the
- * duplicate window exactly one year rather than forever-growing. The report rows
- * themselves (reason, quantity, verdict) are the data and are never touched.
+ * Delete one batch of photos whose subject was decided more than `days` ago:
+ * the image in the bucket, its stored_files row, and — for PP bag damage — its
+ * perceptual-hash row. Only the image goes; the report it belonged to, its
+ * figures and its AI verdict stay. Returns how many were removed (0 = done).
  */
-/**
- * Purchase receipts, swept on their own retention.
- *
- * `photo_file_ids` on the purchase row is a plain uuid[] with no foreign key, so
- * nothing cascades — the ids simply stop resolving once the files are gone. The
- * row keeps its total, its items and the AI verdict, which is what the report is
- * actually built from.
- */
-export async function purgeFinanceReceipts(days = 730, batch = 500): Promise<{ deleted: number }> {
-  const rows = await sql<{ id: string; storage_path: string }[]>`
-    select id, storage_path
-      from stored_files
-     where kind = 'finance_receipt'
-       and created_at < now() - (${days} || ' days')::interval
-     limit ${batch}
-  `;
+export async function purgeProcessedPhotos(days = PHOTO_KEEP_DAYS, batch = 500): Promise<{ deleted: number }> {
+  const rows = await withSchemaFallback(
+    (items, bin) =>
+      sql<{ id: string; storage_path: string }[]>`
+        select x.id, x.storage_path
+          from (${processedPhotos(days, items, bin)}) x
+         where x.processed_at is not null
+           and x.processed_at < now() - make_interval(days => ${days})
+         limit ${batch}
+      `
+  );
   if (rows.length === 0) return { deleted: 0 };
 
   await storage()
     .remove(rows.map((r) => r.storage_path))
-    .catch((e) => console.error("purgeFinanceReceipts: storage remove failed:", e));
-
-  await sql`delete from stored_files where id = any(${rows.map((r) => r.id)})`;
-  return { deleted: rows.length };
-}
-
-export async function purgePpBagPhotos(days = PP_BAG_RETENTION_DAYS, batch = 500): Promise<{ deleted: number }> {
-  const rows = await sql<{ id: string; storage_path: string }[]>`
-    select id, storage_path
-      from stored_files
-     where kind = 'pp_bag_damage'
-       and created_at < now() - (${days} || ' days')::interval
-     limit ${batch}
-  `;
-  if (rows.length === 0) return { deleted: 0 };
-
-  await storage()
-    .remove(rows.map((r) => r.storage_path))
-    .catch((e) => console.error("purgePpBagPhotos: storage remove failed:", e));
+    .catch((e) => console.error("purgeProcessedPhotos: storage remove failed:", e));
 
   const ids = rows.map((r) => r.id);
-  // Photo rows first: file_id is ON DELETE SET NULL, so removing stored_files
+  // Hash rows first: file_id is ON DELETE SET NULL, so removing stored_files
   // first would orphan hash rows that can never be matched to a file again.
   await sql`delete from pp_bag_damage_photos where file_id = any(${ids})`.catch((e) =>
-    console.error("purgePpBagPhotos: hash rows not removed:", e)
+    console.error("purgeProcessedPhotos: hash rows not removed:", e)
   );
   await sql`delete from stored_files where id = any(${ids})`;
   return { deleted: rows.length };
+}
+
+/**
+ * Photos older than the keep period that are being kept ONLY because their
+ * subject is still undecided — named in the morning summary, because a request
+ * nobody has decided in three months is itself something to act on.
+ */
+export async function undecidedPhotos(days = PHOTO_KEEP_DAYS): Promise<{ kind: string; count: number }[]> {
+  try {
+    const rows = await withSchemaFallback(
+      (items, bin) =>
+        sql<{ kind: string | null; n: string }[]>`
+          select x.kind, count(*) as n
+            from (${processedPhotos(days, items, bin)}) x
+           where x.processed_at is null
+           group by x.kind
+        `
+    );
+    return rows.map((r) => ({ kind: r.kind || "photo", count: Number(r.n) || 0 }));
+  } catch (e) {
+    console.error("undecidedPhotos failed:", e);
+    return [];
+  }
 }

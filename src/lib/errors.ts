@@ -1,4 +1,6 @@
 import sql, { jsonb } from "@/lib/sql";
+import { runAfter } from "@/lib/after";
+import { notifyAdmins } from "@/lib/admins";
 
 /**
  * The one place a failure gets recorded.
@@ -37,6 +39,22 @@ export interface ErrorRecord {
 const ALERT_COOLDOWN_MINUTES = 60;
 
 /**
+ * Kinds that are recorded but never pushed to a phone.
+ *
+ * These are the Gemini layer reporting that it HANDLED something — switched
+ * model, waited out a busy one, fell back to another provider, succeeded on a
+ * retry. Every Gemini outage produces dozens of them, and pushing each one
+ * would bury the failure that actually needs a person under a pile of
+ * successes. They are counted in the morning summary instead.
+ */
+export const INFO_KINDS: ReadonlySet<string> = new Set([
+  "gemini_retry_succeeded",
+  "gemini_model_migrated",
+  "gemini_busy_fallback",
+  "gemini_text_fallback",
+]);
+
+/**
  * Record a failure. Returns whether this is the first of its kind this hour,
  * which is what the caller uses to decide whether to alert a human.
  *
@@ -63,6 +81,14 @@ export async function logError(rec: ErrorRecord): Promise<{ logged: boolean; sho
               ${rec.detail ? jsonb(rec.detail) : null},
               ${rec.actor ?? null}, ${rec.chatId ?? null})
     `;
+
+    // The administrators hear about it — after the response, never inside it.
+    // Nothing called alertAdmins for months, so every error in this table was
+    // one nobody was told about. runAfter keeps the Telegram round trip off the
+    // caller's path, which is why the two were kept apart in the first place.
+    if (shouldAlert && !INFO_KINDS.has(rec.kind)) {
+      runAfter(alertAdmins({ ...rec, shouldAlert }));
+    }
     return { logged: true, shouldAlert };
   } catch (e) {
     // The table arrives in 0021, and the database can be down precisely when
@@ -92,27 +118,38 @@ export function providerErrorKind(provider: string, message: string): string {
 /**
  * Tell the administrators, at most once an hour per kind.
  *
- * Separate from `logError` on purpose: logging happens on paths that must not
- * make network calls (inside the webhook's reply path, inside catch blocks), and
- * alerting is a Telegram round trip. The caller decides when it is safe.
+ * Separate from `logError` because alerting is a Telegram round trip, and the
+ * paths that log must not make one inline. `logError` schedules this with
+ * runAfter, so it happens after the response has gone.
  */
 export async function alertAdmins(rec: ErrorRecord & { shouldAlert: boolean }): Promise<void> {
   if (!rec.shouldAlert) return;
-  try {
-    const { sendMessage } = await import("@/lib/telegram");
-    const admins = await sql<{ chat_id: string }[]>`
-      select chat_id from telegram_users
-       where active = true and chat_id is not null and 'admin' = any(positions)
-    `;
-    const text =
-      `🚨 <b>የስርዓት ችግር</b>\n` +
-      `<code>${rec.kind}</code> · ${rec.source}\n\n` +
-      `${String(rec.message).slice(0, 300)}\n\n` +
-      `<i>ተመሳሳይ ችግር በሰዓት አንዴ ብቻ ይላካል። ዝርዝሩ በ Settings → Errors ላይ አለ።</i>`;
-    await Promise.all(admins.map((a) => sendMessage(String(a.chat_id), text).catch(() => {})));
-  } catch (e) {
-    console.error("alertAdmins failed:", e);
-  }
+  const text =
+    `🚨 <b>የስርዓት ችግር</b>\n` +
+    `<code>${escapeHtml(rec.kind)}</code> · ${escapeHtml(rec.source)}\n\n` +
+    `${escapeHtml(String(rec.message).slice(0, 300))}\n\n` +
+    `<i>ተመሳሳይ ችግር በሰዓት አንዴ ብቻ ይላካል። ዝርዝሩ በ 🛠 System Admin እና Settings → Errors ላይ አለ።</i>`;
+  await notifyAdmins(text);
+}
+
+/** Telegram's HTML mode rejects a whole message over one stray "<" in an error text. */
+export function escapeHtml(t: string): string {
+  return t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/**
+ * Mark open errors as seen. With `kinds`, only those; without, every open one.
+ * Returns how many were resolved. The rows are kept — see the errors route for
+ * why resolving hides rather than deletes.
+ */
+export async function resolveErrors(by: string, kinds?: string[]): Promise<number> {
+  const rows = await sql<{ id: string }[]>`
+    update system_errors set resolved_at = now(), resolved_by = ${by}
+     where resolved_at is null
+       and ${kinds && kinds.length ? sql`kind = any(${kinds})` : sql`true`}
+     returning id
+  `;
+  return rows.length;
 }
 
 export interface OpenError {

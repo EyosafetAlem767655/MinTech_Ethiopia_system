@@ -52,12 +52,16 @@ const ALIASES: Record<string, string[]> = {
   // "A.B/Dukem" and "B.A/Dukem" are the Dukem branch, written both ways on the
   // sheets. The bare word "dukem" is deliberately NOT an alias: it is a town
   // with more than one bank in it.
-  Abyssinia: ["abyssinia", "bank of abyssinia", "boa", "ab/dukem", "ba/dukem", "አቢሲኒያ"],
-  Zemen: ["zemen", "zemen bank", "ዘመን"],
+  // "Absniya" is how one sales sheet spells it.
+  Abyssinia: ["abyssinia", "absniya", "bank of abyssinia", "boa", "ab/dukem", "ba/dukem", "አቢሲኒያ"],
+  // "Zeman Bank" and "Z.B" are both on the sales sheets; Z.B is Zemen by the
+  // owner's word, not ZamZam.
+  Zemen: ["zemen", "zeman", "zb", "zemen bank", "ዘመን"],
   Wegagen: ["wegagen", "wegagen bank", "ወጋገን"],
   Nib: ["nib", "nib international", "nib bank", "ንብ"],
-  Hibret: ["hibret", "hibret bank", "united bank", "ህብረት"],
-  "Coop Oromia": ["coop", "coop oromia", "cooperative bank of oromia", "cbo", "oromia", "ኦሮሚያ"],
+  // "H.B" on the sales sheets, by the owner's word.
+  Hibret: ["hibret", "hb", "hibret bank", "united bank", "ህብረት"],
+  "Coop Oromia": ["coop", "cop", "coop oromia", "cooperative bank of oromia", "cbo", "oromia", "ኦሮሚያ"],
   Berhan: ["berhan", "berhan bank", "ብርሃን"],
   Enat: ["enat", "enat bank", "እናት"],
   Abay: ["abay", "abay bank", "አባይ"],
@@ -87,6 +91,18 @@ const LOOKUP: Map<string, string> = (() => {
   for (const [bank, names] of Object.entries(ALIASES)) for (const n of names) m.set(loose(n), bank);
   return m;
 })();
+
+/**
+ * The list entry a name spells EXACTLY (after normalisation), or null.
+ *
+ * No containment. For cells that name several banks at once —
+ * "A.I.B/A.B/C.B.E" — containment would pick whichever short alias it met
+ * first, which is not an answer. The caller splits the cell and asks this for
+ * each piece instead.
+ */
+export function bankByExactName(text: string): string | null {
+  return LOOKUP.get(loose(text)) ?? null;
+}
 
 /**
  * The list entry a typed or read name refers to, or null.

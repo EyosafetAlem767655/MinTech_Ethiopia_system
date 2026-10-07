@@ -198,7 +198,7 @@ export default function PpBagDamagePanel() {
                         />
                       </a>
                     ) : (
-                      // The binary is purged after a year; the hash and verdict remain.
+                      // The image is deleted 3 months after the report is decided; the verdict remains.
                       <span
                         key={i}
                         className="grid h-20 w-20 place-items-center rounded-lg bg-stone-100 text-center text-[9px] text-stone-400"

@@ -18,8 +18,8 @@ import {
  *
  * Photos are the exception to "leaves immediately": the image files stay in the
  * bucket while the report sits in the bin, because a restore that came back
- * without its evidence would not be a restore. `purgeOldPhotos` is told to skip
- * anything the bin still references.
+ * without its evidence would not be a restore. `purgeProcessedPhotos` is told to
+ * skip anything the bin still references.
  */
 
 export interface BinEntry {

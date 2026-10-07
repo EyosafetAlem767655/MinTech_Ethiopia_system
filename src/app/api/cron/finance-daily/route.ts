@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { runJob } from "@/lib/system-jobs";
 import sql from "@/lib/sql";
 import { logActivity } from "@/lib/bot-auth";
 import { hasPosition, resolveCapabilities } from "@/lib/positions";
@@ -54,11 +55,32 @@ function eatToday(now: Date): string {
   return new Date(now.getTime() + 3 * 3600_000).toISOString().slice(0, 10);
 }
 
+/**
+ * Recorded in system_jobs, so a day this did not run — or ran and failed — shows
+ * in the System Admin view instead of passing unnoticed.
+ */
 export async function GET(req: NextRequest) {
   const secret = process.env.CRON_SECRET;
   if (secret && req.headers.get("authorization") !== `Bearer ${secret}`) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
+  let response: NextResponse = NextResponse.json({ ok: false }, { status: 500 });
+  await runJob("finance-daily", async () => {
+    response = await handle();
+    const body = (await response.clone().json().catch(() => ({}))) as Record<string, any>;
+    const sms = body.sms ?? {};
+    return {
+      ok: response.ok,
+      summary:
+        `WHT SMS sent ${sms.sent ?? 0}, failed ${sms.failed ?? 0}; ` +
+        `${body.bagGaps ?? 0} bag gap(s); bank sheet ${body.bankCollections?.filed ? "filed" : "not filed"}`,
+      detail: body,
+    };
+  });
+  return response;
+}
+
+async function handle(): Promise<NextResponse> {
 
   const now = new Date();
   const today = eatToday(now);

@@ -74,6 +74,14 @@ export const NAV_BUTTONS = {
 } as const;
 
 /**
+ * The administrators' window onto the system itself — errors, database size,
+ * the job log and the archive. Shown only to holders of the `admin` position,
+ * and re-checked on every tap, so seeing it in someone else's chat grants
+ * nothing.
+ */
+export const SYSTEM_BUTTON = "🛠 System Admin";
+
+/**
  * The two answers to "you have an unfinished report".
  *
  * Tapping another report button half way through a report used to throw the

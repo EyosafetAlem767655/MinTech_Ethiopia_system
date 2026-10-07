@@ -122,10 +122,70 @@ where.
    `where created_at > '<failover time>'` finds it.
 3. Point `SUPABASE_DB_URL` back, redeploy, re-enable the workflow.
 
+## The lifecycle: what stays in Supabase, and for how long
+
+The policy lives in one file, `src/lib/lifecycle.ts`. The quarterly move and
+the System Admin view both read it.
+
+| What | Stays in Supabase | Then |
+| --- | --- | --- |
+| Production, assets, sales, finance records | 12 full months | moved to the Neon **archive** each quarter |
+| Logs (bot activity, chat usage, resolved errors, job runs) | 3 months | moved to the archive |
+| Anything still owed, still in stock or still undecided | regardless of age | stays |
+| Uploaded photos | 3 months **after the item is decided** | deleted (not archived) |
+| Employees, logins, push devices, live bot sessions | always | never moved |
+
+Two Neon databases, never one:
+
+- **The copy** (`NEON_DATABASE_URL`) is replaced every night by the backup, with
+  `--clean`.
+- **The archive** (`NEON_ARCHIVE_URL`, a separate database such as
+  `mintech_archive`) is only ever added to. The move refuses to run if the
+  archive URL points at a database holding the live tables, because the nightly
+  restore would wipe it.
+
+**The quarterly move** is `.github/workflows/quarterly-archive.yml` running
+`scripts/archive-to-neon.ts`, at 04:30 EAT on 1 January, April, July and
+October.
+
+- It refuses to run unless last night's backup succeeded.
+- It copies each batch to the archive and confirms every row is there before
+  deleting anything from Supabase.
+- A failure leaves rows in both places, never in neither, and the next run
+  finishes the job.
+- Admins get a reminder 3 days before, in the morning summary, and a message
+  listing what moved afterwards.
+- Run by hand, it defaults to a dry run that only counts.
+
+**Putting rows back:**
+
+```bash
+SUPABASE_DB_URL='<session pooler>' NEON_ARCHIVE_URL='<archive>'   npx tsx scripts/archive-restore.ts --table sales_invoices --from 2025-01-01 --to 2025-12-31
+```
+
+Restore parents before children: invoices, then `sales_credit_payments`. A
+restore copies back and the archive keeps its copy, so rows still past their
+keep period move out again at the next quarterly run.
+
+**The nightly backup still covers everything.** Rows only leave Supabase after
+the copy and the archive both hold them.
+
+### Setting up the archive
+
+1. Neon → the same project → **Databases** → **New database**. Name it
+   `mintech_archive`.
+2. Copy its **direct** connection string (pooling off) and add it as the GitHub
+   repository secret `NEON_ARCHIVE_URL`.
+3. Add `TELEGRAM_BOT_TOKEN` as a GitHub secret too. It is the same value as in
+   Vercel, and it lets the backup and the move message the admins when they
+   fail.
+4. Actions → **Quarterly archive to Neon** → Run workflow, leaving "Count only"
+   ticked. The log lists what a real run would move.
+
 ## If the concern was storage, not outages
 
-Run `npm run db:size`. The tables holding figures are small — a year of daily
-production is 365 rows. If a table is large it will be one holding photo
-references, logs or bot activity, and the fix is retention, not another
-database: see `src/lib/archive.ts` and `PP_BAG_RETENTION_DAYS`. Image **files**
-are counted separately in that script's output, under Storage.
+Run `npm run db:size`, or open 🛠 System Admin → 🗄 Database in the bot. Set
+`SUPABASE_DB_LIMIT_MB` in Vercel to your plan's size so the percentage is
+right; it defaults to 500, the free tier. The tables holding figures are small:
+a year of daily production is 365 rows. Photos and logs are what grow, and the
+lifecycle above handles both.

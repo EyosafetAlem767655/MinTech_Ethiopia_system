@@ -45,7 +45,8 @@ import {
 } from "@/lib/asset-flows";
 import { parseProductionPaste } from "@/lib/production-paste";
 import { parseFinancePaste } from "@/lib/finance-paste";
-import { logError } from "@/lib/errors";
+import { logError, resolveErrors } from "@/lib/errors";
+import { archiveView, databaseView, errorsView, jobsView, overviewView, systemKeyboard } from "@/lib/system-status";
 import { insertRow } from "@/lib/insert";
 import { runAfter } from "@/lib/after";
 import { whitenessAlert } from "@/lib/whiteness-alert";
@@ -74,6 +75,7 @@ import {
   NAV_BUTTONS,
   RESUME_BUTTONS,
   RESUME_KEYBOARD,
+  SYSTEM_BUTTON,
   sendDocument,
   sendEntryMenu,
   sendMessage,
@@ -164,6 +166,7 @@ const NORM = {
   changeReport: normaliseChoice(NAV_BUTTONS.changeReport),
   back: normaliseChoice(NAV_BUTTONS.back),
   logout: normaliseChoice(NAV_BUTTONS.logout),
+  systemAdmin: normaliseChoice(SYSTEM_BUTTON),
   resume: normaliseChoice(RESUME_BUTTONS.resume),
   restart: normaliseChoice(RESUME_BUTTONS.restart),
 };
@@ -274,12 +277,65 @@ function menuButtons(user: any): string[] {
   return userCapabilities(user).map((c) => c.button);
 }
 
+/** Holders of the `admin` position — the only people the System Admin views answer. */
+function isAdminUser(user: any): boolean {
+  return (user?.positions || []).includes("admin");
+}
+
 async function sendRoleMenu(chatId: string, user: any, text?: string) {
-  // Admin/HR are receivers — no submit menu, just a logout key.
+  // Admins get the System Admin button whatever else they hold; for a
+  // receiver-only admin it is the one thing on the menu besides logout.
+  const system = isAdminUser(user) ? [SYSTEM_BUTTON] : [];
+  // Admin/HR are receivers — no submit menu.
   if (isReceiverOnly(user.positions || [])) {
-    return sendReportMenu(chatId, [], text || MSG.receiverOnly);
+    return sendReportMenu(chatId, system, text || MSG.receiverOnly);
   }
-  return sendReportMenu(chatId, menuButtons(user), text);
+  return sendReportMenu(chatId, [...system, ...menuButtons(user)], text);
+}
+
+/**
+ * One System Admin view, sent as a new message with the section keyboard.
+ * The admin check is made by the caller on every tap.
+ */
+async function sendSystemView(chatId: string, view: string, user: any): Promise<void> {
+  let text: string;
+  let keyboard = systemKeyboard();
+  switch (view) {
+    case "errors":
+      text = await errorsView();
+      keyboard = systemKeyboard([[{ text: "✅ Mark all seen", callback_data: "sys:seen" }]]);
+      break;
+    case "seen": {
+      const n = await resolveErrors(user.fullName);
+      text = `✅ ${n} error${n === 1 ? "" : "s"} marked seen by ${escapeHtml(user.fullName)}. They stay in the log.\n\n` + (await overviewView());
+      break;
+    }
+    case "db":
+      text = await databaseView();
+      break;
+    case "jobs":
+      text = await jobsView();
+      break;
+    case "archive":
+      text = await archiveView();
+      break;
+    default:
+      text = await overviewView();
+  }
+  await sendMessage(chatId, text, { reply_markup: keyboard });
+}
+
+/** Inline taps under a System Admin message. Admins only, checked every time. */
+async function handleSystemCallback(data: string, callbackId: string, chatId: string, userName: string): Promise<void> {
+  const session = await loadSession(chatId, userName);
+  const user = session.auth ? await resolveSession(session).then((u) => (u ? view(u) : null)).catch(() => null) : null;
+  if (!user || !isAdminUser(user)) {
+    await answerCallbackQuery(callbackId, "⛔ ፈቃድ የለዎትም።");
+    await logActivity({ chatId, actor: userName, action: "unauthorized", detail: `callback ${data}`, ok: false }).catch(() => {});
+    return;
+  }
+  await answerCallbackQuery(callbackId, "");
+  await sendSystemView(chatId, data.slice("sys:".length), user);
 }
 
 function actorOf(session: any, user?: any): string {
@@ -715,10 +771,11 @@ async function saveCapture(session: any, user: any): Promise<{ reply: string; re
 /* ─────────────────────────────── Photo handling ──────────────────────────── */
 
 /**
- * `kind` decides retention: everything defaults to "telegram_upload", which the
- * 72-hour photo purge reclaims. PP bag damage photos are tagged separately so
- * they survive a year — their perceptual hashes are what the duplicate check
- * compares against, and a photo reaped after three days can never be matched.
+ * `kind` decides how the photo's retention clock is read: an uploaded photo is
+ * kept until three months after the thing it evidences is decided (see
+ * PHOTO_KEEP_DAYS in src/lib/storage.ts). PP bag damage photos are tagged so the
+ * clock follows their report's decision, and so their perceptual hashes stay
+ * matchable by the duplicate check meanwhile.
  */
 async function storeIncomingPhoto(
   msg: any,
@@ -1556,6 +1613,18 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true });
     }
 
+    /* System Admin views — above the owner-only gate: they are for every
+       administrator, and the handler checks the admin position itself. */
+    if (data.startsWith("sys:")) {
+      try {
+        await handleSystemCallback(data, String(cb.id), chatId, userName);
+      } catch (e) {
+        console.error("telegram system callback error:", e);
+        await answerCallbackQuery(String(cb.id), MSG.genericError);
+      }
+      return NextResponse.json({ ok: true });
+    }
+
     /* Tick-list taps — above the owner-only gate for the same reason as the
        date picker: the people filing these reports are not the CEO. */
     if (data.startsWith("pick:")) {
@@ -1741,8 +1810,14 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true });
     }
 
-    /* ── Brief (owner convenience command) ── */
+    /* ── Brief (owner convenience command) ──
+       Signed-in employees only. It used to answer any chat that typed /brief,
+       which handed the company's daily figures to anyone who found the bot. */
     if (text.startsWith("/brief")) {
+      if (!(await currentUser(session, chatId))) {
+        await sendEntryMenu(chatId);
+        return NextResponse.json({ ok: true });
+      }
       const brief = (await latestBrief()) as any;
       if (!brief) {
         await sendMessage(chatId, "⏳ እስካሁን ምንም ማጠቃለያ (brief) አልተዘጋጀም።");
@@ -1823,6 +1898,28 @@ export async function POST(req: NextRequest) {
     }
 
     const submitterName = user.fullName;
+
+    /* ── System Admin: errors, database, jobs, archive ──
+       Before every flow handler, so an admin who also files reports can open
+       it mid-report without the tap being read as an answer. Nothing about the
+       report in progress changes. */
+    if (normText === NORM.systemAdmin) {
+      if (!isAdminUser(user)) {
+        await sendRoleMenu(chatId, user, MSG.noPermission);
+        return NextResponse.json({ ok: true });
+      }
+      await logActivity({
+        chatId,
+        actor: submitterName,
+        userId: String(user._id),
+        positions: user.positions,
+        audience: audienceOf(session),
+        action: "menu_select",
+        detail: "system_admin",
+      });
+      await sendSystemView(chatId, "overview", user);
+      return NextResponse.json({ ok: true });
+    }
 
     /* ── Guided asset reports: raw material · delivery · tool request ── */
     if (session.state === "asset_entry" && session.assetFlow) {

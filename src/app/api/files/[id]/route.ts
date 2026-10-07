@@ -21,6 +21,27 @@ export const dynamic = "force-dynamic";
  * This route is behind the dashboard password like every other non-public /api
  * path — see PUBLIC_PREFIXES in src/middleware.ts.
  */
+/**
+ * What a removed upload shows instead of a broken image.
+ *
+ * Uploaded photos are deleted three months after their subject is decided
+ * (src/lib/storage.ts), and every panel shows photos with a plain <img>. A 404
+ * there is a broken-image icon that reads as a fault; this reads as what it is.
+ * Served with a short cache so a wrongly-removed file that is restored shows up.
+ */
+const REMOVED_SVG =
+  `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="200" viewBox="0 0 320 200">` +
+  `<rect width="320" height="200" rx="12" fill="#f5f5f4"/>` +
+  `<text x="160" y="94" text-anchor="middle" font-family="system-ui,sans-serif" font-size="15" fill="#57534e">Photo removed</text>` +
+  `<text x="160" y="118" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="#78716c">kept 3 months after the decision</text>` +
+  `</svg>`;
+
+function removedPhoto() {
+  return new NextResponse(REMOVED_SVG, {
+    headers: { "Content-Type": "image/svg+xml", "Cache-Control": "private, max-age=3600" },
+  });
+}
+
 export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
   const ref = params.id;
 
@@ -41,7 +62,8 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
   }
 
   const row = await getFileRow(ref);
-  if (!row) return NextResponse.json({ error: "not found" }, { status: 404 });
+  // A uuid with no row is an upload the retention sweep has removed.
+  if (!row) return removedPhoto();
 
   try {
     const bytes = await getFileBytesByPath(row.storage_path);
@@ -52,6 +74,6 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
       },
     });
   } catch {
-    return NextResponse.json({ error: "not found" }, { status: 404 });
+    return removedPhoto();
   }
 }

@@ -1,14 +1,16 @@
 import ExcelJS from "exceljs";
 import sql from "@/lib/sql";
 import { SUBMISSIONS, SUBMISSION_COLLECTIONS } from "@/lib/submissions";
+import { adminRecipients, type AdminRecipient } from "@/lib/admins";
 
 /**
- * Yearly data archive.
+ * Spreadsheet export of the database, and the registry of record tables.
  *
- * Records older than the retention window are exported to a single workbook
- * (one sheet per table), Telegrammed to the administrators, and only then
- * deleted. The export is therefore the ONLY surviving copy — so the caller must
- * confirm delivery before purging. See src/app/api/cron/archive-and-purge.
+ * Exports rows (one sheet per table) for the administrators on demand. It
+ * deletes nothing: the delete half of the old yearly reset was removed, and
+ * moving old rows out of this database is now the quarterly Neon archive's job
+ * (scripts/archive-to-neon.ts), which reuses ARCHIVE_TABLES below as its list
+ * of what counts as a record.
  */
 
 export const RETENTION_DAYS = 365;
@@ -259,45 +261,7 @@ export async function buildArchive(
   return { mode, cutoff, counts, totalRows, workbook, filename };
 }
 
-/**
- * Deletes everything older than the cutoff.
- *
- * ONLY call this once the archive has been confirmed delivered. Child tables
- * are removed by `on delete cascade`, so only the parents/standalone tables
- * need explicit deletes.
- */
-export async function purgeOlderThan(cutoff: Date | null): Promise<Record<string, number>> {
-  const deleted: Record<string, number> = {};
-  for (const t of ARCHIVE_TABLES) {
-    if (t.parent) continue; // cascades with its parent
-    try {
-      // A null cutoff empties the table — the yearly reset. Written as an
-      // unqualified DELETE rather than TRUNCATE so the cascades behave exactly
-      // as they do on a single-row delete, and so a table that is missing from
-      // this database fails the same harmless way as it does in the export.
-      const rows = cutoff
-        ? await sql`delete from ${sql(t.table)} where ${sql(t.dateColumn)} < ${cutoff} returning 1`
-        : await sql`delete from ${sql(t.table)} returning 1`;
-      deleted[t.table] = rows.length;
-    } catch (e) {
-      const code = (e as { code?: string })?.code;
-      if (code === "42P01" || code === "42703") {
-        console.warn(`purge: skipping ${t.table} (${code})`);
-        deleted[t.table] = 0;
-        continue;
-      }
-      throw e;
-    }
-  }
-  return deleted;
-}
-
-/** Administrators who can actually receive the archive on Telegram. */
-export async function archiveRecipients(): Promise<{ id: string; fullName: string; chatId: string }[]> {
-  const rows = await sql<{ id: string; full_name: string; chat_id: string }[]>`
-    select id, full_name, chat_id
-      from telegram_users
-     where active = true and chat_id is not null and 'admin' = any(positions)
-  `;
-  return rows.map((r) => ({ id: r.id, fullName: r.full_name, chatId: r.chat_id }));
+/** Administrators who can actually receive the export on Telegram. */
+export async function archiveRecipients(): Promise<AdminRecipient[]> {
+  return adminRecipients();
 }

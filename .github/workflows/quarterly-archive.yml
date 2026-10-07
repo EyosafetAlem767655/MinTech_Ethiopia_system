@@ -1,0 +1,69 @@
+# The quarterly move: records past their keep period go from Supabase to the
+# permanent archive database in Neon (scripts/archive-to-neon.ts).
+#
+# Policy (src/lib/lifecycle.ts): production, asset, sales and finance records
+# stay in Supabase for 12 full months; logs for 3. Anything still owed, still in
+# stock or still undecided stays regardless of age.
+#
+# It runs at 04:30 EAT on the 1st of January, April, July and October — after
+# that night's 03:20 backup, which it requires: nothing is moved unless a fresh
+# full copy exists. Admins are reminded 3 days before in the morning summary and
+# messaged with what moved afterwards.
+#
+# Run it by hand from Actions → "Quarterly archive to Neon" → Run workflow.
+# The manual run defaults to a DRY RUN that only counts; untick it to move.
+
+name: Quarterly archive to Neon
+
+on:
+  schedule:
+    - cron: "30 1 1 1,4,7,10 *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Count only — move nothing"
+        type: boolean
+        default: true
+
+concurrency:
+  # Never two moves at once. The script is safe to repeat, but two at the same
+  # time would only race each other for the same rows.
+  group: neon-archive
+  cancel-in-progress: false
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Check the secrets are present
+        env:
+          SOURCE: ${{ secrets.SUPABASE_DB_URL_DIRECT }}
+          ARCHIVE: ${{ secrets.NEON_ARCHIVE_URL }}
+        run: |
+          missing=""
+          [ -n "$SOURCE" ] || missing="$missing SUPABASE_DB_URL_DIRECT"
+          [ -n "$ARCHIVE" ] || missing="$missing NEON_ARCHIVE_URL"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repository secret(s):$missing — see docs/RUNBOOK-failover.md"
+            exit 1
+          fi
+
+      - name: Move
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL_DIRECT }}
+          NEON_ARCHIVE_URL: ${{ secrets.NEON_ARCHIVE_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          # A scheduled run moves; a manual run moves only when dry_run is unticked.
+          DRY: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '--dry-run' || '' }}
+        run: npx --yes tsx scripts/archive-to-neon.ts $DRY
