@@ -184,8 +184,20 @@ the copy and the archive both hold them.
 
 ## If the concern was storage, not outages
 
-Run `npm run db:size`, or open 🛠 System Admin → 🗄 Database in the bot. Set
-`SUPABASE_DB_LIMIT_MB` in Vercel to your plan's size so the percentage is
-right; it defaults to 500, the free tier. The tables holding figures are small:
-a year of daily production is 365 rows. Photos and logs are what grow, and the
-lifecycle above handles both.
+Run `npm run db:size`, or open 🛠 System Admin → 🗄 Database in the bot.
+`SUPABASE_DB_LIMIT_MB` in Vercel sets the limit the percentage is measured
+against (default 500). The tables holding figures are small: a year of daily
+production is 365 rows. Photos and logs are what grow, and the lifecycle above
+handles both.
+
+**Alerts.** Once a day, after the photo clean-up, the size is checked. Admins
+are messaged when it crosses 80%, 90% and 100% of `SUPABASE_DB_LIMIT_MB`, daily
+while it stays at or over 100%, and once when it drops back under 80%.
+
+**Over the limit, the system keeps working.** Nothing in the application
+refuses work because of this figure. The one thing that can stop it is
+Supabase itself: a project that outgrows its plan's real database size is made
+read-only (on the Free plan that is 500 MB). If that happens, the first failed
+save messages admins ("Supabase is refusing writes"). Set
+`SUPABASE_DB_LIMIT_MB` **below** the plan's real size, so the warnings come
+while there is still room to act.

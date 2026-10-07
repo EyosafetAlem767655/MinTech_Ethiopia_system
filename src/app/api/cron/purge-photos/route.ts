@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import sql from "@/lib/sql";
 import { PHOTO_KEEP_DAYS, purgeProcessedPhotos, undecidedPhotos } from "@/lib/storage";
 import { runJob } from "@/lib/system-jobs";
+import { checkDatabaseUsage } from "@/lib/system-status";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -59,8 +60,22 @@ export async function GET(req: NextRequest) {
         detail: { deleted, days, undecided, dedupeRowsDeleted: Number(dedupe[0]?.count || 0) },
       };
     });
-    return NextResponse.json({ ok: true, ...result.detail, summary: result.summary });
+    return NextResponse.json({ ok: true, ...result.detail, summary: result.summary, database: await sizeCheck() });
   } catch (e) {
+    await sizeCheck();
     return NextResponse.json({ ok: false, error: e instanceof Error ? e.message : String(e) }, { status: 500 });
+  }
+}
+
+/**
+ * The daily database-size check rides on this cron, after the photos have gone,
+ * so it measures what is left. Its own job row, its own failure alert — and a
+ * failure here never touches the purge's result.
+ */
+async function sizeCheck(): Promise<string> {
+  try {
+    return (await runJob("db-usage", () => checkDatabaseUsage())).summary;
+  } catch (e) {
+    return `size check failed: ${e instanceof Error ? e.message : String(e)}`;
   }
 }

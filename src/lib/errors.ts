@@ -94,8 +94,32 @@ export async function logError(rec: ErrorRecord): Promise<{ logged: boolean; sho
     // The table arrives in 0021, and the database can be down precisely when
     // things are failing. Neither is a reason to throw out of a catch block.
     console.error("logError could not record the error:", e);
+    if (WRITE_REFUSED.has((e as { code?: string })?.code ?? "")) runAfter(alertWritesRefused(rec));
     return { logged: false, shouldAlert: false };
   }
+}
+
+/**
+ * The database answering reads but refusing writes: read-only (25006, what
+ * Supabase does to a project that outgrows its plan's disk) or out of space
+ * (53100). This is the one way the size limit can stop the system, and it is
+ * Supabase's doing, not this application's — so the least this can do is make
+ * sure someone hears it. The error table cannot take the row, which is how this
+ * is noticed, so the hourly limit is kept in memory instead (per instance:
+ * good enough to stop a flood, at worst a few duplicates).
+ */
+const WRITE_REFUSED: ReadonlySet<string> = new Set(["25006", "53100"]);
+let lastWritesRefusedAlert = 0;
+
+async function alertWritesRefused(rec: ErrorRecord): Promise<void> {
+  if (Date.now() - lastWritesRefusedAlert < ALERT_COOLDOWN_MINUTES * 60_000) return;
+  lastWritesRefusedAlert = Date.now();
+  await notifyAdmins(
+    `🔴 <b>የመረጃ ቋቱ መረጃ መቀበል አቁሟል</b>\n` +
+      `Supabase is refusing writes (read-only or out of space). New reports and sales cannot be saved until this is fixed.\n\n` +
+      `Last failure: <code>${escapeHtml(rec.kind)}</code> · ${escapeHtml(rec.source)}\n\n` +
+      `Fix: free space (archive move, or raise the plan in Supabase), or fail over to Neon — docs/RUNBOOK-failover.md.`
+  );
 }
 
 /**

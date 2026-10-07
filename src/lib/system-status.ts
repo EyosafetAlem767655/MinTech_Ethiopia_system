@@ -1,6 +1,7 @@
 import sql from "@/lib/sql";
 import { escapeHtml, INFO_KINDS } from "@/lib/errors";
-import { isOverdue, JOBS, latestJobRuns, type JobRow } from "@/lib/system-jobs";
+import { notifyAdmins } from "@/lib/admins";
+import { isOverdue, JOBS, latestJobRuns, type JobOutcome, type JobRow } from "@/lib/system-jobs";
 import { countMovable, daysUntil, LOG_KEEP_MONTHS, nextQuarterlyRun, STATS_KEEP_MONTHS } from "@/lib/lifecycle";
 import { undecidedPhotos } from "@/lib/storage";
 
@@ -23,6 +24,21 @@ export function dbLimitBytes(): number {
   const raw = Number(process.env.SUPABASE_DB_LIMIT_MB);
   return (Number.isFinite(raw) && raw > 0 ? raw : 500) * MB;
 }
+
+/**
+ * The points at which the administrators are told the database is filling up.
+ * Each is announced once on the way up; at 100% and over, once a day until it
+ * comes back down. Nothing in the application reads these to refuse work —
+ * crossing the limit is a message, never a stop.
+ */
+export const DB_ALERT_LEVELS = [80, 90, 100] as const;
+
+/** The highest alert level `pct` has reached, or 0 below the first. */
+export function usageLevel(pct: number): number {
+  return DB_ALERT_LEVELS.filter((l) => pct >= l).pop() ?? 0;
+}
+
+const usageFlag = (pct: number) => (pct >= 100 ? " 🔴 over the limit" : pct >= 80 ? " ⚠️" : "");
 
 /** EAT wall-clock for a timestamp, short: "7 Oct 06:30". */
 function eat(d: Date): string {
@@ -156,7 +172,7 @@ export async function overviewView(now = new Date()): Promise<string> {
   return (
     `🛠 <b>System Admin</b> · ${eat(now)}\n\n` +
     `🚨 Errors: <b>${errors.open}</b> open · ${errors.last24h} in 24 h\n` +
-    `🗄 Database: <b>${mb(db.bytes)}</b> of ${mb(db.limit)} (${pct}%)${pct >= 80 ? " ⚠️" : ""}\n` +
+    `🗄 Database: <b>${mb(db.bytes)}</b> of ${mb(db.limit)} (${pct}%)${usageFlag(pct)}\n` +
     `💾 Backup: ${
       !backup ? "⚠️ never recorded" : backup.ok === false ? `❌ failed ${ago(backup.startedAt, now)}` : isOverdue("backup", backup, now) ? `⚠️ none since ${ago(backup.startedAt, now)}` : `✅ ${ago(backup.startedAt, now)}`
     }\n` +
@@ -193,7 +209,7 @@ export async function databaseView(): Promise<string> {
   const archiveBytes = Number(archive?.detail?.archiveBytes) || 0;
   return (
     `🗄 <b>Database</b>\n\n` +
-    `<b>Supabase</b> (live): ${mb(db.bytes)} of ${mb(db.limit)} — ${pct}%${pct >= 80 ? " ⚠️ nearly full" : ""}\n` +
+    `<b>Supabase</b> (live): ${mb(db.bytes)} of ${mb(db.limit)} — ${pct}%${pct >= 100 ? " 🔴 over the limit — the system keeps working" : pct >= 80 ? " ⚠️ nearly full" : ""}\n` +
     db.tables.map((t) => `• ${escapeHtml(t.name)} ${mb(t.bytes)}`).join("\n") +
     `\n\n<b>Photos</b> (Supabase Storage): ` +
     (db.storage ? `${mb(db.storage.bytes)} in ${db.storage.files} files` : "not readable from here") +
@@ -251,6 +267,65 @@ export async function archiveView(now = new Date()): Promise<string> {
 }
 
 /**
+ * The daily database-size check (run from the purge-photos cron, after the
+ * photos have gone, so it measures what is actually left).
+ *
+ * Tells the administrators when usage crosses 80%, 90% and 100% of
+ * SUPABASE_DB_LIMIT_MB: each level once on the way up, and at 100% or more
+ * once a day until it comes back down. When it falls back under 80% — after an
+ * archive move, say — it says so once, so the last word is never a stale alarm.
+ *
+ * It only ever SENDS. No code path in the application looks at this figure to
+ * refuse a report or a sale: going over the limit is something for a person to
+ * act on, not a reason for the bot to stop. The one thing this cannot overrule
+ * is Supabase itself, which turns a project read-only when it outgrows the
+ * plan's real disk size — logError catches that separately (see errors.ts).
+ *
+ * What was last announced is carried forward in the job row's detail, so the
+ * check needs no table of its own.
+ */
+export async function checkDatabaseUsage(now = new Date()): Promise<JobOutcome> {
+  const [db, runs] = await Promise.all([databaseFacts(), latestJobRuns()]);
+  const pct = Math.round((db.bytes / db.limit) * 100);
+  const level = usageLevel(pct);
+
+  const prev = runs.get("db-usage")?.detail ?? {};
+  const prevLevel = Number(prev.level) || 0;
+  const prevAlertAt = prev.alertedAt ? new Date(String(prev.alertedAt)) : null;
+  const dayPassed = !prevAlertAt || now.getTime() - prevAlertAt.getTime() >= 20 * 3600_000;
+
+  let message: string | null = null;
+  if (level > prevLevel || (level >= 100 && dayPassed)) {
+    const top = db.tables.slice(0, 3).map((t) => `• ${escapeHtml(t.name)} ${mb(t.bytes)}`).join("\n");
+    message =
+      (level >= 100
+        ? `🔴 <b>የመረጃ ቋቱ ከገደቡ አልፏል</b> — ${mb(db.bytes)} of ${mb(db.limit)} (${pct}%)\n`
+        : `⚠️ <b>የመረጃ ቋቱ ${level}% ደርሷል</b> — ${mb(db.bytes)} of ${mb(db.limit)}\n`) +
+      `\n<b>Largest tables</b>\n${top}\n\n` +
+      `The system keeps working — nothing is blocked by this limit.\n` +
+      `To make room: run the archive move early (GitHub → Actions → Quarterly archive to Neon), ` +
+      `or raise the plan and SUPABASE_DB_LIMIT_MB.` +
+      (level >= 100 ? `\n\n<i>Repeated daily while over the limit.</i>` : "");
+  } else if (level < 80 && prevLevel >= 80) {
+    message = `✅ <b>የመረጃ ቋቱ ወደ ${pct}% ተመልሷል</b> — ${mb(db.bytes)} of ${mb(db.limit)}. Back under the warning line.`;
+  }
+
+  const alerted = message ? (await notifyAdmins(message)) > 0 : false;
+  return {
+    summary: `${mb(db.bytes)} of ${mb(db.limit)} (${pct}%)${alerted ? " — admins told" : ""}`,
+    detail: {
+      bytes: db.bytes,
+      limit: db.limit,
+      pct,
+      // A level whose message did not get through is not recorded as announced.
+      level: message && !alerted ? prevLevel : level,
+      // Only moved forward when a message actually went, so a failed send is retried tomorrow.
+      alertedAt: alerted ? now.toISOString() : (prev.alertedAt ?? null),
+    },
+  };
+}
+
+/**
  * The System section of the administrators' morning summary.
  *
  * Short, and only what changed or needs a person. Three days before a
@@ -286,7 +361,7 @@ export async function systemDigest(now = new Date()): Promise<string> {
     );
 
     const pct = Math.round((db.bytes / db.limit) * 100);
-    lines.push(`🗄 Database: ${mb(db.bytes)} (${pct}% of ${mb(db.limit)})${pct >= 80 ? " ⚠️" : ""}`);
+    lines.push(`🗄 Database: ${mb(db.bytes)} (${pct}% of ${mb(db.limit)})${usageFlag(pct)}`);
 
     lines.push(
       `🚨 Errors: ${errors.open} open, ${errors.last24h} in 24 h` +

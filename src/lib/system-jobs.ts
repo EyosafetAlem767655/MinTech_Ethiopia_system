@@ -35,6 +35,7 @@ export const JOBS: Record<string, { label: string; everyHours: number | null; so
   "morning-reminder": { label: "Reminders & digests", everyHours: 26, source: "vercel" },
   "purge-photos": { label: "Photo clean-up (3 months)", everyHours: 26, source: "vercel" },
   "finance-daily": { label: "Finance chase", everyHours: 26, source: "vercel" },
+  "db-usage": { label: "Database size check", everyHours: 26, source: "vercel" },
   archive: { label: "Quarterly move → Neon archive", everyHours: null, source: "github" },
   "data-export": { label: "Spreadsheet export (on demand)", everyHours: null, source: "vercel" },
 };
