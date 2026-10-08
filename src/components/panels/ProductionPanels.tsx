@@ -112,7 +112,7 @@ function BrandTooltip({
 }
 
 export default function ProductionPanels() {
-  const [range, setRange] = useState<RangeKey>("weekly");
+  const [range, setRange] = useState<RangeKey>("monthly");
   const [production, setProduction] = useState<ProductionRow[] | null>(null);
 
   useEffect(() => {

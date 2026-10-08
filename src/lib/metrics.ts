@@ -27,7 +27,7 @@ const EAT = "Africa/Addis_Ababa";
 export interface DayNumbers {
   date: string;
   tonsProduced: number;
-  /** Finished goods dispatched, from the asset team's delivery reports. */
+  /** Finished goods sold, from the sales team's invoices (delivery reports for days before them). */
   tonsSold: number;
   damagedClaimed: number;
   damagedVerified: number;
@@ -39,11 +39,9 @@ export interface DayNumbers {
   salesReportedEtb: number;
   salesReportedNetEtb: number;
   salesReportsCount: number;
-  /** Asset management: raw material in, finished goods out, open tool requests. */
+  /** Asset management: raw material in, open tool requests. */
   rawMaterialTons: number;
   rawMaterialLoads: number;
-  deliveredTons: number;
-  deliveryCount: number;
   openToolRequests: number;
 }
 
@@ -52,7 +50,6 @@ export async function getDayNumbers(start: Date, end: Date): Promise<DayNumbers>
   const [r] = await sql<
     {
       tons_produced: string;
-      tons_sold: string;
       damaged_claimed: string;
       damaged_verified: string;
     }[]
@@ -80,14 +77,6 @@ export async function getDayNumbers(start: Date, end: Date): Promise<DayNumbers>
                              group by 1) o on o.d = p.d
        ) d)                                                                         as tons_produced,
 
-      -- Dispatched tonnage, from the asset team's delivery reports. It used to
-      -- come from invoices.sacks x bag_weight_kg, but nothing has created an
-      -- invoice since the finance module was retired, so that read as zero.
-      (select coalesce(sum((e.value)::numeric), 0)
-         from delivery_reports r
-         cross join lateral jsonb_each_text(r.products) as e(key, value)
-        where r.date >= ${start} and r.date < ${end})                               as tons_sold,
-
       (select coalesce(sum(quantity), 0)
          from damage_claims where created_at >= ${start} and created_at < ${end})   as damaged_claimed,
 
@@ -104,23 +93,36 @@ export async function getDayNumbers(start: Date, end: Date): Promise<DayNumbers>
   //
   // Bucketed by the sale's own date, not created_at, so a sale keyed in the
   // next morning still counts against the day it was actually made.
-  const [s] = await sql<{ grand: string; net: string; n: string }[]>`
+  //
+  // Tonnes sold come from the same rows. They used to come from the asset
+  // team's delivery reports, which are retired; a day that only ever had a
+  // delivery report (before sales invoices existed) still answers from it. The
+  // fallback is per day, so a day with both is never counted twice.
+  const [s] = await sql<{ grand: string; net: string; n: string; tons: string }[]>`
     select coalesce(sum(invoice_cash + invoice_credit), 0) as grand,
            coalesce(sum(invoice_cash), 0)                  as net,
-           count(*)                                        as n
+           count(*)                                        as n,
+           (select coalesce(sum(coalesce(si.t, dr.t)), 0)
+              from (select (date at time zone ${EAT})::date as d, sum(qty) as t
+                      from sales_invoices
+                     where date >= ${start} and date < ${end}
+                     group by 1) si
+              full outer join (select (r.date at time zone ${EAT})::date as d, sum((e.value)::numeric) as t
+                                 from delivery_reports r
+                                 cross join lateral jsonb_each_text(r.products) as e(key, value)
+                                where r.date >= ${start} and r.date < ${end}
+                                group by 1) dr on dr.d = si.d)  as tons
       from sales_invoices
      where date >= ${start} and date < ${end}
   `.catch((e) => {
     if ((e as { code?: string })?.code !== "42P01") console.error("getDayNumbers daily sales failed:", e);
-    return [{ grand: "0", net: "0", n: "0" }];
+    return [{ grand: "0", net: "0", n: "0", tons: "0" }];
   });
 
-  // Asset management, guarded the same way and for the same reason: these three
+  // Asset management, guarded the same way and for the same reason: these
   // tables must never be able to take the dashboard and the cron brief down
   // together. Raw material tonnage sums the jsonb material map.
-  const [a] = await sql<
-    { raw_tons: string; raw_loads: string; delivered: string; deliveries: string; tools: string }[]
-  >`
+  const [a] = await sql<{ raw_tons: string; raw_loads: string; tools: string }[]>`
     select
       (select coalesce(sum((e.value)::numeric), 0)
          from raw_material_receipts r
@@ -128,22 +130,18 @@ export async function getDayNumbers(start: Date, end: Date): Promise<DayNumbers>
         where r.date >= ${start} and r.date < ${end})                          as raw_tons,
       (select count(*) from raw_material_receipts
         where date >= ${start} and date < ${end})                              as raw_loads,
-      (select coalesce(sum(qty), 0) from delivery_reports
-        where date >= ${start} and date < ${end})                              as delivered,
-      (select count(*) from delivery_reports
-        where date >= ${start} and date < ${end})                              as deliveries,
       -- Open requests are a running backlog, not a same-day figure, so this one
       -- is deliberately not windowed.
       (select count(*) from purchase_requests where status = 'pending')        as tools
   `.catch((e) => {
     if ((e as { code?: string })?.code !== "42P01") console.error("getDayNumbers asset tables failed:", e);
-    return [{ raw_tons: "0", raw_loads: "0", delivered: "0", deliveries: "0", tools: "0" }];
+    return [{ raw_tons: "0", raw_loads: "0", tools: "0" }];
   });
 
   return {
     date: eatDateLabel(start),
     tonsProduced: Math.round(Number(r.tons_produced) * 1000) / 1000,
-    tonsSold: Math.round(Number(r.tons_sold) * 1000) / 1000,
+    tonsSold: Math.round((Number(s?.tons) || 0) * 1000) / 1000,
     damagedClaimed: Number(r.damaged_claimed) || 0,
     damagedVerified: Number(r.damaged_verified) || 0,
     salesReportedEtb: Number(s?.grand) || 0,
@@ -151,8 +149,6 @@ export async function getDayNumbers(start: Date, end: Date): Promise<DayNumbers>
     salesReportsCount: Number(s?.n) || 0,
     rawMaterialTons: Math.round((Number(a?.raw_tons) || 0) * 1000) / 1000,
     rawMaterialLoads: Number(a?.raw_loads) || 0,
-    deliveredTons: Math.round((Number(a?.delivered) || 0) * 1000) / 1000,
-    deliveryCount: Number(a?.deliveries) || 0,
     openToolRequests: Number(a?.tools) || 0,
   };
 }

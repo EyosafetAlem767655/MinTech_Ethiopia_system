@@ -59,9 +59,6 @@ export async function assembleAndSendBrief(now = new Date()) {
       `🚚 ${numbers.rawMaterialTons.toFixed(2)} ቶን ጥሬ ዕቃ ገብቷል · ${numbers.rawMaterialLoads} ጭነት`
     );
   }
-  if (numbers.deliveryCount > 0) {
-    fiveLines.push(`🚛 ${numbers.deliveredTons.toFixed(2)} ቶን ተላልፏል · ${numbers.deliveryCount} ማድረሻ`);
-  }
   if (numbers.openToolRequests > 0) {
     fiveLines.push(`🔧 ${numbers.openToolRequests} የመሣሪያ ግዢ ጥያቄ ውሳኔ ይጠብቃል`);
   }
@@ -80,8 +77,6 @@ export async function assembleAndSendBrief(now = new Date()) {
     asset_management: {
       raw_material_tons: numbers.rawMaterialTons,
       raw_material_loads: numbers.rawMaterialLoads,
-      delivered_tons: numbers.deliveredTons,
-      deliveries: numbers.deliveryCount,
       open_tool_requests: numbers.openToolRequests,
     },
     staff_submissions: {

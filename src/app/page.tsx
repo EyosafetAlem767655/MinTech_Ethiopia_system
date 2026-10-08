@@ -25,7 +25,7 @@ interface BriefData {
 }
 
 export default function OwnerDashboard() {
-  const [range, setRange] = useState<RangeKey>("daily");
+  const [range, setRange] = useState<RangeKey>("monthly");
   const [brief, setBrief] = useState<BriefData | null>(null);
   const [summaries, setSummaries] = useState<DepartmentSummary[] | null>(null);
   const [pushState, setPushState] = useState<string>("");

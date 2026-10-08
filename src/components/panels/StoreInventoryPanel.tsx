@@ -4,7 +4,13 @@ import { useEffect, useMemo, useState } from "react";
 import { STORE_BLOCKS, STORE_GROUPS, type StoreItem } from "@/lib/store-items";
 
 /**
- * The spare-parts store: 132 items, and when each shelf was last counted.
+ * The spare-parts store: what each shelf should hold, what it is worth, and
+ * when it was last counted.
+ *
+ * "Balance" is the last count moved on by the vouchers filed since (GRV in,
+ * SIV out); "Counted" is the figure the storekeeper actually wrote down. The
+ * two agree right after a count and drift apart only by what moved without a
+ * voucher — which is the number worth looking at.
  *
  * Grouped and collapsed by default, because nobody reads 132 rows — the common
  * task is finding one part ("6210"), which is what the search box is for, and
@@ -19,6 +25,11 @@ import { STORE_BLOCKS, STORE_GROUPS, type StoreItem } from "@/lib/store-items";
 interface ItemStatus {
   item: StoreItem;
   qty: number | null;
+  received: number;
+  issued: number;
+  balance: number;
+  unitCost: number | null;
+  value: number | null;
   previous: number | null;
   countedAt: string | null;
   countedBy: string | null;
@@ -33,6 +44,8 @@ interface GroupStatus {
   daysSince: number | null;
   stale: boolean;
 }
+
+const etb = (n: number) => n.toLocaleString("en-US", { maximumFractionDigits: 0 });
 
 const fmtDate = (d: string) => new Date(d).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
 
@@ -73,12 +86,17 @@ export default function StoreInventoryPanel() {
 
   const staleGroups = groups.filter((g) => g.stale);
   const byGroup = (group: string) => items.filter((s) => s.item.group === group);
+  const valueOf = (rows: ItemStatus[]) => rows.reduce((a, s) => a + (s.value ?? 0), 0);
+  const totalValue = valueOf(items);
 
   return (
     <section className="space-y-3">
       <div className="flex flex-wrap items-baseline justify-between gap-2 px-1">
         <h2 className="font-display text-lg font-bold">🧰 Store inventory</h2>
-        <p className="text-[11px] text-stone-400">{items.length} items · counted per group</p>
+        <p className="text-[11px] text-stone-400">
+          {items.length} items · counted per group
+          {totalValue > 0 && <> · worth <b className="text-stone-600">{etb(totalValue)} ETB</b></>}
+        </p>
       </div>
 
       {staleGroups.length > 0 && (
@@ -106,8 +124,14 @@ export default function StoreInventoryPanel() {
       ) : (
         STORE_BLOCKS.map((block) => (
           <div key={block.key} className="space-y-2">
-            <h3 className="px-1 text-xs font-bold uppercase tracking-widest text-stone-400">
-              {block.icon} {block.label}
+            <h3 className="flex justify-between px-1 text-xs font-bold uppercase tracking-widest text-stone-400">
+              <span>
+                {block.icon} {block.label}
+              </span>
+              {(() => {
+                const v = valueOf(items.filter((s) => STORE_GROUPS.find((g) => g.key === s.item.group)?.block === block.key));
+                return v > 0 ? <span className="normal-case tracking-normal">{etb(v)} ETB</span> : null;
+              })()}
             </h3>
             {STORE_GROUPS.filter((g) => g.block === block.key).map((g) => {
               const status = groupByKey.get(g.key);
@@ -153,13 +177,17 @@ function ItemTable({ rows, showGroup = false }: { rows: ItemStatus[]; showGroup?
   const label = (group: string) => STORE_GROUPS.find((g) => g.key === group)?.label ?? group;
 
   return (
-    <table className="w-full min-w-[520px] text-right text-xs">
+    <table className="w-full min-w-[720px] text-right text-xs">
       <thead className="bg-clay-50/70 text-[10px] uppercase tracking-wide text-stone-500">
         <tr>
           <th className="p-2 text-left font-bold">Item</th>
           {showGroup && <th className="p-2 text-left font-bold">Group</th>}
-          <th className="p-2 font-bold">Qty</th>
+          <th className="p-2 font-bold" title="Last count + received − issued since">Balance</th>
           <th className="p-2 font-bold">Unit</th>
+          <th className="p-2 font-bold" title="The figure on the last count">Counted</th>
+          <th className="p-2 font-bold" title="Received on GRVs since the last count">In</th>
+          <th className="p-2 font-bold" title="Issued on SIVs since the last count">Out</th>
+          <th className="p-2 font-bold">Value</th>
           <th className="p-2 font-bold">Change</th>
           <th className="p-2 text-left font-bold">Last counted</th>
         </tr>
@@ -171,10 +199,33 @@ function ItemTable({ rows, showGroup = false }: { rows: ItemStatus[]; showGroup?
             <tr key={s.item.key} className="border-t border-clay-50">
               <td className="p-2 text-left font-semibold text-stone-800">{s.item.name}</td>
               {showGroup && <td className="p-2 text-left text-stone-500">{label(s.item.group)}</td>}
-              <td className={`p-2 font-bold tabular-nums ${s.qty === 0 ? "text-red-700" : "text-stone-800"}`}>
-                {s.qty === null ? <span className="font-normal text-stone-300">—</span> : s.qty.toLocaleString()}
+              <td className={`p-2 font-bold tabular-nums ${s.balance <= 0 && (s.qty !== null || s.received || s.issued) ? "text-red-700" : "text-stone-800"}`}>
+                {s.qty === null && !s.received && !s.issued ? (
+                  <span className="font-normal text-stone-300">—</span>
+                ) : (
+                  <>
+                    {s.balance.toLocaleString()}
+                    {s.qty === null && (
+                      <span title="Never counted: this is only what the vouchers moved" className="ml-1 text-[9px] font-normal text-amber-600">
+                        not counted
+                      </span>
+                    )}
+                  </>
+                )}
               </td>
               <td className="p-2 text-[10px] text-stone-400">{s.item.unit}</td>
+              <td className="p-2 tabular-nums text-stone-500">
+                {s.qty === null ? <span className="text-stone-300">—</span> : s.qty.toLocaleString()}
+              </td>
+              <td className={`p-2 tabular-nums ${s.received ? "text-green-700" : "text-stone-300"}`}>
+                {s.received ? `+${s.received.toLocaleString()}` : "—"}
+              </td>
+              <td className={`p-2 tabular-nums ${s.issued ? "text-amber-700" : "text-stone-300"}`}>
+                {s.issued ? `−${s.issued.toLocaleString()}` : "—"}
+              </td>
+              <td className="p-2 tabular-nums text-stone-600" title={s.unitCost ? `${etb(s.unitCost)} ETB each` : "No cost yet"}>
+                {s.value !== null ? etb(s.value) : <span className="text-stone-300">—</span>}
+              </td>
               <td
                 className={`p-2 tabular-nums ${
                   change === null || change === 0 ? "text-stone-300" : change > 0 ? "text-green-700" : "text-amber-700"

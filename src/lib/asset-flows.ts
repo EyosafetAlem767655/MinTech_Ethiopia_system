@@ -21,6 +21,7 @@ import {
 } from "@/lib/products";
 import { upsertOpsDay, opsDateLabel } from "@/lib/ops-report";
 import { runAfter } from "@/lib/after";
+import { costsAt, recordCosts, type ItemCost } from "@/lib/store-costs";
 import { insertRow } from "@/lib/insert";
 import {
   SALES_KEYS,
@@ -67,10 +68,25 @@ import { rawMaterialTemplate, sectionMap } from "@/lib/raw-material-paste";
 import {
   STORE_BLOCKS,
   STORE_ITEMS,
+  STORE_ITEM_BY_KEY,
   itemsOfBlock,
   type StoreBlockKey,
 } from "@/lib/store-items";
 import { itemKey, storeBlockTemplate } from "@/lib/store-count-paste";
+import {
+  STORE_DEPTS_STEP,
+  STORE_OTHER,
+  STORE_QTY_STEP,
+  itemLabel,
+  storeCostKey,
+  storeItemChoices,
+  storeItemsStep,
+  storeLines,
+  storeVoucherTemplate,
+  tickedBlocks,
+  tickedStoreItems,
+  wantsOtherItems,
+} from "@/lib/store-voucher";
 import type { ToolPhotoCheck } from "@/lib/llm";
 // Names and the kind union live in a client-safe module — see flow-titles.ts.
 import { FLOW_TITLE, type AssetFlowKind } from "@/lib/flow-titles";
@@ -170,6 +186,11 @@ export interface AssetStep {
    */
   type: "date" | "month" | "text" | "number" | "choice" | "multichoice" | "photo" | "photos" | "paste";
   choices?: { label: string; value: string }[];
+  /**
+   * Buttons per row on a tick-list. One by default; the warehouse item lists
+   * use two, or Electrical's 77 items would be a 77-row keyboard.
+   */
+  columns?: number;
   /**
    * Choices computed from the draft, for a step whose options are whatever the
    * database holds right now — the unpaid invoices, say. The list is seeded
@@ -302,18 +323,11 @@ export function storeBlockOfStep(stepId: string): StoreBlockKey | null {
   return STORE_BLOCKS.some((b) => b.key === key) ? (key as StoreBlockKey) : null;
 }
 
-const DELIVERY_STEPS: AssetStep[] = [
-  { id: "date", prompt: "📅 የተላከበትን ቀን ይምረጡ።", type: "date" },
-  { id: "customer", prompt: "👤 ለማን እንደተላከ (Deliver to) ይፃፉ።", type: "text" },
-  { id: "invoiceCash", prompt: "💵 በጥሬ ገንዘብ የተቆረጠውን ደረሰኝ መጠን በብር ይፃፉ። ከሌለ 0።", type: "number" },
-  { id: "invoiceCredit", prompt: "🧾 በብድር (credit) የተቆረጠውን ደረሰኝ መጠን በብር ይፃፉ። ከሌለ 0።", type: "number" },
-  { id: "deliveryNo", prompt: "📄 የማድረሻ ቁጥሩን (Deli.) ይፃፉ።", type: "text", skippable: true },
-  ...DELIVERY_PRODUCTS.map<AssetStep>((code) => ({
-    id: `prod:${code}`,
-    prompt: `⚖️ የ<b>${productLabel(code)}</b> ብዛት በቶን ይፃፉ። ከሌለ 0 ይፃፉ።`,
-    type: "number",
-  })),
-];
+/**
+ * Flows nobody can start any more. A session parked in one is reset by the
+ * webhook with a message, because its steps no longer exist to continue.
+ */
+export const RETIRED_FLOWS: ReadonlySet<AssetFlowKind> = new Set<AssetFlowKind>(["delivery"]);
 
 /** The units a new-tool request can be counted in. */
 export const PURCHASE_UNITS = [
@@ -576,7 +590,9 @@ export const MAX_VOUCHER_ITEMS = 8;
 
 /** True once item `i` has been reached — item 1 always, the rest on request. */
 function voucherItemAsked(draft: Record<string, string | number>, i: number): boolean {
-  if (i === 1) return true;
+  // Typed lines are for what is NOT on the warehouse list, so they are only
+  // asked when "📝 other" was ticked among the departments.
+  if (i === 1) return wantsOtherItems(draft);
   return draft[`more${i - 1}`] === "yes";
 }
 
@@ -762,6 +778,56 @@ function voucherItemSteps(opts: {
   });
 }
 
+/* ── The warehouse list, shared by both vouchers ──────────────────────────── */
+
+/**
+ * Departments → items → one block of amounts. See store-voucher.ts.
+ *
+ * `direction` only changes the wording: what came IN on a GRV, what went OUT
+ * on an SIV. The GRV block also takes a unit cost per line, because there the
+ * supplier's invoice is the price; the SIV is valued from the cost already
+ * known for each item.
+ */
+function storeListSteps(direction: "in" | "out"): AssetStep[] {
+  const verb = direction === "in" ? "የገቡትን" : "የወጡትን";
+  return [
+    {
+      id: STORE_DEPTS_STEP,
+      label: "Departments",
+      prompt:
+        `🏷 ${verb} ዕቃዎች ከየትኞቹ ክፍሎች ናቸው? የሚመለከታቸውን ይንኩ፣ ከዚያ ✅ ጨርሻለሁ ይጫኑ።\n\n` +
+        "<i>ከመጋዘን ዝርዝሩ ውጪ ያለ ዕቃ ካለ 📝 ሌላ ይንኩ — በጽሑፍ ይጠየቃል።</i>",
+      type: "multichoice",
+      choices: [
+        ...STORE_BLOCKS.map((b) => ({ label: `${b.icon} ${b.label}`, value: b.key })),
+        { label: "📝 ሌላ (ከዝርዝሩ ውጪ)", value: STORE_OTHER },
+      ],
+    },
+    ...STORE_BLOCKS.map<AssetStep>((b) => ({
+      id: storeItemsStep(b.key),
+      label: `${b.label} items`,
+      prompt: `${b.icon} <b>${b.label}</b> — ${verb} ዕቃዎች ይንኩ፣ ከዚያ ✅ ጨርሻለሁ ይጫኑ።`,
+      type: "multichoice",
+      choices: storeItemChoices(b.key),
+      columns: 2,
+      when: (d: Record<string, string | number>) => tickedBlocks(d).includes(b.key),
+    })),
+    {
+      id: STORE_QTY_STEP,
+      label: "Amounts",
+      prompt:
+        direction === "in"
+          ? "📋 ለእያንዳንዱ ዕቃ ብዛቱንና የነጠላ ዋጋውን ይሙሉ፣ ቅጂውን ይመልሱት።\n\n" +
+            "<i>ብዛት x ዋጋ — ለምሳሌ፦</i>\n<code>6210 = 4 x 1500</code>\n" +
+            "<i>ዋጋው ቀድሞ ከተሞላ ብዛቱን ብቻ ይፃፉ።</i>"
+          : "📋 ለእያንዳንዱ ዕቃ የወጣውን ብዛት ይሙሉ፣ ቅጂውን ይመልሱት።\n\n" +
+            "<i>ለምሳሌ፦</i>\n<code>6210 = 2</code>",
+      type: "paste",
+      when: (d: Record<string, string | number>) => tickedStoreItems(d).length > 0,
+    },
+  ];
+}
+
 /* ── Goods Receiving Voucher (finance) ────────────────────────────────────── */
 
 /**
@@ -783,6 +849,7 @@ const GRV_STEPS: AssetStep[] = [
   { id: "date", prompt: "📅 ዕቃው የገባበትን ቀን ይምረጡ።", type: "date" },
   { id: "grvNo", prompt: "🔢 የቫውቸሩን ቁጥር (No.) ይፃፉ — ለምሳሌ 5516።", type: "text", skippable: true },
   { id: "supplier", prompt: "🏢 አቅራቢውን (Supplier) ይፃፉ።", type: "text", skippable: true },
+  ...storeListSteps("in"),
   // No stock-item question any more. PP bags arriving have their own form
   // (🧺 የPP ከረጢት ገቢ), which records them per kind without depending on how a
   // voucher line happened to be worded — so this voucher is now purely typed,
@@ -802,7 +869,8 @@ const GRV_STEPS: AssetStep[] = [
       { label: "💵 ዶላር (USD)", value: "USD" },
     ],
   },
-  { id: "totalAmount", prompt: "💰 የጠቅላላውን ዋጋ (Total amount) ይፃፉ።", type: "number" },
+  // No total question: the total is the sum of the lines (voucherTotal), and a
+  // typed figure could only be a second number to disagree with them.
   { id: "approvedBy", prompt: "🧑 ያፀደቀው (Approved by) ማን ነው?", type: "text", skippable: true },
   { id: "receivedBy", prompt: "🧑 የተረከበው (Received by) ማን ነው?", type: "text", skippable: true },
 ];
@@ -831,6 +899,7 @@ const STORE_ISSUE_STEPS: AssetStep[] = [
     prompt: "🏷 የትኛው ክፍል ነው የጠየቀው (Requesting Department)?",
     type: "text",
   },
+  ...storeListSteps("out"),
   ...voucherItemSteps({
     kinds: [],
     costSkippable: true,
@@ -1358,7 +1427,10 @@ const STEPS: Record<AssetFlowKind, AssetStep[]> = {
   downtime: DOWNTIME_STEPS,
   credit_payment: CREDIT_PAYMENT_STEPS,
   bank_collection: BANK_COLLECTION_STEPS,
-  delivery: DELIVERY_STEPS,
+  // Retired: the 🚛 delivery report was abandoned in favour of the sales
+  // report, which records the same sale with its receipts. The kind stays so
+  // historic rows keep their name; see RETIRED_FLOWS.
+  delivery: [],
   tool_request: TOOL_REQUEST_STEPS,
   pp_bag_damage: PP_BAG_DAMAGE_STEPS,
   production_daily: PRODUCTION_STEPS,
@@ -1394,6 +1466,9 @@ export function pasteTemplate(
   if (kind === "bank_collection") return bankTemplate();
   // The store count is the one flow with several paste steps, so its template
   // depends on WHICH block is being asked for, not just the flow.
+  if ((kind === "grv" || kind === "store_issue") && step === STORE_QTY_STEP) {
+    return storeVoucherTemplate(draft, kind === "grv");
+  }
   if (kind === "store_count") {
     const block = storeBlockOfStep(step);
     return block ? storeBlockTemplate(block) : "";
@@ -1467,6 +1542,13 @@ export function draftKeyLabel(key: string): string {
   if (key.startsWith(MATERIAL_PREFIX)) return `ጥሬ ዕቃ · ${key.slice(MATERIAL_PREFIX.length)}`;
   // Both paste families namespace bags the same way, so one branch serves both.
   if (key.startsWith(BAG_PREFIX)) return `ከረጢት · ${bag(key.slice(BAG_PREFIX.length))}`;
+
+  // A warehouse-list line on a voucher: "sq:brg:6210" → "BEARING 6210 · Qty".
+  const store = key.match(/^(sq|sc):(.+)$/);
+  if (store) {
+    const item = STORE_ITEM_BY_KEY.get(store[2]);
+    if (item) return `${itemLabel(item)} · ${store[1] === "sq" ? "Qty" : "Unit Cost"}`;
+  }
 
   // A voucher line's unit of measure: "unit3" → "ዕቃ 3 · Unit".
   const item = key.match(/^([a-z]+)(\d+)$/);
@@ -1571,12 +1653,6 @@ export function parseQty(text: string): number | null {
 }
 
 /* ─────────────────────────────── Derived values ───────────────────────────── */
-
-/** Total delivered tonnage — the sum of the product columns, never typed. */
-export function deliveryTotal(draft: Record<string, string | number>): number {
-  const sum = DELIVERY_PRODUCTS.reduce((a, code) => a + (Number(draft[`prod:${code}`]) || 0), 0);
-  return Math.round(sum * 1000) / 1000;
-}
 
 /** Total produced today — summed from the columns, never asked for. */
 export function productionTotal(draft: Record<string, string | number>): number {
@@ -1733,22 +1809,6 @@ export function assetPreview(state: AssetFlowState): string {
       `📅 Date: ${esc(d.date)}\n\n${lines}\n\n` +
       `🔢 ጠቅላላ: <b>${STORE_ITEMS.filter(counted).length}</b> ዕቃ\n` +
       "<i>ያልተቆጠሩት ዕቃዎች የቀድሞ ቁጥራቸውን ይይዛሉ።</i>\n"
-    );
-  }
-
-  if (state.kind === "delivery") {
-    const lines = DELIVERY_PRODUCTS.filter((c) => Number(d[`prod:${c}`]) > 0)
-      .map((c) => `  • ${productLabel(c)}: ${qty(Number(d[`prod:${c}`]))}`)
-      .join("\n");
-    return (
-      head +
-      `📅 Date: ${esc(d.date)}\n` +
-      `👤 Deliver to: ${esc(d.customer)}\n` +
-      `💵 Invoice in cash: ${money(Number(d.invoiceCash) || 0)} ETB\n` +
-      `🧾 Invoice in credit: ${money(Number(d.invoiceCredit) || 0)} ETB\n` +
-      `📄 Deli.: ${esc(d.deliveryNo) || "—"}\n\n` +
-      `⚖️ <b>ብዛት (ቶን)</b>\n${lines || "  —"}\n` +
-      `  ─────────\n  <b>Total quantity: ${qty(deliveryTotal(d))}</b>\n`
     );
   }
 
@@ -1917,9 +1977,11 @@ export function assetPreview(state: AssetFlowState): string {
     };
 
     const items = voucherItems(d).map((it, i) => {
-      const cost = it.unitCost ? ` × ${money(it.unitCost)}` : "";
-      const ledger = it.ledgerKey
-        ? `\n     └ 📦 ${ledgerLabel(it.ledgerKind, it.ledgerKey)}: <b>${qty(it.ledgerQty)}</b> ${
+      const cost = it.unitCost
+        ? ` × ${money(it.unitCost)} = <b>${money(it.totalAmount ?? 0)}</b>`
+        : "";
+      const ledger = it.ledgerKey && it.ledgerKind !== "store"
+        ?`\n     └ 📦 ${ledgerLabel(it.ledgerKind, it.ledgerKey)}: <b>${qty(it.ledgerQty)}</b> ${
             it.ledgerKind === "bag" ? "ከረጢት" : "ቶን"
           }`
         : "";
@@ -1946,11 +2008,17 @@ export function assetPreview(state: AssetFlowState): string {
 
     const tail = isGrv
       ? [
-          `💰 ጠቅላላ: <b>${money(Number(d.totalAmount) || 0)} ${esc(d.currency) || "ETB"}</b>`,
+          `💰 ጠቅላላ: <b>${money(voucherTotal(d))} ${esc(d.currency) || "ETB"}</b>`,
           line("🧑", "ያፀደቀው", d.approvedBy),
           line("🧑", "የተረከበው", d.receivedBy),
         ]
-      : [line("🧑", "ያፀደቀው", d.approvedBy), line("🧑", "የተረከበው", d.receivedBy)];
+      : [
+          // The SIV is valued from each item's known cost. A line with no known
+          // cost yet is left out of the figure and counted, never guessed.
+          sivValueLine(d),
+          line("🧑", "ያፀደቀው", d.approvedBy),
+          line("🧑", "የተረከበው", d.receivedBy),
+        ];
 
     // Historic drafts may still carry the fields neither voucher asks for any
     // more. They are shown when present rather than dropped — a value that was
@@ -2062,8 +2130,11 @@ export interface VoucherItem {
   quantity: number;
   unitCost: number | null;
   totalAmount: number | null;
-  /** Null unless a person confirmed which stock item this line is. */
-  ledgerKind: LedgerKind | null;
+  /**
+   * Null unless a person confirmed which stock item this line is. "store" is a
+   * warehouse-list line, keyed by the item's permanent store key.
+   */
+  ledgerKind: LedgerKind | "store" | null;
   ledgerKey: string | null;
   ledgerQty: number;
 }
@@ -2079,8 +2150,23 @@ export interface VoucherItem {
  * no balance — which is the whole point of asking.
  */
 export function voucherItems(draft: Record<string, string | number>): VoucherItem[] {
-  const out: VoucherItem[] = [];
-  for (let i = 1; i <= MAX_VOUCHER_ITEMS; i++) {
+  // Warehouse-list lines first, in list order, then whatever was typed.
+  const out: VoucherItem[] = storeLines(draft).map((l) => ({
+    stockCode: null,
+    description: itemLabel(l.item),
+    unit: l.item.unit,
+    quantity: l.quantity,
+    unitCost: l.unitCost,
+    totalAmount: l.unitCost ? Math.round(l.unitCost * l.quantity * 100) / 100 : null,
+    ledgerKind: "store",
+    ledgerKey: l.item.key,
+    ledgerQty: l.quantity,
+  }));
+  // Typed lines only count while "📝 other" is ticked, so unticking it on the
+  // edit card really does drop them. A draft from before the department step
+  // existed has no answer there at all, and keeps the lines it was typed with.
+  const typedAllowed = wantsOtherItems(draft) || draft[STORE_DEPTS_STEP] === undefined;
+  for (let i = 1; typedAllowed && i <= MAX_VOUCHER_ITEMS; i++) {
     const k = itemKeys(i);
     const description = String(draft[k.description] || "").trim();
     if (!description) break;
@@ -2107,6 +2193,27 @@ export function voucherItems(draft: Record<string, string | number>): VoucherIte
     });
   }
   return out;
+}
+
+/** "💰 ዋጋ: 12,000 ETB (2 ዕቃ ዋጋ የለውም)", or "" when nothing on the voucher has a cost. */
+function sivValueLine(draft: Record<string, string | number>): string {
+  const items = voucherItems(draft);
+  const unpriced = items.filter((it) => !it.totalAmount).length;
+  if (unpriced === items.length) return "";
+  return (
+    `💰 ዋጋ: <b>${money(voucherTotal(draft))} ETB</b>` +
+    (unpriced > 0 ? ` <i>(${unpriced} ዕቃ ዋጋ የለውም)</i>` : "")
+  );
+}
+
+/**
+ * The voucher's total: the sum of its line totals. Never typed — the GRV used
+ * to ask for it, and a typed total is a figure that can disagree with the very
+ * lines it claims to add up.
+ */
+export function voucherTotal(draft: Record<string, string | number>): number {
+  const sum = voucherItems(draft).reduce((a, it) => a + (it.totalAmount ?? 0), 0);
+  return Math.round(sum * 100) / 100;
 }
 
 /* ──────────────────────────────── Persistence ─────────────────────────────── */
@@ -2256,22 +2363,6 @@ export async function saveAssetReport(
       values (${date}, ${eatDateLabel(date)}, ${groups}, ${sql.json(items)}, ${reportedBy}, 'telegram')
       returning id`;
     return { id: row.id, table: "store_counts" };
-  }
-
-  if (state.kind === "delivery") {
-    const cash = Number(d.invoiceCash) || 0;
-    const credit = Number(d.invoiceCredit) || 0;
-    // payment_type is legacy but still read by older views: derive it rather
-    // than leaving it null, and mark a mixed invoice as the larger side.
-    const paymentType = cash > 0 && credit > 0 ? (cash >= credit ? "cash" : "credit") : cash > 0 ? "cash" : credit > 0 ? "credit" : null;
-    const [row] = await sql<{ id: string }[]>`
-      insert into delivery_reports (date, customer, invoice_cash, invoice_credit, payment_type,
-                                    qty, delivery_no, reported_by, products, source)
-      values (${reportDate(d.date)}, ${String(d.customer || "")}, ${cash}, ${credit}, ${paymentType},
-              ${deliveryTotal(d)}, ${String(d.deliveryNo || "") || null}, ${reportedBy},
-              ${sql.json(jsonMap(d, "prod:", DELIVERY_PRODUCTS))}, 'telegram')
-      returning id`;
-    return { id: row.id, table: "delivery_reports" };
   }
 
   if (state.kind === "production_daily") {
@@ -2451,14 +2542,27 @@ export async function saveAssetReport(
 
   if (state.kind === "grv" || state.kind === "store_issue") {
     const isGrv = state.kind === "grv";
-    const items = voucherItems(d);
+    const date = reportDate(d.date);
+    let items = voucherItems(d);
+    // An issue is valued at what each item cost ON the voucher's date, read
+    // fresh here rather than trusted from the draft: the date can be corrected
+    // on the review card after the costs were looked up.
+    if (!isGrv) {
+      const storeKeys = items.filter((it) => it.ledgerKind === "store").map((it) => it.ledgerKey!);
+      const costs = await costsAt(date, storeKeys).catch(() => new Map<string, ItemCost>());
+      items = items.map((it) => {
+        if (it.ledgerKind !== "store") return it;
+        const unitCost = costs.get(it.ledgerKey!)?.unitCost || it.unitCost || null;
+        return { ...it, unitCost, totalAmount: unitCost ? Math.round(unitCost * it.quantity * 100) / 100 : null };
+      });
+    }
+    const total = Math.round(items.reduce((a, it) => a + (it.totalAmount ?? 0), 0) * 100) / 100;
     // Both vouchers are typed now, so neither carries a photo or an extraction.
     // The columns stay and are still written: every voucher filed before the
     // change has them, the dashboard reads them, and a NULL here is the honest
     // record that this one was typed.
     const extraction = state.extraction ? sql.json({ ...state.extraction }) : null;
     const photos = state.photoFileIds || [];
-    const date = reportDate(d.date);
     // A blank voucher number must be stored as NULL, not "". The unique index is
     // partial on `not null`, so an empty string would make the SECOND unnumbered
     // voucher collide with the first and be refused as a duplicate.
@@ -2479,7 +2583,9 @@ export async function saveAssetReport(
             purchase_order_no: String(d.purchaseOrderNo || "") || null,
             receiving_store_no: String(d.receivingStoreNo || "") || null,
             currency: d.currency === "USD" ? "USD" : "ETB",
-            total_amount: Number(d.totalAmount) || null,
+            // The sum of the lines. A draft from before the total stopped being
+            // asked still carries the typed figure, and keeps it.
+            total_amount: total || Number(d.totalAmount) || null,
             remarks: String(d.remarks || "") || null,
             prepared_by: String(d.preparedBy || "") || null,
             received_by: String(d.receivedBy || "") || null,
@@ -2527,6 +2633,24 @@ export async function saveAssetReport(
         ledger_qty: it.ledgerKey ? it.ledgerQty : null,
       }));
       await sql`insert into ${sql(isGrv ? "goods_receiving_items" : "store_issue_items")} ${sql(rows)}`;
+    }
+
+    // What the GRV paid becomes each item's cost from the voucher's date. Only
+    // a price somebody TYPED: a pre-filled one is already on record, and
+    // re-recording it would just restate the old price as news. A failure here
+    // costs the price history, never the voucher that is already saved.
+    if (isGrv) {
+      const typed = tickedStoreItems(d)
+        .filter((item) => Number(d[storeCostKey(item.key)]) > 0)
+        .map((item) => ({
+          itemKey: item.key,
+          unitCost: Number(d[storeCostKey(item.key)]),
+          effectiveFrom: date.toISOString().slice(0, 10),
+          source: "grv" as const,
+          ref: voucherNo,
+          recordedBy: reportedBy,
+        }));
+      await recordCosts(typed).catch((e) => console.error("GRV prices could not be recorded:", e));
     }
 
     return { id: header.id, table: isGrv ? "goods_receiving_vouchers" : "store_issue_vouchers" };

@@ -124,16 +124,15 @@ async function departmentKpis(
       // What this role actually files. It used to count `material_counts` — a
       // table nothing has written since that capability was retired — so the
       // card showed two figures, one of them permanently zero, while the raw
-      // material, delivery, voucher and bag-damage reports it files every day
+      // material, voucher and bag-damage reports it files every day
       // were nowhere on it.
       //
       // The voucher counts are guarded separately: they arrive in 0019, and a
       // database one migration behind must still show the other four.
       const [[r], vouchers] = await Promise.all([
-        sql<{ raw: string; deliveries: string; damage: string; pr_count: string }[]>`
+        sql<{ raw: string; damage: string; pr_count: string }[]>`
           select
             (select count(*) from raw_material_receipts where date >= ${start} and date < ${end})       as raw,
-            (select count(*) from delivery_reports      where date >= ${start} and date < ${end})       as deliveries,
             (select count(*) from pp_bag_damage_reports where date >= ${start} and date < ${end})       as damage,
             (select count(*) from purchase_requests     where created_at >= ${start} and created_at < ${end}) as pr_count
         `,
@@ -146,7 +145,6 @@ async function departmentKpis(
       const v = vouchers[0] ?? { grv: "0", siv: "0" };
       return [
         { icon: "🚚", label: "Raw material in", value: base.rawMaterialTons, suffix: " t", decimals: 2 },
-        { icon: "🚛", label: "Deliveries out", value: Number(r.deliveries) || 0 },
         { icon: "📥", label: "Goods received", value: Number(v.grv) || 0 },
         { icon: "📤", label: "Store issues", value: Number(v.siv) || 0 },
         { icon: "💔", label: "PP bag damage", value: Number(r.damage) || 0 },
@@ -436,14 +434,13 @@ async function departmentActivityCounts(
       // 0014, 0019, 0022 and 0033, and a database a migration behind must still
       // show the counts it does have rather than an empty card.
       const [[a], [b]] = await Promise.all([
-        sql<{ deliveries: string; purchases: string; claims: string }[]>`
+        sql<{ purchases: string; claims: string }[]>`
           select
-            (select count(*) from delivery_reports  where date >= ${start} and date < ${end})             as deliveries,
             (select count(*) from purchase_requests where created_at >= ${start} and created_at < ${end}) as purchases,
             (select count(*) from damage_claims     where created_at >= ${start} and created_at < ${end}) as claims`.catch(
           (e) => {
             missing(e);
-            return [{ deliveries: "0", purchases: "0", claims: "0" }];
+            return [{ purchases: "0", claims: "0" }];
           }
         ),
         sql<{
@@ -477,7 +474,6 @@ async function departmentActivityCounts(
         purchases +
         received +
         siv +
-        (Number(a.deliveries) || 0) +
         (Number(a.claims) || 0) +
         (Number(b.usage) || 0) +
         (Number(b.damage) || 0) +

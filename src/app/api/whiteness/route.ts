@@ -17,10 +17,10 @@ export const dynamic = "force-dynamic";
  * reading — and a corrected row moves both at once.
  */
 export async function GET(req: NextRequest) {
-  const param = req.nextUrl.searchParams.get("range") || "weekly";
+  const param = req.nextUrl.searchParams.get("range") || "monthly";
   // An unknown range is a bug in a caller, not a reason to answer nothing:
   // fall back to the week, which is the panel's own default.
-  const { start } = rangeWindow(isRangeKey(param) ? param : "weekly");
+  const { start } = rangeWindow(isRangeKey(param) ? param : "monthly");
 
   try {
     const rows = await sql<Record<string, unknown>[]>`

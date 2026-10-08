@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import DecideBtn from "@/components/DecideButton";
 import BagStockCheckCard from "@/components/panels/BagStockCheck";
+import { PriceListEditor, StoreCostEditor } from "@/components/panels/UnitCostEditors";
 import {
   ALARM_TONNES,
   STATUS_LABEL,
@@ -465,6 +466,12 @@ function MonthlyTab() {
         </p>
         <p className="font-display text-2xl font-bold text-clay-900">{fmt(data.totals.netWorth)} ETB</p>
       </div>
+
+      {/* The unit costs behind the figures above, editable for the month the
+          bot user could not file them. A saved price reloads the report. */}
+      <h3 className="px-1 pt-2 text-xs font-bold uppercase tracking-widest text-stone-400">Unit costs</h3>
+      <PriceListEditor month={data.month} onSaved={() => load(data.month)} />
+      <StoreCostEditor month={data.month} />
 
       {/* The bag stock check belongs to a month, so it belongs here — and only
           here. It used to arrive from the voucher panel below the whole tab,

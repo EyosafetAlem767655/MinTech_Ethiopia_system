@@ -16,7 +16,8 @@ import { buildFinanceReport, monthLabel } from "@/lib/finance-report";
 import { reconcileBags } from "@/lib/stock-reconciliation";
 import { rawMaterialCheck } from "@/lib/raw-material-stock";
 import { ALARM_TONNES, creditFigures, customerExposure } from "@/lib/credit";
-import { STALE_DAYS, groupStatuses, itemStatuses, recentCounts } from "@/lib/store-inventory";
+import { STALE_DAYS, groupStatuses, itemStatuses, recentCounts, storeMovements } from "@/lib/store-inventory";
+import { costsAt } from "@/lib/store-costs";
 import { WHITENESS_SPECS, bandLabel, belowSpec, specFor } from "@/lib/whiteness-spec";
 
 /**
@@ -387,8 +388,9 @@ const tools: OpenAI.Chat.ChatCompletionTool[] = [
     function: {
       name: "get_store_inventory",
       description:
-        "The spare-parts store: how many of each item are on the shelf, when each was last " +
-        "counted, and which groups are overdue a count. Use this for questions about bearings, " +
+        "The spare-parts store: each item's last counted figure, what the vouchers received and " +
+        "issued since that count, the expected balance on the shelf and its value, when each was " +
+        "last counted, and which groups are overdue a count. Use this for questions about bearings, " +
         "V-belts, breakers, contactors, fuses, electrodes, oils and other workshop items.",
       parameters: {
         type: "object",
@@ -771,9 +773,13 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<unk
       }
     }
     case "get_store_inventory": {
-      const counts = await recentCounts().catch(() => []);
+      const [counts, movements, costs] = await Promise.all([
+        recentCounts().catch(() => []),
+        storeMovements().catch(() => []),
+        costsAt(new Date()).catch(() => new Map()),
+      ]);
       const needle = String(args.search || "").trim().toLowerCase();
-      const items = itemStatuses(counts)
+      const items = itemStatuses(counts, movements, costs)
         .filter((s) =>
           needle
             ? s.item.name.toLowerCase().includes(needle) || s.item.key.toLowerCase().includes(needle)
@@ -784,7 +790,12 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<unk
           key: s.item.key,
           group: s.item.group,
           unit: s.item.unit,
-          quantity: s.qty,
+          countedQuantity: s.qty,
+          receivedSinceCount: s.received,
+          issuedSinceCount: s.issued,
+          expectedBalance: s.balance,
+          unitCostEtb: s.unitCost,
+          valueEtb: s.value,
           previous: s.previous,
           countedAt: s.countedAt,
           unchangedForCounts: s.unchangedFor,

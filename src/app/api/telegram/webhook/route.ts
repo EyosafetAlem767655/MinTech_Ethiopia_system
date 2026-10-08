@@ -34,6 +34,7 @@ import {
   type DamagePile,
   parseQty,
   pasteTemplate,
+  RETIRED_FLOWS,
   saveAssetReport,
   storeBlockOfStep,
   ticked,
@@ -58,6 +59,14 @@ import { INVOICES_KEY, encodeInvoices, openCreditInvoices } from "@/lib/credit-b
 import { SETTLED_TOLERANCE_ETB } from "@/lib/credit";
 import { reconcileBags } from "@/lib/stock-reconciliation";
 import { parseStoreCountPaste } from "@/lib/store-count-paste";
+import {
+  STORE_QTY_STEP,
+  itemsAwaiting,
+  parseStoreVoucherPaste,
+  storeCostHintKey,
+  tickedStoreItems,
+} from "@/lib/store-voucher";
+import { costsAt } from "@/lib/store-costs";
 import { applySalesExtraction, parseSalesPaste, salesMissing } from "@/lib/sales-invoice";
 import { applyFlowEdit, describeFlowChanges, editableFields, renderFieldList } from "@/lib/flow-edit";
 import { dailyHeartbeat } from "@/lib/heartbeat";
@@ -871,7 +880,6 @@ const NORM_RECEIPT = {
 
 const ASSET_FLOW_BY_CAP: Record<string, AssetFlowKind | undefined> = {
   raw_material_received: "raw_material",
-  finished_goods_delivery: "delivery",
   // The 🛒 button; the flow keeps its old kind name so no session, table or
   // registry key has to change with it.
   purchase: "tool_request",
@@ -1070,7 +1078,7 @@ async function handlePickCallback(
     // save an empty count, so it is turned back with a reason rather than
     // silently obeyed.
     if (ticked(state.draft, stepId).length === 0) {
-      await answerCallbackQuery(callbackId, "▫️ ቢያንስ አንድ ክፍል ይምረጡ።");
+      await answerCallbackQuery(callbackId, "▫️ ቢያንስ አንድ ይምረጡ።");
       return;
     }
     session.assetFlow = { ...state };
@@ -1133,14 +1141,18 @@ function choiceKeyboard(step: { choices?: { label: string }[] }) {
  */
 const PICK_DONE = "done";
 
-function tickKeyboard(state: AssetFlowState, step: { id: string; choices?: { label: string; value: string }[] }) {
+function tickKeyboard(
+  state: AssetFlowState,
+  step: { id: string; choices?: { label: string; value: string }[]; columns?: number }
+) {
   const chosen = ticked(state.draft, step.id);
-  const rows = (step.choices || []).map((c) => [
-    {
-      text: `${chosen.includes(c.value) ? "✅" : "▫️"} ${c.label}`,
-      callback_data: `pick:${state.kind}:${step.id}:${c.value}`,
-    },
-  ]);
+  const buttons = (step.choices || []).map((c) => ({
+    text: `${chosen.includes(c.value) ? "✅" : "▫️"} ${c.label}`,
+    callback_data: `pick:${state.kind}:${step.id}:${c.value}`,
+  }));
+  const perRow = Math.max(1, step.columns ?? 1);
+  const rows: (typeof buttons)[] = [];
+  for (let i = 0; i < buttons.length; i += perRow) rows.push(buttons.slice(i, i + perRow));
   return {
     inline_keyboard: [
       ...rows,
@@ -1539,9 +1551,35 @@ async function startAssetFlow(
 /** Advance past the step just answered and ask the next one. */
 async function advanceAsset(session: any, chatId: string, state: AssetFlowState): Promise<void> {
   state.step = nextStep(state.kind, state.step, state.draft);
+  await prepareAssetStep(state);
   session.assetFlow = { ...state };
   await persist(session);
   await askAssetStep(chatId, state);
+}
+
+/**
+ * Anything a step needs from the database before it is asked.
+ *
+ * Only the vouchers' amounts block, today: it pre-fills each ticked item's
+ * known cost (on the GRV) and values the issue (on the SIV), and the cost is a
+ * question with a date in it — what the item cost on the voucher's day. The
+ * figures go into the draft as hints, so the template, the review card and the
+ * parser all read the same numbers without a query of their own.
+ */
+async function prepareAssetStep(state: AssetFlowState): Promise<void> {
+  if ((state.kind !== "grv" && state.kind !== "store_issue") || state.step !== STORE_QTY_STEP) return;
+  const items = tickedStoreItems(state.draft);
+  const day = /^\d{4}-\d{2}-\d{2}$/.test(String(state.draft.date || ""))
+    ? new Date(`${state.draft.date}T00:00:00Z`)
+    : new Date();
+  const costs = await costsAt(day, items.map((i) => i.key)).catch((e) => {
+    console.error("store costs could not be read:", e);
+    return new Map<string, { unitCost: number }>();
+  });
+  for (const item of items) {
+    const c = costs.get(item.key)?.unitCost;
+    if (c && c > 0) state.draft[storeCostHintKey(item.key)] = c;
+  }
 }
 
 function isMongoAccessError(e: unknown) {
@@ -1771,7 +1809,7 @@ export async function POST(req: NextRequest) {
         // report is that the next thing they type is read as an answer to a
         // question they can no longer see.
         const open = session.assetFlow as AssetFlowState | undefined;
-        if (session.state === "asset_entry" && open) {
+        if (session.state === "asset_entry" && open && !RETIRED_FLOWS.has(open.kind)) {
           await sendMessage(
             chatId,
             `⏳ ያልጨረሱት <b>${FLOW_TITLE[open.kind]}</b> ሪፖርት አለ። ለመቀጠል ከታች ያለውን ጥያቄ ይመልሱ፣ ` +
@@ -1925,6 +1963,17 @@ export async function POST(req: NextRequest) {
     if (session.state === "asset_entry" && session.assetFlow) {
       const state = session.assetFlow as AssetFlowState;
       state.draft = state.draft || {};
+
+      // A report that has been retired since this person started it. Its steps
+      // are gone, so there is nothing to continue — say so and hand back the menu
+      // rather than reading the next message as an answer to a vanished question.
+      if (RETIRED_FLOWS.has(state.kind)) {
+        session.state = "idle";
+        session.assetFlow = undefined;
+        await persist(session);
+        await sendRoleMenu(chatId, user, `ℹ️ <b>${FLOW_TITLE[state.kind]}</b> ሪፖርት ተቋርጧል። እባክዎ የሪፖርት ዓይነት ይምረጡ።`);
+        return NextResponse.json({ ok: true });
+      }
 
       /* ── An unfinished report is never thrown away without being asked ──
 
@@ -2319,6 +2368,40 @@ export async function POST(req: NextRequest) {
             `✅ ${escapeHtml(blockName)} — <b>${readCount}</b> ዕቃ ተቆጥሯል። ` +
               "<i>ያልተሞሉት እንደነበሩ ይቀራሉ።</i>"
           );
+          await advanceAsset(session, chatId, state);
+          return NextResponse.json({ ok: true });
+        }
+
+        /* ── A voucher's amounts: one line per ticked warehouse item ──────────
+           Every ticked item has to come back with a quantity (and, on the
+           GRV, a price, unless one is already known). Whatever is still
+           missing is sent back as a smaller block of just those lines, until
+           nothing is — the ticks are the list of what moved, so an item left
+           blank is a gap, not a zero. */
+        if ((state.kind === "grv" || state.kind === "store_issue") && step.id === STORE_QTY_STEP) {
+          const withCost = state.kind === "grv";
+          const parsed = parseStoreVoucherPaste(state.draft, val, withCost);
+          Object.assign(state.draft, parsed.values);
+          const problems = [...parsed.invalid, ...parsed.unknown].slice(0, 6);
+          if (problems.length > 0) {
+            await sendMessage(
+              chatId,
+              `⚠️ እነዚህ መስመሮች አልተነበቡም፦\n${problems.map((p) => `• ${escapeHtml(p)}`).join("\n")}`
+            );
+          }
+          const waiting = itemsAwaiting(state.draft, withCost);
+          session.assetFlow = { ...state };
+          await persist(session);
+          if (waiting.length > 0) {
+            await sendMessage(
+              chatId,
+              `📋 <b>${waiting.length}</b> ዕቃ ${withCost ? "ብዛት ወይም ዋጋ" : "ብዛት"} አልተሞላም። ቅጂውን ሞልተው ይመልሱት።`,
+              { reply_markup: CHANGE_CANCEL_KEYBOARD }
+            );
+            await sendMessage(chatId, `<pre>${escapeHtml(pasteTemplate(state.kind, state.draft, state.step))}</pre>`);
+            return NextResponse.json({ ok: true });
+          }
+          await sendMessage(chatId, `✅ ${tickedStoreItems(state.draft).length} ዕቃ ተመዝግቧል።`);
           await advanceAsset(session, chatId, state);
           return NextResponse.json({ ok: true });
         }

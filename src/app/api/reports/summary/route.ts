@@ -7,7 +7,7 @@ export const maxDuration = 30;
 
 /** GET /api/reports/summary?range=<key> — compact per-department summaries. */
 export async function GET(req: NextRequest) {
-  const range = new URL(req.url).searchParams.get("range") ?? "weekly";
+  const range = new URL(req.url).searchParams.get("range") ?? "monthly";
   if (!isRangeKey(range)) {
     return NextResponse.json({ error: "Unknown range" }, { status: 400 });
   }

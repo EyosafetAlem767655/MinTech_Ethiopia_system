@@ -168,6 +168,9 @@ export default function VoucherPanels({ showStockCheck = true }: { showStockChec
 
 function VoucherCard({ v, items, isGrv }: { v: Voucher; items: Item[]; isGrv: boolean }) {
   const ledgerLines = items.filter((i) => i.ledgerKey);
+  // A GRV always has prices; an SIV has them once its items are costed (the
+  // warehouse list values an issue at the item's cost on the voucher's date).
+  const showCost = isGrv || items.some((i) => i.unitCost != null);
 
   /**
    * What this voucher actually moved, per bag kind.
@@ -255,7 +258,8 @@ function VoucherCard({ v, items, isGrv }: { v: Voucher; items: Item[]; isGrv: bo
                 <th className="p-1.5 text-left font-bold">Description</th>
                 <th className="p-1.5 font-bold">Unit</th>
                 <th className="p-1.5 font-bold">Qty</th>
-                {isGrv && <th className="p-1.5 font-bold">Unit cost</th>}
+                {showCost && <th className="p-1.5 font-bold">Unit cost</th>}
+                {showCost && <th className="p-1.5 font-bold">Total</th>}
                 <th className="p-1.5 text-left font-bold">Stock item</th>
               </tr>
             </thead>
@@ -268,7 +272,8 @@ function VoucherCard({ v, items, isGrv }: { v: Voucher; items: Item[]; isGrv: bo
                   </td>
                   <td className="p-1.5 text-stone-500">{it.unit || "—"}</td>
                   <td className="p-1.5 tabular-nums text-stone-700">{fmt(it.quantity, 3)}</td>
-                  {isGrv && <td className="p-1.5 tabular-nums text-stone-700">{fmt(it.unitCost)}</td>}
+                  {showCost && <td className="p-1.5 tabular-nums text-stone-700">{fmt(it.unitCost)}</td>}
+                  {showCost && <td className="p-1.5 tabular-nums text-stone-700">{fmt(it.totalAmount)}</td>}
                   <td className="p-1.5 text-left">
                     {it.ledgerKey ? (
                       <span className="rounded-full bg-clay-50 px-2 py-0.5 text-[10px] font-bold text-clay-700">
@@ -287,8 +292,8 @@ function VoucherCard({ v, items, isGrv }: { v: Voucher; items: Item[]; isGrv: bo
 
       {ledgerLines.length === 0 && items.length > 0 && (
         <p className="text-[11px] text-stone-400">
-          No line on this voucher was confirmed as a tracked stock item, so it does not move the bag
-          balance.
+          No line on this voucher is a tracked stock item, so it moves neither the bag balance nor the store
+          inventory.
         </p>
       )}
 

@@ -65,7 +65,7 @@ function averageOf(values: (number | null)[]): number | null {
 }
 
 export default function WhitenessPanel() {
-  const [range, setRange] = useState<RangeKey>("weekly");
+  const [range, setRange] = useState<RangeKey>("monthly");
   const [rows, setRows] = useState<Row[] | null>(null);
 
   useEffect(() => {

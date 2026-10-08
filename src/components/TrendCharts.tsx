@@ -44,7 +44,7 @@ export default function TrendCharts({
   metrics?: readonly MetricKey[];
 }) {
   const shown = metrics ? METRICS.filter((m) => metrics.includes(m.key)) : METRICS;
-  const [range, setRange] = useState<(typeof RANGES)[number]["key"]>("d7");
+  const [range, setRange] = useState<(typeof RANGES)[number]["key"]>("d30");
   const [metric, setMetric] = useState<(typeof METRICS)[number]>(shown[0] ?? METRICS[0]);
   const data = series[range] || [];
 

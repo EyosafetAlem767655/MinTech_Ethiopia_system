@@ -14,8 +14,8 @@ export const dynamic = "force-dynamic";
  * window the panel says it is showing in full.
  */
 export async function GET(req: Request) {
-  const param = new URL(req.url).searchParams.get("range") || "weekly";
-  const { start } = rangeWindow(isRangeKey(param) ? param : "weekly");
+  const param = new URL(req.url).searchParams.get("range") || "monthly";
+  const { start } = rangeWindow(isRangeKey(param) ? param : "monthly");
 
   const rows = await sql<Record<string, unknown>[]>`
     select id as _id, date, date_label as "dateLabel", received, issued, stock,

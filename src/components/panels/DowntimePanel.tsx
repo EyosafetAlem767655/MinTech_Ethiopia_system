@@ -41,7 +41,7 @@ const REASON_TONE: Record<string, string> = {
 };
 
 export default function DowntimePanel() {
-  const [range, setRange] = useState<RangeKey>("weekly");
+  const [range, setRange] = useState<RangeKey>("monthly");
   const [rows, setRows] = useState<Row[] | null>(null);
   const [unavailable, setUnavailable] = useState(false);
 

@@ -8,7 +8,6 @@ import { isDepartmentKey, type DepartmentKey } from "@/lib/departments";
 import BagControlPanel from "@/components/panels/BagControlPanel";
 import RawMaterialDailyPanel from "@/components/panels/RawMaterialDailyPanel";
 import StoreInventoryPanel from "@/components/panels/StoreInventoryPanel";
-import DeliveryReportPanel from "@/components/panels/DeliveryReportPanel";
 import ProductionPanels from "@/components/panels/ProductionPanels";
 import StockOnHandPanel from "@/components/panels/StockOnHandPanel";
 import DowntimePanel from "@/components/panels/DowntimePanel";
@@ -24,7 +23,7 @@ import SalesAnalyticsPanel from "@/components/panels/SalesAnalyticsPanel";
 /**
  * Detailed reports per department, below the range summary. The company report
  * formats come first (production grid, stock status, raw-material received,
- * deliveries, purchased items), then the existing operational panels.
+ * vouchers), then the existing operational panels.
  */
 /**
  * Panels that must keep the full width of the page on a desktop.
@@ -44,7 +43,6 @@ const FULL_WIDTH = new Set<ComponentType>([
   StockOnHandPanel,
   RawMaterialDailyPanel,
   StoreInventoryPanel,
-  DeliveryReportPanel,
   VoucherPanels,
   FinanceVouchers,
   FinancePanels,
@@ -59,12 +57,11 @@ const PANELS: Record<DepartmentKey, ComponentType[]> = {
   // inventory rather than output and now live on the asset tab, beside the
   // vouchers that predict them.
   production: [ProductionPanels, DowntimePanel, WhitenessPanel],
-  // The three reports the asset manager files come first, then the wider bag /
+  // The reports the asset manager files come first, then the wider bag /
   // purchase context. Stock status and purchased items are gone: the asset role
   // no longer files either, so a panel for them would only ever show stale rows.
   asset_management: [
     RawMaterialDailyPanel,
-    DeliveryReportPanel,
     // Goods in, goods out, and whether the two agree with the floor. First,
     // because the stock check is the question the rest of the tab answers
     // pieces of.

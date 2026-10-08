@@ -196,6 +196,7 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
     base,
     priceList,
     produced,
+    sales,
     delivered,
     received,
     bagsBoughtLegacy,
@@ -216,8 +217,13 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
     sql<{ m: Record<string, number> }[]>`
       select products as m from production_reports where date >= ${start} and date < ${end}
     `.catch(() => []),
-    // Sold: the delivery reports. sales_receipts.product_ty is free text with no
-    // stated unit, so it cannot be summed per brand without inventing a matcher.
+    // Sold: the sales invoices, tonnes per brand in the same {code: t} shape.
+    sql<{ m: Record<string, number> }[]>`
+      select products as m from sales_invoices where date >= ${start} and date < ${end}
+    `.catch(() => []),
+    // The retired delivery reports — only read for a month with no sales
+    // invoices at all (see soldMap), so a closed month keeps the figure it was
+    // signed off with.
     sql<{ m: Record<string, number> }[]>`
       select products as m from delivery_reports where date >= ${start} and date < ${end}
     `.catch(() => []),
@@ -282,7 +288,10 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
   const usdRate = priceList[0]?.usd_rate == null ? null : n(priceList[0].usd_rate);
 
   const producedMap = sumMaps(produced);
-  const soldMap = sumMaps(delivered);
+  // One source per month, never two: the invoices when there are any, the
+  // delivery reports otherwise. Adding both would double every tonne in a
+  // month where the two overlapped.
+  const soldMap = sumMaps(sales.length > 0 ? sales : delivered);
   /**
    * ONE SOURCE PER MONTH for raw material in and out, never two.
    *

@@ -20,7 +20,6 @@ export type CapabilityKey =
   | "pp_bag_used"
   | "whiteness_check"
   | "raw_material_received"
-  | "finished_goods_delivery"
   // The spare-parts store, counted block by block.
   | "store_count"
   // A delivery of PP bags.
@@ -51,7 +50,7 @@ export type CaptureMode =
   | "capture"
   /** Pasted multi-day operations report. */
   | "ops_paste"
-  /** Guided column-by-column asset report (raw material / delivery / tool request). */
+  /** Guided column-by-column asset report (raw material / vouchers / tool request). */
   | "asset_entry";
 
 export interface Capability {
@@ -181,13 +180,6 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
     captureMode: "asset_entry",
     input: "any",
     question: "🧰 የመጋዘን ዕቃዎችን በክፍል በክፍል እንቆጥራለን። ያልቆጠሩትን ክፍል መዝለል ይችላሉ።",
-  },
-  finished_goods_delivery: {
-    key: "finished_goods_delivery",
-    button: "🚛 የማድረሻ ሪፖርት",
-    captureMode: "asset_entry",
-    input: "any",
-    question: "🚛 የማድረሻ ሪፖርት በደረጃ እናስገባለን።",
   },
   pp_bag_damage: {
     key: "pp_bag_damage",
@@ -371,13 +363,12 @@ export const POSITIONS: Record<PositionKey, Position> = {
     department: "asset_management",
     en: "Raw materials weight report",
     am: "የጥሬ ዕቃ ክብደት ሪፖርት",
-    description: "Reports raw materials received and finished goods delivered, every day.",
+    description: "Reports raw materials received and issued, every day, and keeps the store vouchers.",
     // Deliberately just the two guided flows. The free-text daily report, stock
     // status and material count were left over from before those flows existed
     // and only duplicated, less reliably, what the guided steps now capture.
     capabilities: [
       "raw_material_received",
-      "finished_goods_delivery",
       // The managers asked for every item in the store to be counted. It is the
       // storekeeper who counts it, so it sits with the other store reports —
       // as does the bag delivery they sign for.
@@ -401,6 +392,8 @@ export const POSITIONS: Record<PositionKey, Position> = {
     // raw-material report — exactly the masking the bag damage report caused.
     // raw_material_receipts stays alongside its replacement so days filed
     // before the daily report existed still count as reported.
+    // delivery_reports likewise: the delivery report is retired, but the days
+    // it was filed on still count as reported.
     submissionTables: [
       "raw_material_daily",
       "raw_material_receipts",

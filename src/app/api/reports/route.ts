@@ -10,7 +10,7 @@ export const maxDuration = 30;
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const dept = searchParams.get("dept");
-  const range = searchParams.get("range") ?? "weekly";
+  const range = searchParams.get("range") ?? "monthly";
 
   if (!isDepartmentKey(dept)) {
     return NextResponse.json({ error: "Unknown department" }, { status: 400 });

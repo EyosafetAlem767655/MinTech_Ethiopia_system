@@ -101,8 +101,9 @@ export interface FlowEditResult {
  * list and the validation. A key without one is edited as free text under a
  * decoded label. Order follows the flow, with the step-less keys after it.
  *
- * Photo and paste steps are the only exclusions: a photo is replaced by sending
- * another one and a paste by pasting again, so neither is a value to type over.
+ * Photo, paste and tick-list steps are the only exclusions: a photo is replaced
+ * by sending another one, a paste by pasting again, and ticks by tapping — none
+ * of them is a value to type over.
  */
 export function editableFields(
   kind: AssetFlowKind,
@@ -136,6 +137,13 @@ export function editableFields(
   const all = allStepsFor(kind);
   for (const step of all) {
     if (step.type === "photo" || step.type === "photos" || step.type === "paste") continue;
+    // A tick-list is not a value to type over either: its answer is a list of
+    // positions ("3,7,12"), and a typed correction could only corrupt it. The
+    // amounts it led to are listed as their own fields below.
+    if (step.type === "multichoice") {
+      taken.add(step.id);
+      continue;
+    }
     if (step.when && !step.when(draft) && all.some((o) => o !== step && o.id === step.id)) continue;
     if (answered(step.id)) push(step, stepLabel(step));
   }
@@ -148,6 +156,9 @@ export function editableFields(
     // Extraction hints are the model's suggestion, never an answer, and
     // showing them would invite "correcting" a field that does not exist.
     if (key.endsWith("_hint")) continue;
+    // Likewise the cost an item was already known to have: shown on the card,
+    // pre-filled in the block, but not something the reporter said.
+    if (key.startsWith("hc:")) continue;
     // Numeric where the value is numeric, so a correction is still checked as a
     // number rather than stored as text.
     const numeric = typeof draft[key] === "number" || /^-?\d*\.?\d+$/.test(String(draft[key]));

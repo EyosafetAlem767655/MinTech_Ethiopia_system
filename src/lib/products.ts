@@ -181,6 +181,8 @@ export function ledgerChoices(kinds: readonly LedgerKind[] = ["bag", "material"]
 /** Display name for a ledger key, falling back to the raw key. */
 export function ledgerLabel(kind: string | null, key: string | null): string {
   if (!kind || !key) return "—";
+  // A warehouse-list line: the description already names the item.
+  if (kind === "store") return "🧰 Store";
   if (kind === "bag") {
     const parsed = parseBagLedgerKey(key);
     return parsed ? `${bagLabel(parsed.size, parsed.colour)} PP` : key;

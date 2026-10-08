@@ -53,7 +53,7 @@ const tons = (v: number) => `${(Math.round(v * 100) / 100).toLocaleString()} t`;
 const compact = (v: number) => (v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)}M` : v >= 1000 ? `${Math.round(v / 1000)}k` : String(Math.round(v)));
 
 export default function SalesAnalyticsPanel() {
-  const [range, setRange] = useState<RangeKey>("weekly");
+  const [range, setRange] = useState<RangeKey>("monthly");
   const [data, setData] = useState<SalesAnalytics | null>(null);
   const [error, setError] = useState("");
 

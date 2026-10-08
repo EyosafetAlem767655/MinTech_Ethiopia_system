@@ -1504,7 +1504,6 @@ export interface IngestionExtraction {
     | "production_report"
     | "stock_status"
     | "raw_material_received"
-    | "finished_goods_delivery"
     | "purchase_items"
     | "other";
   fields: Record<string, unknown>;
@@ -1515,7 +1514,7 @@ export interface IngestionExtraction {
 
 const INGESTION_SCHEMA = `Return STRICT JSON:
 {
-  "docType": "receipt" | "purchase_request" | "damage_claim" | "production_report" | "stock_status" | "raw_material_received" | "finished_goods_delivery" | "purchase_items" | "other",
+  "docType": "receipt" | "purchase_request" | "damage_claim" | "production_report" | "stock_status" | "raw_material_received" | "purchase_items" | "other",
   "fields": { ... extracted fields ... },
   "missing": [field names still needed],
   "question": "ONE short friendly question asking for the most important missing field(s)",
@@ -1529,10 +1528,9 @@ Required fields per type:
 - production_report: date (YYYY-MM-DD), fgrNo (the FGR document number), items (array of {product: productCode, tons: number})
 - stock_status: month (e.g. "2026-06" or the sheet's month label), rows (array of {code: productCode, description, category ("finished"|"raw"|"packing"), bBalance (opening balance ton), received (ton), sales (ton), unitPrice (ETB), stockTon (ton on hand), etb (stock value ETB)})
 - raw_material_received: date (YYYY-MM-DD), supplier, dnNo (delivery-note number), truckPlate, mrvNo (material receiving voucher number), items (array of {material, qty: number})
-- finished_goods_delivery: date (YYYY-MM-DD), customer, invoiceNo, paymentType ("cash"|"credit"), deliveryNo, qty (total number), items (array of {product: productCode, qty: number})
 - purchase_items: date (YYYY-MM-DD), description, uom, qty (number), supplier, amount (number, ETB), costCenter, purchaser
 - other: summary
-For the multi-row report types (production_report, stock_status, raw_material_received, finished_goods_delivery) extract EVERY row you can read into the items/rows array. Set complete=true once the header fields and at least one row are present.`;
+For the multi-row report types (production_report, stock_status, raw_material_received) extract EVERY row you can read into the items/rows array. Set complete=true once the header fields and at least one row are present.`;
 
 export async function classifyIngestion(opts: {
   imageBase64?: string;
