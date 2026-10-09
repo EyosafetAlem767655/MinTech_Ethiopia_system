@@ -8,7 +8,7 @@ import {
   checkReceiptQRCode,
   classifyIngestion,
   extractReceiptGemini,
-  extractBankCollections,
+  extractDowntimeSheet,
   extractSalesInvoice,
   verifyRequestLegitimacy,
   type GeminiReceipt,
@@ -35,6 +35,7 @@ import {
   parseQty,
   pasteTemplate,
   RETIRED_FLOWS,
+  DOWNTIME_ROWS_STEP,
   saveAssetReport,
   storeBlockOfStep,
   ticked,
@@ -53,8 +54,7 @@ import { runAfter } from "@/lib/after";
 import { whitenessAlert } from "@/lib/whiteness-alert";
 import { parseRawMaterialPaste } from "@/lib/raw-material-paste";
 import { parsePpBagPaste } from "@/lib/pp-bag-paste";
-import { bankKey, parseBankSheet } from "@/lib/bank-collection-paste";
-import { matchBank } from "@/lib/banks";
+import { downtimeBlock, parseDowntimeSheet, parseReason, type DowntimeRow } from "@/lib/downtime-sheet";
 import { INVOICES_KEY, encodeInvoices, openCreditInvoices } from "@/lib/credit-bot";
 import { SETTLED_TOLERANCE_ETB } from "@/lib/credit";
 import { reconcileBags } from "@/lib/stock-reconciliation";
@@ -891,7 +891,6 @@ const ASSET_FLOW_BY_CAP: Record<string, AssetFlowKind | undefined> = {
   pp_bag_receipt: "pp_bag_receipt",
   downtime: "downtime",
   credit_payment: "credit_payment",
-  bank_collection: "bank_collection",
   base_balance: "base_balance",
   store_issue: "store_issue",
   grv: "grv",
@@ -1339,18 +1338,17 @@ async function extractSalesIntoDraft(
 }
 
 /**
- * Read the monthly bank sheet into the bank list, then carry on.
+ * Read the monthly downtime sheet into the block, then ask for it back.
  *
- * The model copies each bank name exactly as printed; `matchBank` turns that
- * into one of the nineteen entries the rest of the system knows, so "ንግድ ባንክ"
- * and "CBE" land on the same line. A name it cannot place is REPORTED rather
- * than dropped — a bank quietly missing from a month is a figure nobody can
- * find afterwards.
+ * The read is a PREFILL: it becomes the block the person checks and returns,
+ * and only what they return is saved. A row whose reason the parser cannot
+ * place is still written into the block, as printed, so the person sees it and
+ * fixes it rather than it vanishing.
  *
- * Fenced like every other AI call here: whatever fails, the flow carries on to
- * the fill-in block and the month can be typed.
+ * Fenced like every other AI call here: whatever fails, the block is sent with
+ * nothing in it and the month can be typed.
  */
-async function extractBankSheetIntoDraft(
+async function extractDowntimeIntoDraft(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   session: any,
   chatId: string,
@@ -1359,42 +1357,38 @@ async function extractBankSheetIntoDraft(
   const fileIds = (state.photoFileIds || []).slice(0, MAX_FLOW_PHOTOS);
   await sendMessage(chatId, "🔎 ሉሁን እያነበብኩ ነው…");
 
-  let read: Awaited<ReturnType<typeof extractBankCollections>> | null = null;
+  const month = String(state.draft.month || "");
+  let read: Awaited<ReturnType<typeof extractDowntimeSheet>> | null = null;
   try {
     const images: { base64: string; contentType: string }[] = [];
     for (const id of fileIds) {
       const bytes = await getPhotoBase64(id).catch(() => null);
       if (bytes) images.push(bytes);
     }
-    if (images.length > 0) read = await extractBankCollections(images);
+    if (images.length > 0) read = await extractDowntimeSheet(images, month);
   } catch (e) {
-    console.error("extractBankSheetIntoDraft failed:", e);
+    console.error("extractDowntimeIntoDraft failed:", e);
   }
 
-  const filled: string[] = [];
-  const unplaced: string[] = [];
+  const rows: DowntimeRow[] = [];
+  const asPrinted: string[] = [];
   if (read?.ok) {
     for (const line of read.data.lines) {
-      const bank = matchBank(line.bank);
-      if (!bank) {
-        unplaced.push(`${line.bank}: ${Math.round(line.amount).toLocaleString("en-US")}`);
-        continue;
-      }
-      const key = bankKey(bank);
-      // Two lines for one bank on the same sheet are two deposits, not a
-      // correction — they add up.
-      state.draft[key] = (Number(state.draft[key]) || 0) + line.amount;
-      if (!filled.includes(key)) filled.push(key);
+      const reason = parseReason(line.reason);
+      if (reason) rows.push({ day: line.day, hours: line.hours, ...reason, note: line.note });
+      // Kept in the block exactly as read, so the parser flags it when it comes back.
+      else asPrinted.push([String(line.day).padStart(2, "0"), line.hours, line.reason, line.note].filter(Boolean).join(" | "));
     }
   }
+  state.draft.readRows = [downtimeBlock(rows), ...asPrinted].join("\n");
 
   state.extraction = read?.ok
     ? {
         checked: true,
         confidence: read.data.confidence,
         notes: read.data.notes,
-        unmatched: [...read.data.unmatched, ...unplaced].slice(0, 10),
-        filled,
+        unmatched: read.data.unmatched.slice(0, 10),
+        filled: rows.length + asPrinted.length > 0 ? ["rows"] : [],
       }
     : {
         checked: false,
@@ -1405,24 +1399,20 @@ async function extractBankSheetIntoDraft(
         error: read && !read.ok ? read.error : "no sheet could be read back",
       };
 
-  // Straight to the card when something was read; otherwise the block, which is
-  // the same list with nothing in it.
-  state.step = filled.length > 0 ? "review" : "paste";
+  state.step = DOWNTIME_ROWS_STEP;
   session.assetFlow = { ...state };
   await persist(session);
 
-  if (filled.length > 0) {
-    await sendMessage(
-      chatId,
-      `✅ ${filled.length} ባንክ ከሉሁ ተነብቧል (እርግጠኝነት ${state.extraction.confidence}%)።` +
-        (unplaced.length > 0
-          ? `\n⚠️ እነዚህ አልታወቁም፦\n${unplaced.map((u) => `• ${escapeHtml(u)}`).join("\n")}`
-          : "") +
-        "\n<i>ከመመዝገብዎ በፊት ያረጋግጡ።</i>"
-    );
-  } else {
-    await sendMessage(chatId, "ℹ️ ሉሁን ማንበብ አልተቻለም። ከታች ያለውን ቅጂ ሞልተው ይመልሱት።");
-  }
+  const found = rows.length + asPrinted.length;
+  await sendMessage(
+    chatId,
+    read?.ok
+      ? `✅ ${found} መቋረጥ ከሉሁ ተነብቧል (እርግጠኝነት ${read.data.confidence}%)።` +
+          (read.data.unmatched.length
+            ? `\n⚠️ ያልተነበቡ መስመሮች፦\n${read.data.unmatched.map((u) => `• ${escapeHtml(u)}`).join("\n")}`
+            : "")
+      : "ℹ️ ሉሁን ማንበብ አልተቻለም። ቅጂውን ሞልተው ይመልሱት።"
+  );
   await askAssetStep(chatId, state);
 }
 
@@ -2281,6 +2271,10 @@ export async function POST(req: NextRequest) {
             await extractSalesIntoDraft(session, chatId, state);
             return NextResponse.json({ ok: true });
           }
+          if (state.kind === "downtime" && collected.length > 0) {
+            await extractDowntimeIntoDraft(session, chatId, state);
+            return NextResponse.json({ ok: true });
+          }
           await advanceAsset(session, chatId, state);
           return NextResponse.json({ ok: true });
         }
@@ -2406,6 +2400,31 @@ export async function POST(req: NextRequest) {
           return NextResponse.json({ ok: true });
         }
 
+        /* ── The monthly downtime sheet, checked and sent back ──────────────
+           Every line has to read before anything moves on: a month saved
+           with a line silently missing looks exactly like a month with one
+           fewer stoppage. A bad block is answered with what is wrong and the
+           block itself, to correct and resend. */
+        if (state.kind === "downtime" && step.id === DOWNTIME_ROWS_STEP) {
+          const sheet = parseDowntimeSheet(val, String(state.draft.month || ""));
+          if (sheet.bad.length > 0) {
+            await sendMessage(
+              chatId,
+              `⚠️ እነዚህ መስመሮች አልተነበቡም፦\n${sheet.bad.slice(0, 8).map((b) => `• ${escapeHtml(b)}`).join("\n")}\n\n` +
+                "<i>ቅጂውን አርመው ድጋሚ ይላኩ።</i>",
+              { reply_markup: CHANGE_CANCEL_KEYBOARD }
+            );
+            state.draft.readRows = val;
+            session.assetFlow = { ...state };
+            await persist(session);
+            await sendMessage(chatId, `<pre>${escapeHtml(val)}</pre>`);
+            return NextResponse.json({ ok: true });
+          }
+          state.draft[DOWNTIME_ROWS_STEP] = sheet.none ? "-" : downtimeBlock(sheet.rows);
+          await advanceAsset(session, chatId, state);
+          return NextResponse.json({ ok: true });
+        }
+
         // Each pasteable flow has its own parser: the production template has
         // two identically-named product blocks, and the finance ones carry
         // "Talc" as both a brand and a raw material. A shared parser would have
@@ -2419,8 +2438,6 @@ export async function POST(req: NextRequest) {
                 ? parseRawMaterialPaste(val)
                 : state.kind === "pp_bag_receipt"
                   ? parsePpBagPaste(val)
-                  : state.kind === "bank_collection"
-                    ? parseBankSheet(val)
                 : parseFinancePaste(val, { usdRate: state.kind === "price_list" });
         const filled = Object.keys(parsed.values).length;
         // The sales block may be answered by "-" instead: the reporter would
@@ -2469,8 +2486,7 @@ export async function POST(req: NextRequest) {
             state.kind === "production_daily" ||
             state.kind === "base_balance" ||
             state.kind === "raw_material" ||
-            state.kind === "pp_bag_receipt" ||
-            state.kind === "bank_collection";
+            state.kind === "pp_bag_receipt";
           await sendMessage(
             chatId,
             `⚠️ እነዚህ መስመሮች አልተነበቡም፦\n${problems.map((p) => `• ${escapeHtml(p)}`).join("\n")}\n\n` +

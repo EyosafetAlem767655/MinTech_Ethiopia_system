@@ -5,8 +5,7 @@ import { alarmingCustomers, creditFigures } from "@/lib/credit";
 import { productLabel } from "@/lib/products";
 import { bandLabel, belowSpec, specFor } from "@/lib/whiteness-spec";
 import { STALE_DAYS, groupStatuses, recentCounts } from "@/lib/store-inventory";
-import { downtimeShare, reasonText } from "@/lib/downtime";
-import { bankReportMonth, isBankReportWindow } from "@/lib/finance-report";
+import { isMonthlySheetWindow, monthlySheetMonth } from "@/lib/finance-report";
 
 /**
  * All dashboard numbers. Previously 10 MongoDB aggregation pipelines; now SQL.
@@ -617,54 +616,29 @@ export async function detectExceptions(
     console.warn("detectExceptions: whiteness spec check unavailable", e);
   }
 
-  // 2c-ii. The plant stopped.
+  // 2c. A month closed without its downtime sheet.
   //
-  //     Named at any size and worded the same whether it is twenty minutes or
-  //     eight hours, which is what the owner asked for: a short stop that keeps
-  //     happening is the thing nobody notices, and a list that only shows the
-  //     disasters teaches people the small ones do not count.
+  //     Downtime is filed once a month, off a photographed sheet, so there is
+  //     no "the plant stopped yesterday" to raise any more — the stoppages
+  //     arrive together, for a month already over. What CAN go wrong is the
+  //     sheet never arriving, and that is what is raised. Only while it is
+  //     still being chased: an alert that repeats for four weeks stops being
+  //     read long before the person who could act on it sees it.
   try {
-    const twoDays = addDays(eatDayStart(now), -1);
-    const stops = await sql<
-      { date_label: string; hours: string; reason: string; maintenance_kind: string | null }[]
-    >`
-      select date_label, hours, reason, maintenance_kind
-        from downtime_reports
-       where date >= ${twoDays}
-       order by date desc, created_at desc
-       limit 20
-    `;
-    for (const s of stops) {
-      exceptions.push(
-        `Production stopped on ${s.date_label}: ${downtimeShare(Number(s.hours) || 0)} — ` +
-          `${reasonText(s.reason, s.maintenance_kind)}.`
-      );
-    }
-  } catch (e) {
-    // downtime_reports arrives in 0035.
-    console.warn("detectExceptions: downtime unavailable", e);
-  }
-
-  // 2c-iii. A month closed without its bank collection sheet.
-  //
-  //     Raised only while it is still being chased. An alert that repeats for
-  //     four weeks stops being read long before the person who could act on it
-  //     sees it — the same bound the base-balance escalation carries.
-  try {
-    if (isBankReportWindow(now)) {
-      const month = bankReportMonth(now);
+    if (isMonthlySheetWindow(now)) {
+      const month = monthlySheetMonth(now);
       const filed = await sql<{ month: string }[]>`
-        select month from bank_collections where month = ${month}
+        select month from downtime_months where month = ${month}
       `;
       if (filed.length === 0) {
         exceptions.push(
-          `No bank collection sheet has been filed for ${month}, so what came in through each bank that month is unrecorded.`
+          `No downtime sheet has been filed for ${month}, so the hours production stopped that month are unrecorded.`
         );
       }
     }
   } catch (e) {
-    // bank_collections arrives in 0035.
-    console.warn("detectExceptions: bank collections unavailable", e);
+    // downtime_months arrives in 0038.
+    console.warn("detectExceptions: downtime sheet unavailable", e);
   }
 
   // 2d. A shelf in the spare-parts store has not been counted.

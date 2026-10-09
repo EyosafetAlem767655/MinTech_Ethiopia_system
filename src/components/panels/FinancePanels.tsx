@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import DecideBtn from "@/components/DecideButton";
 import BagStockCheckCard from "@/components/panels/BagStockCheck";
 import { PriceListEditor, StoreCostEditor } from "@/components/panels/UnitCostEditors";
@@ -1178,10 +1178,17 @@ function WhtTab() {
 interface BankMonth {
   month: string;
   banks: Record<string, number>;
+  counts: Record<string, number>;
   total: number;
-  photoIds: string[];
-  reportedBy: string;
-  filedAt: string;
+  sales: number;
+}
+
+interface BankSale {
+  date: string;
+  customer: string;
+  deliveryNo: string | null;
+  bank: string;
+  cash: number;
 }
 
 const MONTH_NAMES = [
@@ -1195,15 +1202,18 @@ const monthName = (m: string) => {
 };
 
 /**
- * What came in through each bank, month by month.
+ * Cash in through each bank, month by month — worked out from the sales report.
  *
- * Months down the page and banks across, because the question this answers is
- * "is CBE still carrying most of it" — which is read down a column, not along a
- * row. The change on the total is shown against the month before it, since a
- * figure with nothing to compare it to is just a number.
+ * Every sale already records its cash and the bank it was deposited in, so
+ * this is a sum of what is on record rather than a second sheet filed once a
+ * month that could disagree with it. Months down the page and banks across,
+ * because the question is "is CBE still carrying most of it", read down a
+ * column. Tap a month to see the sales behind its figures.
  */
 function BankCollectionsTab() {
   const [data, setData] = useState<{ months: BankMonth[]; banks: string[]; unavailable?: boolean } | null>(null);
+  const [open, setOpen] = useState<string | null>(null);
+  const [sales, setSales] = useState<BankSale[] | null>(null);
 
   useEffect(() => {
     fetch("/api/finance/bank-collections")
@@ -1212,52 +1222,75 @@ function BankCollectionsTab() {
       .catch(() => setData({ months: [], banks: [] }));
   }, []);
 
+  useEffect(() => {
+    if (!open) return;
+    setSales(null);
+    fetch(`/api/finance/bank-collections?month=${open}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => setSales(Array.isArray(d?.sales) ? d.sales : []))
+      .catch(() => setSales([]));
+  }, [open]);
+
   if (!data) return <div className="card h-56 animate-pulse bg-clay-50" />;
 
   const { months, banks } = data;
+  const byBank = (rows: BankSale[]) => {
+    const map = new Map<string, BankSale[]>();
+    for (const r of rows) map.set(r.bank, [...(map.get(r.bank) ?? []), r]);
+    return banks.filter((b) => map.has(b)).map((b) => [b, map.get(b)!] as const);
+  };
 
   return (
     <section className="space-y-3">
       <div className="flex flex-wrap items-baseline justify-between gap-2 px-1">
         <h2 className="font-display text-lg font-bold">🏦 Bank collections</h2>
-        <p className="text-[11px] text-stone-400">ETB · one sheet a month</p>
+        <p className="text-[11px] text-stone-400">ETB · cash, by deposit bank · from the sales report</p>
       </div>
+      <p className="px-1 text-[11px] text-stone-500">
+        Each sale&rsquo;s cash, added up by the bank it was deposited in. Credit collections are not
+        included — they record no bank.
+      </p>
 
       {data.unavailable && (
         <p className="card p-3 text-xs text-amber-700">
-          The bank collections table is not in the database yet — apply migration 0035.
+          The sales table is not in the database yet — apply migration 0027.
         </p>
       )}
 
       {months.length === 0 ? (
-        <p className="card p-4 text-sm text-stone-400">
-          No month has been filed yet. Finance files it from the bot with 🏦 የወሩ የባንክ ገቢ.
-        </p>
+        <p className="card p-4 text-sm text-stone-400">No cash sales in the last twelve months.</p>
       ) : (
-        <>
-          <div className="card overflow-x-auto p-0">
-            <table className="w-full min-w-[560px] text-right text-xs">
-              <thead className="bg-clay-50/70 text-[10px] uppercase tracking-wide text-stone-500">
-                <tr>
-                  <th className="p-2 text-left font-bold">Month</th>
-                  {banks.map((b) => (
-                    <th key={b} className="p-2 font-bold">
-                      {b}
-                    </th>
-                  ))}
-                  <th className="p-2 font-bold">Total</th>
-                  <th className="p-2 font-bold">vs prev.</th>
-                </tr>
-              </thead>
-              <tbody>
-                {months.map((m, i) => {
-                  // `months` is newest first, so the month before this one is
-                  // the NEXT row down.
-                  const prev = months[i + 1];
-                  const delta = prev ? m.total - prev.total : null;
-                  return (
-                    <tr key={m.month} className="border-t border-clay-50">
-                      <td className="p-2 text-left font-semibold text-stone-800">{monthName(m.month)}</td>
+        <div className="card overflow-x-auto p-0">
+          <table className="w-full min-w-[560px] text-right text-xs">
+            <thead className="bg-clay-50/70 text-[10px] uppercase tracking-wide text-stone-500">
+              <tr>
+                <th className="p-2 text-left font-bold">Month</th>
+                {banks.map((b) => (
+                  <th key={b} className="p-2 font-bold">
+                    {b}
+                  </th>
+                ))}
+                <th className="p-2 font-bold">Total</th>
+                <th className="p-2 font-bold">vs prev.</th>
+              </tr>
+            </thead>
+            <tbody>
+              {months.map((m, i) => {
+                // `months` is newest first, so the month before this one is the
+                // NEXT row down.
+                const prev = months[i + 1];
+                const delta = prev ? m.total - prev.total : null;
+                const isOpen = open === m.month;
+                return (
+                  <Fragment key={m.month}>
+                    <tr
+                      onClick={() => setOpen(isOpen ? null : m.month)}
+                      className={`cursor-pointer border-t border-clay-50 hover:bg-clay-50/40 ${isOpen ? "bg-clay-50/60" : ""}`}
+                    >
+                      <td className="p-2 text-left font-semibold text-stone-800">
+                        {isOpen ? "▾" : "▸"} {monthName(m.month)}
+                        <span className="ml-1 text-[10px] font-normal text-stone-400">{m.sales} sales</span>
+                      </td>
                       {banks.map((b) => (
                         <td key={b} className="p-2 tabular-nums text-stone-700">
                           {m.banks[b] ? fmt(m.banks[b], 0) : <span className="text-stone-300">—</span>}
@@ -1272,36 +1305,46 @@ function BankCollectionsTab() {
                         {delta === null ? "—" : `${delta >= 0 ? "+" : ""}${fmt(delta, 0)}`}
                       </td>
                     </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-
-          <div className="space-y-1.5">
-            {months.slice(0, 3).map((m) => (
-              <p key={m.month} className="px-1 text-[11px] text-stone-400">
-                {monthName(m.month)} · filed by {m.reportedBy} on {fmtDate(m.filedAt)}
-                {m.photoIds.length > 0 && (
-                  <>
-                    {" · "}
-                    {m.photoIds.map((id, i) => (
-                      <a
-                        key={id}
-                        href={`/api/files/${id}`}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="font-bold text-clay-700 underline"
-                      >
-                        sheet{m.photoIds.length > 1 ? ` ${i + 1}` : ""}
-                      </a>
-                    ))}
-                  </>
-                )}
-              </p>
-            ))}
-          </div>
-        </>
+                    {isOpen && (
+                      <tr className="bg-clay-50/30">
+                        <td colSpan={banks.length + 3} className="p-3 text-left">
+                          {sales === null ? (
+                            <div className="h-16 animate-pulse rounded-lg bg-clay-50" />
+                          ) : sales.length === 0 ? (
+                            <p className="text-stone-400">No cash sales this month.</p>
+                          ) : (
+                            <div className="space-y-3">
+                              {byBank(sales).map(([bank, rows]) => (
+                                <div key={bank}>
+                                  <p className="mb-1 text-[11px] font-bold text-stone-700">
+                                    {bank} · {fmt(rows.reduce((a, r) => a + r.cash, 0), 0)} ETB · {rows.length} sale
+                                    {rows.length === 1 ? "" : "s"}
+                                  </p>
+                                  <table className="w-full text-[11px]">
+                                    <tbody>
+                                      {rows.map((r, j) => (
+                                        <tr key={j} className="border-t border-clay-50">
+                                          <td className="py-1 pr-2 text-stone-500">{r.date}</td>
+                                          <td className="py-1 pr-2 text-stone-700">{r.customer}</td>
+                                          <td className="py-1 pr-2 text-stone-400">{r.deliveryNo ? `Fs ${r.deliveryNo}` : ""}</td>
+                                          <td className="py-1 text-right tabular-nums text-stone-800">{fmt(r.cash, 0)}</td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       )}
     </section>
   );

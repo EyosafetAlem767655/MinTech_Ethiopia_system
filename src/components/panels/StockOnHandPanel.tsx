@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { CartesianGrid, Line, LineChart, Tooltip, XAxis, YAxis } from "recharts";
 import RangeSelector from "@/components/RangeSelector";
-import { AXIS, Chart, ScrollTable, TOOLTIP } from "@/components/panels/TableChart";
+import { Chart, ScrollTable } from "@/components/panels/TableChart";
+import { BrandDayBars, BrandLines } from "@/components/panels/BrandCharts";
 import { RANGES, rangeWindow, type Bucket, type RangeKey } from "@/lib/ranges";
 import { BAG_KINDS, PRODUCTION_PRODUCTS, bagLabel, orderProducts, productLabel } from "@/lib/products";
 import type { BagSize } from "@/lib/products";
@@ -30,12 +30,8 @@ interface OpsRow {
   bags?: Partial<Record<BagSize, Record<string, number>>>;
 }
 
-const STOCK_INK = "#2a78d6";
-
 const fmtDate = (d: string) => new Date(d).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
 const num = (n?: number) => (n ? (Math.round(n * 100) / 100).toLocaleString() : "");
-const tons = (n: number) => `${(Math.round(n * 100) / 100).toLocaleString()} t`;
-const sum = (m?: Record<string, number>) => Object.values(m || {}).reduce((a, b) => a + Number(b || 0), 0);
 
 /** Calendar day of a timestamp. */
 const dayKey = (iso: string) => new Date(iso).toISOString().slice(0, 10);
@@ -102,18 +98,39 @@ export default function StockOnHandPanel() {
       .sort((a, b) => +new Date(b.date) - +new Date(a.date));
   }, [ops, win]);
 
-  /* Stock is a LEVEL: the closing count for the bucket, never a sum. */
-  const stockSeries = useMemo(() => {
-    const acc = new Map<string, { at: number; tons: number }>();
+  /* Stock is a LEVEL: the closing count for the bucket, never a sum — and one
+     series PER BRAND. A single total line said how much product was on hand
+     but not WHICH, and running out of ETL-9 while ETL-15 piles up reads as a
+     flat line. Each bucket takes its latest count; a brand that count does not
+     mention is left as a gap rather than drawn down to zero. */
+  const { stockSeries, stockBrands, latestLevels } = useMemo(() => {
+    const acc = new Map<string, { at: number; stock: Record<string, number> }>();
     for (const r of stockRows) {
       const k = bucketKey(r.date, bucket);
       const at = new Date(r.date).getTime();
       const prev = acc.get(k);
-      if (!prev || at > prev.at) acc.set(k, { at, tons: sum(r.stock) });
+      if (!prev || at > prev.at) acc.set(k, { at, stock: r.stock || {} });
     }
-    return [...acc.entries()]
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([k, v]) => ({ label: bucketLabel(k, bucket), tons: Math.round(v.tons * 100) / 100 }));
+    const brands = orderProducts(
+      Array.from(
+        new Set([...acc.values()].flatMap((v) => Object.keys(v.stock).filter((c) => Number(v.stock[c]) > 0)))
+      )
+    );
+    const ordered = [...acc.entries()].sort(([a], [b]) => a.localeCompare(b));
+    const series = ordered.map(([k, v]) => {
+      const row: Record<string, string | number> = { label: bucketLabel(k, bucket) };
+      for (const code of brands) {
+        const n = Math.round((Number(v.stock[code]) || 0) * 100) / 100;
+        if (n > 0) row[code] = n;
+      }
+      return row;
+    });
+    const latest = ordered.length ? ordered[ordered.length - 1][1].stock : {};
+    return {
+      stockSeries: series,
+      stockBrands: brands,
+      latestLevels: Object.fromEntries(brands.map((c) => [c, Number(latest[c]) || 0])),
+    };
   }, [stockRows, bucket]);
 
   const stockCols = orderProducts(
@@ -156,25 +173,13 @@ export default function StockOnHandPanel() {
         {RANGES[range].label} · {win.start.toISOString().slice(0, 10)} → {win.end.toISOString().slice(0, 10)}
       </p>
 
+      {/* One day is a bar per brand; longer ranges a line per brand. */}
       <Chart empty={stockSeries.length === 0} emptyLabel="No stock counts in this period.">
-        <LineChart data={stockSeries} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#f3e3dd" vertical={false} />
-          <XAxis dataKey="label" {...AXIS} minTickGap={16} />
-          <YAxis {...AXIS} width={40} tickFormatter={(v: number) => String(Math.round(v))} />
-          <Tooltip
-            cursor={{ stroke: "#d6c3bd", strokeWidth: 1 }}
-            contentStyle={TOOLTIP}
-            formatter={(v: number) => [tons(Number(v)), "Finished stock"]}
-          />
-          <Line
-            type="monotone"
-            dataKey="tons"
-            stroke={STOCK_INK}
-            strokeWidth={2}
-            dot={{ r: 3, fill: STOCK_INK, stroke: "#ffffff", strokeWidth: 2 }}
-            activeDot={{ r: 5, fill: STOCK_INK, stroke: "#ffffff", strokeWidth: 2 }}
-          />
-        </LineChart>
+        {range === "daily" ? (
+          <BrandDayBars totals={latestLevels} valueName="On hand" />
+        ) : (
+          <BrandLines series={stockSeries} brands={stockBrands} />
+        )}
       </Chart>
 
       {/* No column totals: each row is a closing snapshot, so summing them down

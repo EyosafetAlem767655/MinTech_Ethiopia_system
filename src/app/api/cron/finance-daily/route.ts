@@ -8,11 +8,11 @@ import { dailyHeartbeat } from "@/lib/heartbeat";
 import { reportKeyboardFor, sendMessage } from "@/lib/telegram";
 import { describeGap, reconcileBags } from "@/lib/stock-reconciliation";
 import {
-  bankReportMonth,
   eatDayOfMonth,
-  isBankReportWindow,
   isBaseBalanceReminderWindow,
+  isMonthlySheetWindow,
   monthLabel,
+  monthlySheetMonth,
   nextMonth,
 } from "@/lib/finance-report";
 
@@ -73,7 +73,7 @@ export async function GET(req: NextRequest) {
       ok: response.ok,
       summary:
         `WHT SMS sent ${sms.sent ?? 0}, failed ${sms.failed ?? 0}; ` +
-        `${body.bagGaps ?? 0} bag gap(s); bank sheet ${body.bankCollections?.filed ? "filed" : "not filed"}`,
+        `${body.bagGaps ?? 0} bag gap(s); downtime sheet ${body.downtimeSheet?.filed ? "filed" : "not filed"}`,
       detail: body,
     };
   });
@@ -242,32 +242,34 @@ async function handle(): Promise<NextResponse> {
     console.warn("finance-daily: bag reconciliation unavailable", e);
   }
 
-  /* ──────────── 3. The month that just closed, and its bank sheet ────────── */
+  /* ────────── 3. The month that just closed, and its downtime sheet ──────── */
   //
   // Chased at the START of a month, not the end: the sheet covers a month that
   // has already finished. Repeated through the window rather than sent once,
   // for the same reason the opening balance is — a report taken once a month
   // gets one chance to land, and a phone that was off that morning used to mean
   // nobody was told at all.
-  const bankMonth = bankReportMonth(now);
-  let bankReminders = 0;
-  const [bankFiled] = await sql<{ month: string }[]>`
-    select month from bank_collections where month = ${bankMonth}
+  //
+  // "Filed" is a row in downtime_months, not a stoppage: a month with no
+  // stoppages is filed with none, and must not be chased as if it were missing.
+  // (This slot chased the bank sheet until per-bank cash moved onto the sales
+  // report itself.)
+  const sheetMonth = monthlySheetMonth(now);
+  let downtimeReminders = 0;
+  const [sheetFiled] = await sql<{ month: string }[]>`
+    select month from downtime_months where month = ${sheetMonth}
   `.catch(() => []);
 
-  if (isBankReportWindow(now) && !bankFiled) {
-    const financeStaff = employees.filter((u) =>
-      resolveCapabilities(u.positions, u.capabilities).some((c) => c.key === "bank_collection")
+  if (isMonthlySheetWindow(now) && !sheetFiled) {
+    const production = employees.filter((u) =>
+      resolveCapabilities(u.positions, u.capabilities).some((c) => c.key === "downtime")
     );
     const text =
-      `🏦 <b>የ${bankMonth} የባንክ ገቢ</b>
-
-` +
-      `ወሩ ተጠናቋል። በየባንኩ የገባውን ገቢ ያስገቡ።
-` +
-      `<i>የወሩን ሉህ ፎቶ ይላኩ — ተነብቦ ይሞላል።</i>`;
+      `⏱ <b>የ${sheetMonth} የምርት መቋረጥ ሉህ</b>\n\n` +
+      `ወሩ ተጠናቋል። የወሩን የምርት መቋረጥ ሉህ ፎቶ ይላኩ።\n` +
+      `<i>ሉሁ ተነብቦ ይሞላል — እርስዎ ያረጋግጣሉ። ምንም መቋረጥ ካልነበረ "-" ብለው ይመዝግቡ።</i>`;
     await Promise.all(
-      financeStaff.map((u) =>
+      production.map((u) =>
         sendMessage(String(u.chat_id), text, {
           reply_markup: reportKeyboardFor(
             resolveCapabilities(u.positions, u.capabilities).map((c) => c.button)
@@ -275,7 +277,7 @@ async function handle(): Promise<NextResponse> {
         }).catch(() => {})
       )
     );
-    bankReminders = financeStaff.length;
+    downtimeReminders = production.length;
   }
 
   return NextResponse.json({
@@ -289,7 +291,7 @@ async function handle(): Promise<NextResponse> {
       failed: smsFailed,
       alreadySentToday: smsSkipped,
     },
-    bankCollections: { month: bankMonth, filed: Boolean(bankFiled), reminded: bankReminders },
+    downtimeSheet: { month: sheetMonth, filed: Boolean(sheetFiled), reminded: downtimeReminders },
     baseBalance: {
       month: upcoming,
       inReminderWindow: inWindow,

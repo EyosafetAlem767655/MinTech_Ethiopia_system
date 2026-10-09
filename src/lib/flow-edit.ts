@@ -136,7 +136,13 @@ export function editableFields(
   // the label; the field is still listed either way.
   const all = allStepsFor(kind);
   for (const step of all) {
-    if (step.type === "photo" || step.type === "photos" || step.type === "paste") continue;
+    if (step.type === "photo" || step.type === "photos") continue;
+    // A paste step's own answer (the downtime sheet keeps its whole block under
+    // the step id) is corrected by sending the block again, never typed over.
+    if (step.type === "paste") {
+      taken.add(step.id);
+      continue;
+    }
     // A tick-list is not a value to type over either: its answer is a list of
     // positions ("3,7,12"), and a typed correction could only corrupt it. The
     // amounts it led to are listed as their own fields below.
@@ -159,6 +165,8 @@ export function editableFields(
     // Likewise the cost an item was already known to have: shown on the card,
     // pre-filled in the block, but not something the reporter said.
     if (key.startsWith("hc:")) continue;
+    // What the downtime sheet read, before the person checked it.
+    if (key === "readRows") continue;
     // Numeric where the value is numeric, so a correction is still checked as a
     // number rather than stored as text.
     const numeric = typeof draft[key] === "number" || /^-?\d*\.?\d+$/.test(String(draft[key]));

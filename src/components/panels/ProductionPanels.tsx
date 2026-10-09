@@ -1,11 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { CartesianGrid, Legend, Line, LineChart, Tooltip, XAxis, YAxis } from "recharts";
 import RangeSelector from "@/components/RangeSelector";
-import { AXIS, Chart, ScrollTable } from "@/components/panels/TableChart";
+import { Chart, ScrollTable } from "@/components/panels/TableChart";
+import { BrandDayBars, BrandLines } from "@/components/panels/BrandCharts";
 import { RANGES, rangeWindow, type Bucket, type RangeKey } from "@/lib/ranges";
-import { PRODUCTION_PRODUCTS, PRODUCT_COLOR, orderProducts, productLabel } from "@/lib/products";
+import { PRODUCTION_PRODUCTS, orderProducts, productLabel } from "@/lib/products";
 
 /**
  * What the plant produced, and nothing else.
@@ -53,63 +53,6 @@ const bucketLabel = (key: string, bucket: Bucket) =>
   bucket === "month"
     ? new Date(`${key}-01`).toLocaleDateString("en-GB", { month: "short", year: "2-digit" })
     : fmtDate(key);
-
-/**
- * The hover card: the date, then every brand that ran that day, heaviest first,
- * and what they add up to.
- *
- * Sorted by tonnage rather than by the order the lines were declared, because
- * the question being asked at the moment of hovering is "what was this day
- * made of". The total is included so nothing was lost when the single total
- * bar became ten lines.
- */
-function BrandTooltip({
-  active,
-  payload,
-  label,
-}: {
-  active?: boolean;
-  payload?: { dataKey?: string | number; value?: number; color?: string }[];
-  label?: string;
-}) {
-  if (!active || !payload || payload.length === 0) return null;
-  const rows = payload
-    .filter((p) => typeof p.value === "number" && p.value > 0)
-    .sort((a, b) => (b.value || 0) - (a.value || 0));
-  if (rows.length === 0) return null;
-  const total = rows.reduce((a, p) => a + (p.value || 0), 0);
-
-  return (
-    <div className="rounded-xl border border-clay-100 bg-white/95 px-3 py-2 shadow-lg backdrop-blur">
-      <p className="mb-1 text-[11px] font-bold text-stone-800">{label}</p>
-      <table className="text-[11px]">
-        <tbody>
-          {rows.map((p) => (
-            <tr key={String(p.dataKey)}>
-              <td className="pr-2">
-                <span
-                  className="inline-block h-2 w-2 rounded-full align-middle"
-                  style={{ backgroundColor: p.color }}
-                />
-              </td>
-              {/* The label wears text ink, never the series colour — the dot
-                  beside it carries the identity. */}
-              <td className="pr-3 text-stone-600">{productLabel(String(p.dataKey))}</td>
-              <td className="text-right font-bold tabular-nums text-stone-800">{tons(p.value || 0)}</td>
-            </tr>
-          ))}
-          {rows.length > 1 && (
-            <tr className="border-t border-clay-100">
-              <td />
-              <td className="pr-3 pt-1 text-stone-400">Total</td>
-              <td className="pt-1 text-right font-bold tabular-nums text-clay-900">{tons(total)}</td>
-            </tr>
-          )}
-        </tbody>
-      </table>
-    </div>
-  );
-}
 
 export default function ProductionPanels() {
   const [range, setRange] = useState<RangeKey>("monthly");
@@ -206,40 +149,17 @@ export default function ProductionPanels() {
         </p>
       </div>
 
+      {/* One day is a bar per brand — a line over a single day is a lone dot.
+          Longer ranges are a line per brand. */}
       <Chart empty={prodSeries.length === 0} emptyLabel="No production in this period.">
-        <LineChart data={prodSeries} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#f3e3dd" vertical={false} />
-          <XAxis dataKey="label" {...AXIS} minTickGap={16} />
-          <YAxis {...AXIS} width={40} tickFormatter={(v: number) => String(Math.round(v))} />
-          <Tooltip cursor={{ stroke: "#d6c3bd", strokeWidth: 1 }} content={<BrandTooltip />} />
-          {/* A legend whenever there is more than one line: identity must never
-              rest on colour alone. One brand needs none — the heading names it. */}
-          {drawnBrands.length > 1 && (
-            <Legend
-              iconType="plainline"
-              iconSize={12}
-              wrapperStyle={{ fontSize: 11, paddingTop: 4 }}
-              formatter={(code: string) => productLabel(code)}
-            />
-          )}
-          {drawnBrands.map((code) => (
-            <Line
-              key={code}
-              type="monotone"
-              dataKey={code}
-              name={code}
-              stroke={PRODUCT_COLOR[code] || "#6b6a66"}
-              strokeWidth={2}
-              // No dot per point: a quarter of daily readings across ten brands
-              // is a chart made of dots. The active one appears on hover with a
-              // surface ring, so an overlapping pair stays two marks.
-              dot={false}
-              activeDot={{ r: 5, strokeWidth: 2, stroke: "#ffffff" }}
-              connectNulls={false}
-              isAnimationActive={false}
-            />
-          ))}
-        </LineChart>
+        {range === "daily" ? (
+          <BrandDayBars
+            totals={Object.fromEntries(drawnBrands.map((c) => [c, colTotal(c)]))}
+            valueName="Produced"
+          />
+        ) : (
+          <BrandLines series={prodSeries} brands={drawnBrands} />
+        )}
       </Chart>
 
       <ScrollTable minWidth={720} empty={prodRows.length === 0} emptyLabel="No production reports in this period.">

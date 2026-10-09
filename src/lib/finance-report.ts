@@ -88,21 +88,22 @@ export function isBaseBalanceReminderWindow(now: Date = new Date()): boolean {
 }
 
 /**
- * How many days into the month the bank report is chased for.
+ * How many days into the month a sheet for the month just ended is chased for
+ * (today: the monthly downtime sheet).
  *
  * The sheet covers a month that has ENDED, so unlike the opening balance it is
- * chased at the start of the next one. Five days is long enough for the banks
- * to have settled and short enough that the month is still fresh.
+ * chased at the start of the next one. Five days is long enough for the month
+ * to be written up and short enough that it is still fresh.
  */
-export const BANK_REPORT_DAYS = 5;
+export const MONTHLY_SHEET_DAYS = 5;
 
-/** True on the days the previous month's bank report is still being chased. */
-export function isBankReportWindow(now: Date = new Date()): boolean {
-  return eatDayOfMonth(now) <= BANK_REPORT_DAYS;
+/** True on the days the previous month's sheet is still being chased. */
+export function isMonthlySheetWindow(now: Date = new Date()): boolean {
+  return eatDayOfMonth(now) <= MONTHLY_SHEET_DAYS;
 }
 
-/** The month a bank report is owed for right now: the one that just closed. */
-export function bankReportMonth(now: Date = new Date()): string {
+/** The month a monthly sheet is owed for right now: the one that just closed. */
+export function monthlySheetMonth(now: Date = new Date()): string {
   const eat = new Date(now.getTime() + 3 * 3600_000);
   const d = new Date(Date.UTC(eat.getUTCFullYear(), eat.getUTCMonth() - 1, 1));
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;

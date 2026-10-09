@@ -929,56 +929,57 @@ export async function extractReceiptGemini(
   }
 }
 
-/* ─────────────── The monthly bank collection sheet (Gemini) ─────────────────
+/* ─────────────────── The monthly downtime sheet (Gemini) ────────────────────
  *
- * One sheet a month: the banks down one side, what was collected through each
- * against them. A PREFILL, not a verdict — every figure lands on a review card
- * the person corrects before anything is saved, and a bank name the matcher
- * does not recognise is reported rather than guessed at.
+ * One sheet a month, one line per stoppage: the day, the hours lost, and why.
+ * A PREFILL, not a verdict — what is read becomes the block the person checks
+ * and sends back, and only that block is saved. The reason is passed through
+ * as printed; the block parser (downtime-sheet.ts) maps it onto the stored
+ * values, and a reason it cannot place is sent back to be corrected.
  */
 
-export interface BankCollectionLine {
-  /** As printed on the sheet. Resolved to a known bank by the caller. */
-  bank: string;
-  amount: number;
+export interface DowntimeSheetLine {
+  day: number;
+  hours: number;
+  /** As printed — mapped by parseReason in downtime-sheet.ts. */
+  reason: string;
+  note: string;
 }
 
-export interface BankCollectionRead {
-  /** "YYYY-MM" if the sheet names its month; the picker decides regardless. */
-  month: string;
-  lines: BankCollectionLine[];
+export interface DowntimeSheetRead {
+  lines: DowntimeSheetLine[];
   confidence: number;
   notes: string;
   /** Rows it could not read cleanly, copied as printed. */
   unmatched: string[];
 }
 
-export type BankCollectionResult =
-  | { ok: true; data: BankCollectionRead }
-  | { ok: false; error: string };
+export type DowntimeSheetResult = { ok: true; data: DowntimeSheetRead } | { ok: false; error: string };
 
-const GEMINI_BANK_SYSTEM =
-  "You read ONE monthly cash-collection sheet for an Ethiopian minerals company and return STRICT " +
-  "JSON only. The sheet lists banks and the money collected through each of them in that month.\n" +
-  'Return: {"month":"YYYY-MM or empty","lines":[{"bank":"name exactly as printed","amount":number}],' +
+const GEMINI_DOWNTIME_SYSTEM =
+  "You read ONE monthly production-downtime sheet for an Ethiopian minerals plant and return STRICT " +
+  "JSON only. Each row is one stoppage: the day of the month, how many hours production was stopped, " +
+  "and why.\n" +
+  'Return: {"lines":[{"day":number 1-31,"hours":number,"reason":"string","note":"string"}],' +
   '"confidence":0-100,"notes":"","unmatched":["rows you could not read, copied as printed"]}\n' +
-  "Rules: amounts are Ethiopian birr — strip thousands separators and currency words, never round. " +
-  "Copy each bank name EXACTLY as it is printed, in whatever script it is printed in; do not " +
-  "translate, expand or abbreviate it. Ignore any total or subtotal row — totals are computed, not " +
-  "read. A row you cannot read goes in `unmatched` rather than into `lines` with a guessed figure. " +
-  "If the sheet is unreadable return empty lines with a low confidence and say why in `notes`.";
+  "Rules: `day` is the day of the month only (a full date like 05/09/2026 gives 5). `hours` is the " +
+  "time stopped in hours — convert minutes (90 min = 1.5) and start/end times into hours. `reason` is " +
+  "one of: power, maintenance-mechanical, maintenance-electrical, maintenance-both, maintenance, " +
+  "raw-material — choose the closest; if the sheet's wording fits none, copy it as printed. Put any " +
+  "other words on the row (what broke, which line) in `note`. Ignore total rows. A row you cannot " +
+  "read goes in `unmatched`, never into `lines` with a guess. If the sheet is unreadable return empty " +
+  "lines with a low confidence and say why in `notes`.";
 
-export async function extractBankCollections(
+export async function extractDowntimeSheet(
   images: { base64: string; contentType: string }[],
-  caption?: string
-): Promise<BankCollectionResult> {
+  month: string
+): Promise<DowntimeSheetResult> {
   if (images.length === 0) return { ok: false, error: "no images to read" };
 
   const parts: GeminiPart[] = images.slice(0, 5).map((img) => ({
     inline_data: { mime_type: img.contentType || "image/jpeg", data: img.base64 },
   }));
-  parts.push({ text: GEMINI_BANK_SYSTEM + (caption ? `
-Note: ${caption}` : "") });
+  parts.push({ text: `${GEMINI_DOWNTIME_SYSTEM}\nThe sheet is for ${month}.` });
 
   const res = await geminiGenerate([{ role: "user", parts }], { json: true });
   if (!res.ok) return { ok: false, error: res.error || "Gemini call failed" };
@@ -986,25 +987,26 @@ Note: ${caption}` : "") });
 
   try {
     const p = extractJson(res.text);
-    const rawLines = Array.isArray(p.lines) ? p.lines : [];
+    const raw = Array.isArray(p.lines) ? p.lines : [];
     return {
       ok: true,
       data: {
-        month: /^\d{4}-\d{2}$/.test(String(p.month || "")) ? String(p.month) : "",
-        lines: rawLines
+        lines: raw
           .map((l: Record<string, unknown>) => ({
-            bank: String(l?.bank || "").trim(),
-            amount: receiptNum(l?.amount),
+            day: Math.round(Number(l?.day) || 0),
+            hours: receiptNum(l?.hours),
+            reason: String(l?.reason || "").trim(),
+            note: String(l?.note || "").trim(),
           }))
-          // A line with no name or no money is not a reading, it is noise.
-          .filter((l: BankCollectionLine) => l.bank !== "" && l.amount > 0),
+          // A row with no day or no hours is not a reading, it is noise.
+          .filter((l: DowntimeSheetLine) => l.day > 0 && l.hours > 0),
         confidence: Math.max(0, Math.min(100, Math.round(Number(p.confidence) || 50))),
         notes: String(p.notes || ""),
         unmatched: Array.isArray(p.unmatched) ? p.unmatched.map((u: unknown) => String(u)).slice(0, 10) : [],
       },
     };
   } catch (e) {
-    console.error("extractBankCollections could not parse the response:", e);
+    console.error("extractDowntimeSheet could not parse the response:", e);
     return { ok: false, error: "Gemini returned an unreadable response" };
   }
 }
