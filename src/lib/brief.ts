@@ -106,6 +106,9 @@ export async function assembleAndSendBrief(now = new Date()) {
     sentTelegram = !!res?.ok;
   }
 
+  // The phone push is a courtesy on top of the Telegram brief already sent. A
+  // push that fails (a bad VAPID setting, a dead subscription service) must not
+  // fail the brief — it used to, and the brief was then never saved.
   const pushRes = await broadcastPush({
     title: `☀️ የጠዋት ሪፖርት — ${dateLabel}`,
     body:
@@ -114,6 +117,9 @@ export async function assembleAndSendBrief(now = new Date()) {
         : `${numbers.tonsProduced.toFixed(2)} ቶን ተሰርቷል · ${etb(numbers.salesReportedEtb)} ብር ተሸጧል። ሙሉ ሪፖርቱን ለማየት ይጫኑ።`,
     url: "/",
     tag: `brief-${dateLabel}`,
+  }).catch((e) => {
+    console.error("brief push failed:", e);
+    return { sent: 0, failed: 0 };
   });
 
   const [doc] = await sql<{ id: string }[]>`

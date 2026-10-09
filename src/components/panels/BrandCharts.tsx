@@ -19,6 +19,11 @@ import { PRODUCT_COLOR, productLabel } from "@/lib/products";
 /**
  * The per-brand charts shared by Production and Stock on hand.
  *
+ * Both take `width` and `height` and hand them to the chart. They sit inside
+ * Recharts' ResponsiveContainer, which sizes its DIRECT child by injecting
+ * those two props — a wrapper that drops them renders a chart of size zero,
+ * which is exactly how both graphs vanished the first time these shipped.
+ *
  * Two shapes, chosen by how many points there are:
  *   - one day → BrandDayBars: a bar per brand. A line over a single bucket is
  *     a lone dot, which is what the Daily range used to show;
@@ -78,12 +83,22 @@ export function BrandTooltip({
 }
 
 /** One day: a bar per brand, labelled with its tonnage. Brands at zero are left out. */
-export function BrandDayBars({ totals, valueName }: { totals: Record<string, number>; valueName: string }) {
+export function BrandDayBars({
+  totals,
+  valueName,
+  width,
+  height,
+}: {
+  totals: Record<string, number>;
+  valueName: string;
+  width?: number;
+  height?: number;
+}) {
   const data = Object.entries(totals)
     .filter(([, v]) => v > 0)
     .map(([code, v]) => ({ code, label: productLabel(code), tons: Math.round(v * 100) / 100 }));
   return (
-    <BarChart data={data} margin={{ top: 18, right: 8, bottom: 0, left: 0 }}>
+    <BarChart width={width} height={height} data={data} margin={{ top: 18, right: 8, bottom: 0, left: 0 }}>
       <CartesianGrid strokeDasharray="3 3" stroke="#f3e3dd" vertical={false} />
       <XAxis dataKey="label" {...AXIS} interval={0} />
       <YAxis {...AXIS} width={40} tickFormatter={(v: number) => String(Math.round(v))} />
@@ -111,12 +126,16 @@ export function BrandDayBars({ totals, valueName }: { totals: Record<string, num
 export function BrandLines({
   series,
   brands,
+  width,
+  height,
 }: {
   series: Record<string, string | number>[];
   brands: string[];
+  width?: number;
+  height?: number;
 }) {
   return (
-    <LineChart data={series} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+    <LineChart width={width} height={height} data={series} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
       <CartesianGrid strokeDasharray="3 3" stroke="#f3e3dd" vertical={false} />
       <XAxis dataKey="label" {...AXIS} minTickGap={16} />
       <YAxis {...AXIS} width={40} tickFormatter={(v: number) => String(Math.round(v))} />

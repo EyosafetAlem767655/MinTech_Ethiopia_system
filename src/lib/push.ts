@@ -2,12 +2,33 @@ import webpush from "web-push";
 import sql from "@/lib/sql";
 
 let configured = false;
+
+/**
+ * The VAPID subject has to be a URL — "mailto:someone@x.com" or "https://…".
+ * A bare email address (the natural thing to paste into the variable) makes
+ * web-push throw, and that throw used to take the whole morning brief down with
+ * it. A bare address is turned into the mailto: it was meant to be.
+ */
+export function vapidSubject(raw = process.env.VAPID_SUBJECT): string {
+  const s = (raw || "").trim();
+  if (!s) return "mailto:it@mintechethiopia.com";
+  if (/^(mailto:|https?:\/\/)/i.test(s)) return s;
+  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s)) return `mailto:${s}`;
+  return "mailto:it@mintechethiopia.com";
+}
+
 function configure() {
   if (configured) return false;
   const pub = process.env.VAPID_PUBLIC_KEY;
   const priv = process.env.VAPID_PRIVATE_KEY;
   if (!pub || !priv) return false;
-  webpush.setVapidDetails(process.env.VAPID_SUBJECT || "mailto:it@mintechethiopia.com", pub, priv);
+  try {
+    webpush.setVapidDetails(vapidSubject(), pub, priv);
+  } catch (e) {
+    // A bad key must cost the push, never the job that wanted to send it.
+    console.error("push is not configured:", e);
+    return false;
+  }
   configured = true;
   return true;
 }
