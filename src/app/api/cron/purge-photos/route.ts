@@ -3,9 +3,12 @@ import sql from "@/lib/sql";
 import { PHOTO_KEEP_DAYS, purgeProcessedPhotos, undecidedPhotos } from "@/lib/storage";
 import { runJob } from "@/lib/system-jobs";
 import { checkDatabaseUsage } from "@/lib/system-status";
+import { healthSummary, runAllHealthChecks } from "@/lib/api-health";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+// The photo purge, the size check and the API checks (each AI call bounded at
+// 30 s, all in parallel) share this one daily run.
+export const maxDuration = 120;
 
 /**
  * Daily photo clean-up: an uploaded photo goes three months after the thing it
@@ -60,9 +63,16 @@ export async function GET(req: NextRequest) {
         detail: { deleted, days, undecided, dedupeRowsDeleted: Number(dedupe[0]?.count || 0) },
       };
     });
-    return NextResponse.json({ ok: true, ...result.detail, summary: result.summary, database: await sizeCheck() });
+    return NextResponse.json({
+      ok: true,
+      ...result.detail,
+      summary: result.summary,
+      database: await sizeCheck(),
+      apis: await apiCheck(),
+    });
   } catch (e) {
     await sizeCheck();
+    await apiCheck();
     return NextResponse.json({ ok: false, error: e instanceof Error ? e.message : String(e) }, { status: 500 });
   }
 }
@@ -77,5 +87,24 @@ async function sizeCheck(): Promise<string> {
     return (await runJob("db-usage", () => checkDatabaseUsage())).summary;
   } catch (e) {
     return `size check failed: ${e instanceof Error ? e.message : String(e)}`;
+  }
+}
+
+/**
+ * The daily API checks (src/lib/api-health.ts): every outside service this
+ * system leans on, called for real. Recorded as its own job, so one failing
+ * check messages the admins at once — before a person holding receipts finds
+ * out the way the Qwen key was found out.
+ */
+async function apiCheck(): Promise<string> {
+  try {
+    const out = await runJob("api-health", async () => {
+      const results = await runAllHealthChecks();
+      const failed = results.filter((r) => !r.ok && !r.skipped);
+      return { ok: failed.length === 0, summary: healthSummary(results), detail: { results } };
+    });
+    return out.summary;
+  } catch (e) {
+    return `API checks failed to run: ${e instanceof Error ? e.message : String(e)}`;
   }
 }

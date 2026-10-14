@@ -192,6 +192,21 @@ export function toOpenAiTools(tools: unknown): OpenAiTool[] {
  * runs with its defaults, which is a worse answer but still an answer, and the
  * alternative is the whole conversation failing on one malformed call.
  */
+/**
+ * The answer of a reasoning model, without its reasoning.
+ *
+ * Nemotron's reasoning models may write their thinking into the reply inside
+ * <think>…</think> (or leave the opening tag off and only close it). The JSON
+ * the callers parse comes after it; left in, the thinking is the first thing
+ * the parser meets, and a receipt that was read perfectly reads as garbage.
+ */
+export function stripReasoning(text: string): string {
+  let t = text.replace(/<think>[\s\S]*?<\/think>/gi, "");
+  const close = t.toLowerCase().lastIndexOf("</think>");
+  if (close >= 0) t = t.slice(close + "</think>".length);
+  return t.trim();
+}
+
 export function fromOpenAiMessage(message: unknown): {
   text: string;
   calls: { name: string; args: Record<string, unknown> }[];

@@ -961,6 +961,112 @@ function SchemaCheck() {
   );
 }
 
+/**
+ * A button per outside service — Gemini, Nemotron, Qwen, Telegram, the
+ * database — each making one real, minimal call. The same checks run on their
+ * own once a day (the "api-health" job); the card opens on that run's results,
+ * so a failure overnight is on screen before anyone presses anything.
+ */
+interface HealthRow {
+  key: string;
+  label: string;
+  ok: boolean;
+  skipped?: boolean;
+  ms: number;
+  detail: string;
+}
+
+function ApiChecks() {
+  const [checks, setChecks] = useState<{ key: string; label: string }[]>([]);
+  const [results, setResults] = useState<Record<string, HealthRow>>({});
+  const [lastRun, setLastRun] = useState<{ at: string; ok: boolean | null; summary: string | null } | null>(null);
+  const [running, setRunning] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    fetch("/api/admin/health")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!d) return;
+        setChecks(d.checks ?? []);
+        if (d.lastRun) {
+          setLastRun(d.lastRun);
+          setResults(Object.fromEntries((d.lastRun.results as HealthRow[]).map((r) => [r.key, r])));
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const run = async (key?: string) => {
+    const keys = key ? [key] : checks.map((c) => c.key);
+    setRunning((r) => ({ ...r, ...Object.fromEntries(keys.map((k) => [k, true])) }));
+    try {
+      const res = await fetch("/api/admin/health", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(key ? { key } : {}),
+      });
+      const d = await res.json().catch(() => null);
+      for (const r of (d?.results ?? []) as HealthRow[]) setResults((prev) => ({ ...prev, [r.key]: r }));
+    } finally {
+      setRunning((r) => ({ ...r, ...Object.fromEntries(keys.map((k) => [k, false])) }));
+    }
+  };
+
+  if (checks.length === 0) return <div className="card h-14 animate-pulse bg-clay-50" />;
+  const anyRunning = Object.values(running).some(Boolean);
+
+  return (
+    <div className="card space-y-2 p-3">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <div>
+          <p className="text-xs font-bold text-stone-800">🔌 API checks</p>
+          <p className="text-[10px] text-stone-400">
+            {lastRun
+              ? `Automatic, once a day · last run ${new Date(lastRun.at).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}${lastRun.ok === false ? " — something failed" : ""}`
+              : "Automatic, once a day · no run recorded yet"}
+          </p>
+        </div>
+        <button
+          onClick={() => run()}
+          disabled={anyRunning}
+          className="rounded-full bg-clay-700 px-3 py-1 text-[11px] font-bold text-white disabled:opacity-50"
+        >
+          {anyRunning ? "Testing…" : "Test all"}
+        </button>
+      </div>
+      <div className="divide-y divide-clay-50">
+        {checks.map((c) => {
+          const r = results[c.key];
+          const busy = running[c.key];
+          const icon = busy ? "⏳" : !r ? "▫️" : r.skipped ? "➖" : r.ok ? "✅" : "❌";
+          return (
+            <div key={c.key} className="flex items-start justify-between gap-2 py-1.5">
+              <div className="min-w-0">
+                <p className="text-[11px] font-bold text-stone-700">
+                  {icon} {c.label}
+                  {r && !busy && <span className="ml-1 font-normal text-stone-400">{(r.ms / 1000).toFixed(1)} s</span>}
+                </p>
+                {r && !busy && (
+                  <p className={`break-words text-[10px] ${r.ok ? "text-stone-500" : r.skipped ? "text-stone-400" : "text-red-700"}`}>
+                    {r.skipped ? `Not configured — ${r.detail}` : r.detail}
+                  </p>
+                )}
+              </div>
+              <button
+                onClick={() => run(c.key)}
+                disabled={busy}
+                className="shrink-0 rounded-full bg-stone-100 px-2.5 py-1 text-[10px] font-bold text-stone-600 disabled:opacity-50"
+              >
+                {busy ? "…" : "Test"}
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function ErrorsTab() {
   const [rows, setRows] = useState<ErrorRow[] | null>(null);
   const [showResolved, setShowResolved] = useState(false);
@@ -998,6 +1104,9 @@ function ErrorsTab() {
           schema_column_missing rows below it, and reading those without it is
           how the drift went unnoticed for days. */}
       <SchemaCheck />
+      {/* The same place for the same reason: a dead key is the cause of a run of
+          provider errors below, and pressing one button says which. */}
+      <ApiChecks />
 
       <div className="flex items-center justify-between gap-2 px-1">
         <p className="text-[11px] text-stone-500">

@@ -13,7 +13,7 @@ import {
 import { BANKS } from "@/lib/banks";
 import type { SalesInvoiceRead } from "@/lib/sales-invoice";
 import type { GeminiCall, GeminiCallResult, GeminiContent, GeminiPart } from "@/lib/llm-types";
-import { fromOpenAiMessage, hasImages, toOpenAiMessages, toOpenAiTools } from "@/lib/llm-crossing";
+import { fromOpenAiMessage, hasImages, stripReasoning, toOpenAiMessages, toOpenAiTools } from "@/lib/llm-crossing";
 
 /* ─────────────────────────────── AI providers ──────────────────────────────
  * Text (chat, morning brief, report extraction) → NVIDIA Nemotron-3.
@@ -26,8 +26,25 @@ import { fromOpenAiMessage, hasImages, toOpenAiMessages, toOpenAiTools } from "@
 const NVIDIA_BASE = envValue("NVIDIA_BASE_URL") || "https://integrate.api.nvidia.com/v1";
 export const TEXT_MODEL = envValue("NEMOTRON_MODEL") || "nvidia/nemotron-3-ultra-550b-a55b";
 
-const QWEN_BASE = envValue("QWEN_BASE_URL") || "https://dashscope-intl.aliyuncs.com/compatible-mode/v1";
-export const VISION_MODEL = envValue("QWEN_MODEL") || "qwen-vl-max-latest";
+/**
+ * Where Qwen is served from. The key says: an NVIDIA key ("nvapi-…") means
+ * Qwen through NVIDIA's catalogue, on NVIDIA's endpoint, under NVIDIA's model
+ * name; anything else is Alibaba's DashScope. Sending an NVIDIA key to
+ * DashScope is exactly the "401 Incorrect API key" the receipt reader hit.
+ * QWEN_BASE_URL / QWEN_MODEL still override both.
+ */
+export const QWEN_ON_NVIDIA = !envValue("QWEN_BASE_URL") && envValue("QWEN_API").startsWith("nvapi-");
+const QWEN_BASE =
+  envValue("QWEN_BASE_URL") ||
+  (QWEN_ON_NVIDIA ? NVIDIA_BASE : "https://dashscope-intl.aliyuncs.com/compatible-mode/v1");
+export const VISION_MODEL =
+  envValue("QWEN_MODEL") || (QWEN_ON_NVIDIA ? "qwen/qwen2.5-vl-72b-instruct" : "qwen-vl-max-latest");
+/**
+ * Nemotron that can SEE — the image fallback when every Gemini model is down.
+ * Same NVIDIA key and endpoint as the text model; this one reads images.
+ */
+export const NEMOTRON_VISION_MODEL =
+  envValue("NEMOTRON_VISION_MODEL") || "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning";
 
 // Google Gemini — the ONLY reader for sales receipts. Uses the NATIVE
 // generateContent REST API (not the OpenAI-compat shim, which can be flaky with
@@ -234,6 +251,22 @@ export function textAI(): OpenAI {
     _textKey = apiKey;
   }
   return _textClient;
+}
+
+let _nvVisionClient: OpenAI | null = null;
+let _nvVisionKey = "";
+/**
+ * The NVIDIA client for images. Its own instance only for the longer timeout:
+ * a photo of a receipt takes a reasoning model longer than a line of text.
+ */
+export function nvidiaVisionAI(): OpenAI | null {
+  const apiKey = nvidiaKey();
+  if (!apiKey) return null;
+  if (!_nvVisionClient || _nvVisionKey !== apiKey) {
+    _nvVisionClient = new OpenAI({ apiKey, baseURL: NVIDIA_BASE, timeout: 60000, maxRetries: 0 });
+    _nvVisionKey = apiKey;
+  }
+  return _nvVisionClient;
 }
 
 let _visionClient: OpenAI | null = null;
@@ -481,7 +514,7 @@ function geminiErrorReason(body: string): string {
  * attempts — a reused controller is already aborted, and the second attempt
  * would fail instantly while looking like a real timeout.
  */
-async function geminiAttempt(
+export async function geminiAttempt(
   contents: GeminiContent[],
   opts: {
     json?: boolean;
@@ -614,11 +647,13 @@ async function geminiAttempt(
 /**
  * The backup providers, when every Gemini model is busy at once.
  *
- * Two of them, because the jobs differ: Nemotron reads and writes text and can
- * call functions; Qwen-VL reads images. Both are already configured in this
- * system for other work, both speak the OpenAI-compatible API, and the mapping
- * between the two request shapes lives in llm-crossing.ts where it can be
- * tested without a network.
+ * Text goes to Nemotron, which reads and writes text and can call functions.
+ * Images go to Nemotron's vision model on the same NVIDIA key, then Qwen-VL if
+ * its key is set. Qwen was the only image fallback until its key was found
+ * dead on the morning every Gemini model was busy, and a sales receipt could
+ * not be read at all. All of them speak the OpenAI-compatible API, and the
+ * mapping between the two request shapes lives in llm-crossing.ts where it can
+ * be tested without a network.
  *
  * This is not a nicety. Gemini has gone fully busy — all five models, inside
  * one minute — and before this that meant the dashboard chat, the receipt
@@ -634,40 +669,80 @@ async function crossProvider(
 ): Promise<GeminiCallResult | null> {
   const images = hasImages(contents);
 
-  // An image goes to the vision model, and only there. Nemotron cannot see one,
-  // and handing it a conversation with the pictures stripped out would answer
-  // confidently about a receipt it never read.
-  const useVision = images;
-  const key = useVision ? envValue("QWEN_API") : nvidiaKey();
-  const model = useVision ? VISION_MODEL : TEXT_MODEL;
+  // An image goes to a model that can SEE it, and only there: the text model
+  // handed a conversation with the pictures stripped out would answer
+  // confidently about a receipt it never read. Nemotron's vision model comes
+  // first — it uses the same NVIDIA key as the text fallback, which is the one
+  // key this deployment is known to hold — then Qwen-VL, if its key is set.
+  if (images) {
+    // Vision models are not asked to call functions: nothing here needs it,
+    // and guessing at how they would answer is how a call comes back wrong.
+    if (opts.tools) return null;
+    const errors: string[] = [];
+    let lastModel = "";
+    for (const v of [
+      { model: NEMOTRON_VISION_MODEL, client: () => nvidiaVisionAI(), reasoning: true },
+      { model: VISION_MODEL, client: () => (envValue("QWEN_API") ? visionAI() : null), reasoning: false },
+    ]) {
+      const client = v.client();
+      if (!client) continue;
+      lastModel = v.model;
+      const res = await openAiAttempt(client, v.model, contents, opts, [], v.reasoning);
+      if (res.ok) return res;
+      errors.push(`${v.model}: ${res.error}`);
+    }
+    if (!lastModel) return null;
+    return { ok: false, text: "", calls: [], error: errors.join(" · "), model: lastModel };
+  }
+
+  const key = nvidiaKey();
   if (!key) return null;
+  const tools = opts.tools ? toOpenAiTools(opts.tools) : [];
+  return openAiAttempt(textAI(), TEXT_MODEL, contents, opts, tools, false);
+}
 
-  // Qwen is not asked to call functions. A vision model being handed a tool
-  // schema is a combination nothing in this system needs, and guessing at how
-  // it would answer is how a tool call comes back subtly wrong.
-  const tools = !useVision && opts.tools ? toOpenAiTools(opts.tools) : [];
-  if (useVision && opts.tools) return null;
-
+/**
+ * One call to an OpenAI-compatible provider, in Gemini's result shape.
+ *
+ * `reasoning` marks a model that thinks out loud before it answers. Its
+ * thinking is capped (so a receipt does not take a minute) and stripped from
+ * the reply, so the JSON parser downstream sees only the answer.
+ */
+async function openAiAttempt(
+  client: OpenAI,
+  model: string,
+  contents: GeminiContent[],
+  opts: NonNullable<Parameters<typeof geminiAttempt>[1]>,
+  tools: ReturnType<typeof toOpenAiTools>,
+  reasoning: boolean
+): Promise<GeminiCallResult> {
   const messages = toOpenAiMessages(contents, {
     systemInstruction: opts.systemInstruction,
     // Forced JSON and tools are mutually exclusive for Gemini too — asking for
     // both would contradict itself here in the same way.
     json: opts.json && !opts.tools,
   });
-  if (messages.length === 0) return null;
+  if (messages.length === 0) return { ok: false, text: "", calls: [], error: "nothing to send", model };
 
   try {
-    const client = useVision ? visionAI() : textAI();
     const res = await client.chat.completions.create({
       model,
       messages: messages as never,
       temperature: opts.temperature ?? 0,
-      ...(opts.maxOutputTokens ? { max_tokens: opts.maxOutputTokens } : {}),
+      ...(reasoning
+        ? // NVIDIA's own parameters for its reasoning models: a bounded think,
+          // and room after it for the whole JSON answer.
+          ({ max_tokens: Math.max(opts.maxOutputTokens ?? 0, 4096), reasoning_budget: 1024 } as Record<string, unknown>)
+        : opts.maxOutputTokens
+          ? { max_tokens: opts.maxOutputTokens }
+          : {}),
       ...(tools.length > 0 ? { tools, tool_choice: "auto" as const } : {}),
-    });
+    } as never);
 
-    const choice = res.choices?.[0]?.message;
-    const { text, calls } = fromOpenAiMessage(choice);
+    const choice = (res as { choices?: { message?: unknown }[] }).choices?.[0]?.message;
+    const parsed = fromOpenAiMessage(choice);
+    const calls = parsed.calls;
+    const text = reasoning ? stripReasoning(parsed.text) : parsed.text;
     // A reply with neither text nor a call is a failure wearing a 200.
     if (!text.trim() && calls.length === 0) {
       return { ok: false, text: "", calls: [], error: "empty response", model };
