@@ -3,6 +3,7 @@ import { envValue } from "@/lib/env";
 import {
   GEMINI_MODEL,
   NEMOTRON_VISION_MODEL,
+  QWEN_ENDPOINT,
   QWEN_ON_NVIDIA,
   TEXT_MODEL,
   VISION_MODEL,
@@ -14,7 +15,7 @@ import {
 import { stripReasoning } from "@/lib/llm-crossing";
 import { checkSchema } from "@/lib/schema-check";
 import { smsDiagnostics } from "@/lib/sms";
-import { vapidSubject } from "@/lib/push";
+import { vapidKey, vapidSubject } from "@/lib/push";
 
 /**
  * One test per outside service this system depends on.
@@ -77,7 +78,39 @@ export function isHealthKey(v: unknown): v is HealthKey {
 const RED_PIXEL =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
 
-const TIMEOUT_MS = 30_000;
+/** Long enough for Gemini's receipt budget; every check runs in parallel. */
+const TIMEOUT_MS = 50_000;
+
+/**
+ * A provider saying "full right now" — NVIDIA's shared endpoint answers 503
+ * "overloaded" / "request limit reached" in bursts. One such answer is not the
+ * key or the model being wrong, so the check waits and asks once more before
+ * calling it a failure; otherwise the daily run would message the admins about
+ * every passing spike.
+ */
+const isBusy = (msg: string) => /\b(503|429)\b|overloaded|request limit|resource ?exhausted|high demand|unavailable/i.test(msg);
+const RETRY_AFTER_MS = 4_000;
+
+async function withRetry(
+  work: () => Promise<{ ok: boolean; detail: string; skipped?: boolean }>
+): Promise<{ ok: boolean; detail: string; skipped?: boolean }> {
+  let first: { ok: boolean; detail: string; skipped?: boolean };
+  try {
+    first = await work();
+  } catch (e) {
+    first = { ok: false, detail: short(e) };
+  }
+  if (first.ok || first.skipped || !isBusy(first.detail)) return first;
+  await new Promise((r) => setTimeout(r, RETRY_AFTER_MS));
+  try {
+    const second = await work();
+    return second.ok
+      ? { ...second, detail: `${second.detail} (busy at first, answered on retry)` }
+      : { ...second, detail: `${second.detail} (busy twice — the provider is overloaded, not misconfigured)` };
+  } catch (e) {
+    return { ok: false, detail: `${short(e)} (busy twice — the provider is overloaded, not misconfigured)` };
+  }
+}
 
 const short = (e: unknown) => (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 300);
 
@@ -151,7 +184,9 @@ const CHECKS: Record<HealthKey, () => Promise<{ ok: boolean; detail: string; ski
           parts: [{ inline_data: { mime_type: "image/png", data: RED_PIXEL } }, { text: "What colour is this image? One word." }],
         },
       ],
-      { model: GEMINI_MODEL, maxOutputTokens: 20, timeoutMs: 25_000 }
+      // Room to think: Gemini 3 models spend output tokens reasoning first,
+      // and a 20-token cap can end the answer before it starts.
+      { model: GEMINI_MODEL, maxOutputTokens: 512, timeoutMs: 40_000 }
     );
     return res.ok
       ? { ok: true, detail: `${res.model || GEMINI_MODEL} → "${res.text.trim().slice(0, 40)}"` }
@@ -163,8 +198,16 @@ const CHECKS: Record<HealthKey, () => Promise<{ ok: boolean; detail: string; ski
   nemotron_vision: () => askOpenAi(nvidiaVisionAI, NEMOTRON_VISION_MODEL, true, true),
 
   qwen_vision: async () => {
-    const r = await askOpenAi(() => (envValue("QWEN_API") ? visionAI() : null), VISION_MODEL, true);
-    return { ...r, detail: `${r.detail}${QWEN_ON_NVIDIA ? " (via NVIDIA)" : ""}` };
+    // The endpoint and model are named on a failure: a 404 is either the wrong
+    // address or a model name that provider does not serve, and only those two
+    // values tell which.
+    const where = `${VISION_MODEL} at ${QWEN_ENDPOINT}${QWEN_ON_NVIDIA ? " (NVIDIA key)" : ""}`;
+    try {
+      const r = await askOpenAi(() => (envValue("QWEN_API") ? visionAI() : null), VISION_MODEL, true);
+      return r.ok || r.skipped ? r : { ...r, detail: `${r.detail} — ${where}` };
+    } catch (e) {
+      return { ok: false, detail: `${short(e)} — ${where}` };
+    }
   },
 
   telegram: async () => {
@@ -189,13 +232,24 @@ const CHECKS: Record<HealthKey, () => Promise<{ ok: boolean; detail: string; ski
       return { ok: false, skipped: true, detail: "VAPID keys not set" };
     }
     const webpush = (await import("web-push")).default;
-    webpush.setVapidDetails(vapidSubject(), envValue("VAPID_PUBLIC_KEY"), envValue("VAPID_PRIVATE_KEY"));
+    const pub = vapidKey(envValue("VAPID_PUBLIC_KEY"));
+    const priv = vapidKey(envValue("VAPID_PRIVATE_KEY"));
+    try {
+      webpush.setVapidDetails(vapidSubject(), pub, priv);
+    } catch (e) {
+      // A real VAPID public key is 87 characters and a private one 43. A
+      // different length means a different value was pasted, not a format slip.
+      return { ok: false, detail: `${short(e)} — public key ${pub.length} chars (should be 87), private ${priv.length} (should be 43)` };
+    }
     return { ok: true, detail: `keys valid · subject ${vapidSubject()}` };
   },
 };
 
+/** The calls to an outside provider, which can be busy rather than broken. */
+const RETRIED: ReadonlySet<HealthKey> = new Set<HealthKey>(["gemini", "nemotron_text", "nemotron_vision", "qwen_vision"]);
+
 export function runHealthCheck(key: HealthKey): Promise<HealthResult> {
-  return timed(key, CHECKS[key]);
+  return timed(key, RETRIED.has(key) ? () => withRetry(CHECKS[key]) : CHECKS[key]);
 }
 
 /** Every check, side by side. Failures never stop the others. */

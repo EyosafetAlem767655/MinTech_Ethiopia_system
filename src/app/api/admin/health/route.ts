@@ -3,7 +3,8 @@ import { HEALTH_KEYS, HEALTH_LABEL, isHealthKey, runAllHealthChecks, runHealthCh
 import { latestJobRuns } from "@/lib/system-jobs";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+// A busy provider is asked twice (see api-health.ts), each bounded.
+export const maxDuration = 120;
 
 /**
  * The API checks behind Settings → Errors. Behind the dashboard password like

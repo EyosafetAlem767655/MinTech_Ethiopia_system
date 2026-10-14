@@ -37,6 +37,8 @@ export const QWEN_ON_NVIDIA = !envValue("QWEN_BASE_URL") && envValue("QWEN_API")
 const QWEN_BASE =
   envValue("QWEN_BASE_URL") ||
   (QWEN_ON_NVIDIA ? NVIDIA_BASE : "https://dashscope-intl.aliyuncs.com/compatible-mode/v1");
+/** Where Qwen requests go — shown by the API check when one fails. */
+export const QWEN_ENDPOINT = QWEN_BASE;
 export const VISION_MODEL =
   envValue("QWEN_MODEL") || (QWEN_ON_NVIDIA ? "qwen/qwen2.5-vl-72b-instruct" : "qwen-vl-max-latest");
 /**

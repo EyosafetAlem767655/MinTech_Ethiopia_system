@@ -17,10 +17,28 @@ export function vapidSubject(raw = process.env.VAPID_SUBJECT): string {
   return "mailto:it@mintechethiopia.com";
 }
 
+/**
+ * A VAPID key as web-push insists on it: URL-safe base64, no "=" padding.
+ *
+ * Keys printed by most generators are standard base64 with padding, and some
+ * are pasted with quotes or a newline. Every one of those is the same key
+ * written differently, and web-push refusing it took the phone notifications
+ * down without anything else noticing.
+ */
+export function vapidKey(raw: string | undefined): string {
+  return (raw || "")
+    .trim()
+    .replace(/^["']|["']$/g, "")
+    .replace(/\s+/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
 function configure() {
   if (configured) return false;
-  const pub = process.env.VAPID_PUBLIC_KEY;
-  const priv = process.env.VAPID_PRIVATE_KEY;
+  const pub = vapidKey(process.env.VAPID_PUBLIC_KEY);
+  const priv = vapidKey(process.env.VAPID_PRIVATE_KEY);
   if (!pub || !priv) return false;
   try {
     webpush.setVapidDetails(vapidSubject(), pub, priv);
