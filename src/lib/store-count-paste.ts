@@ -75,6 +75,13 @@ export function storeBlockTemplate(block: StoreBlockKey): string {
   return lines.join("\n");
 }
 
+/** One group's block — the unit a count is now sent in (see STORE_COUNT_STEPS). */
+export function storeGroupTemplate(group: string): string {
+  const g = GROUP_BY_KEY.get(group);
+  if (!g) return "";
+  return [header(g.label), ...itemsOfGroup(group).map((item) => `${templateName(item)}=`)].join("\n");
+}
+
 /* ─────────────────────────────── Parsing ──────────────────────────────────── */
 
 /** Loose key match: case, spaces, hyphens, dots and asterisks are all noise. */
@@ -147,8 +154,8 @@ function parseNumber(raw: string): number | null {
   // A unit typed alongside the figure is tolerated ("200 l", "4 pcs"): the
   // template does not put one there any more, but people write them.
   const cleaned = raw
-    .replace(/\((?:pcs|l|m)\)/gi, "")
-    .replace(/\b(pcs|ltr|lt|l|m)\b/gi, "")
+    .replace(/\((?:pcs|l|m|roll|pak|kg|set|bottle|drum|tin|berga)\)/gi, "")
+    .replace(/\b(pcs|ltr|lt|l|m|roll|pak|kg|set|bottle|drum|tin|berga)\b/gi, "")
     .replace(/,/g, "")
     .trim();
   if (!cleaned) return null;
@@ -178,6 +185,42 @@ export interface ParsedStoreCount {
  * reported rather than matched — that is how a 16A breaker figure would end up
  * against the single-phase one, and nothing afterwards could tell.
  */
+/**
+ * Read one group's block. The group is known from the step, so every line is
+ * matched within it — no heading needed, and a name that exists in another
+ * group can never be filed there by mistake.
+ */
+export function parseStoreGroupPaste(group: string, text: string): ParsedStoreCount {
+  const values: Record<string, number> = {};
+  const unknown: string[] = [];
+  const invalid: string[] = [];
+  const names = BY_GROUP.get(group);
+  const ownHeading = norm(GROUP_BY_KEY.get(group)?.label ?? "");
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || isGuidance(line)) continue;
+    if (!/[=:]/.test(line)) {
+      // Its own heading copied back is expected; anything else is reported.
+      if (ownHeading && norm(line).includes(ownHeading)) continue;
+      unknown.push(line);
+      continue;
+    }
+    const pair = splitPair(line);
+    if (!pair) continue;
+    const [name, value] = pair;
+    const key = names?.get(norm(name));
+    if (!key) {
+      unknown.push(line);
+      continue;
+    }
+    if (!value.trim()) continue;
+    const qty = parseNumber(value);
+    if (qty === null) invalid.push(line);
+    else values[itemKey(key)] = qty;
+  }
+  return { values, unknown, invalid };
+}
+
 export function parseStoreCountPaste(block: StoreBlockKey, text: string): ParsedStoreCount {
   const values: Record<string, number> = {};
   const unknown: string[] = [];

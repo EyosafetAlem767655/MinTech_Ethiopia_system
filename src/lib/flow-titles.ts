@@ -36,6 +36,7 @@ export type AssetFlowKind =
   | "bank_collection"
   // Finance.
   | "price_list"
+  | "pp_bag_price"
   | "wht_holder"
   // Sales: one transaction, read off its receipts and completed by hand.
   | "sales_invoice";
@@ -57,6 +58,7 @@ export const FLOW_TITLE: Record<AssetFlowKind, string> = {
   credit_payment: "💳 የብድር ክፍያ መከታተያ",
   bank_collection: "🏦 የወሩ የባንክ ገቢ",
   price_list: "💲 የወሩ unit price ዝርዝር",
+  pp_bag_price: "🧺 PP Bag unit price update",
   wht_holder: "📄 WHT ደረሰኝ ያዢ",
   sales_invoice: "🧾 የሽያጭ ሪፖርት",
 };

@@ -38,6 +38,8 @@ export type CapabilityKey =
   | "grv"
   // Finance.
   | "price_list"
+  // Just the PP bag prices, without re-filing the whole monthly list.
+  | "pp_bag_price"
   | "wht_holder";
 
 /** How the bot collects a capability's payload. */
@@ -213,6 +215,13 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
     captureMode: "asset_entry",
     input: "any",
     question: "💲 የወሩን የነጠላ ዋጋ ዝርዝር በደረጃ እናስገባለን።",
+  },
+  pp_bag_price: {
+    key: "pp_bag_price",
+    button: "🧺 PP Bag unit price update",
+    captureMode: "asset_entry",
+    input: "any",
+    question: "🧺 የዚህን ወር የPP ከረጢት የነጠላ ዋጋ እናዘምናለን። የተቀየረውን ብቻ ያርሙ።",
   },
   wht_holder: {
     key: "wht_holder",
@@ -423,7 +432,7 @@ export const POSITIONS: Record<PositionKey, Position> = {
     // The GRV replaced the tool purchase report and the PP bag receipt: one
     // voucher covers every kind of purchase, PP bags included as line items.
     // No bank sheet any more: per-bank cash is read off the sales report itself.
-    capabilities: ["grv", "price_list", "wht_holder", "credit_payment"],
+    capabilities: ["grv", "price_list", "pp_bag_price", "wht_holder", "credit_payment"],
     // Purchases are on-demand and the price list is monthly, so there is no
     // daily obligation to chase. The WHT chase is its own cron, not a reminder.
     dailyRequired: false,

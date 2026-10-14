@@ -83,6 +83,22 @@ export function baseBalanceTemplate(): string {
   return block([H_BRANDS, H_MATERIALS, H_BAGS]);
 }
 
+/**
+ * Just the six PP bag kinds, for the "PP Bag unit price update" button.
+ *
+ * Pre-filled with this month's current price per kind (`prices` is keyed
+ * "kg25:Yellow", as monthly_price_lists stores it), so the person changes only
+ * what moved and sends the rest back as it was. A kind with no price yet is
+ * left blank — and a line sent back blank keeps whatever it had.
+ */
+export function ppBagPriceTemplate(prices: Record<string, number> = {}): string {
+  const lines = BAG_KINDS.map(({ size, colour }) => {
+    const v = Number(prices[`${size}:${colour}`]) || 0;
+    return `${bagLabel(size, colour)} PP bag=${v > 0 ? v : ""}`;
+  });
+  return [H_BAGS_PRICE, ...lines].join("\n");
+}
+
 export function priceListTemplate(): string {
   return [block([H_BRANDS_PRICE, H_MATERIALS_PRICE, H_BAGS_PRICE]), "USD=" ].join("\n");
 }

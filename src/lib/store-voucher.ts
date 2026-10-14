@@ -1,7 +1,8 @@
 import {
   GROUP_BY_KEY,
   STORE_BLOCKS,
-  itemsOfBlock,
+  groupsOfBlock,
+  itemsOfGroup,
   type StoreBlockKey,
   type StoreItem,
 } from "@/lib/store-items";
@@ -32,13 +33,21 @@ export const STORE_OTHER = "other";
 export const STORE_QTY_STEP = "stQty";
 
 /**
- * Step id of one department's item tick-list.
+ * Step ids of the tick-lists: one per department (its groups), one per group
+ * (its items).
  *
- * No ":" in it: the tick callback is `pick:<flow>:<step>:<value>`, split on
+ * Three levels rather than two because Telegram allows 100 buttons on one
+ * keyboard, and with the full store list Electrical alone holds 169 items. A
+ * group is at most a few dozen.
+ *
+ * No ":" in them: the tick callback is `pick:<flow>:<step>:<value>`, split on
  * colons, so a colon in the step id would cut the step name in half.
  */
-export function storeItemsStep(block: StoreBlockKey): string {
-  return `stItems_${block}`;
+export function storeGroupsStep(block: StoreBlockKey): string {
+  return `stGroups_${block}`;
+}
+export function storeItemsStep(group: string): string {
+  return `stItems_${group}`;
 }
 
 /** Draft keys for one ticked item: quantity, unit cost typed, current cost known. */
@@ -63,16 +72,27 @@ export function wantsOtherItems(draft: Record<string, string | number>): boolean
   return tickedValues(draft, STORE_DEPTS_STEP).includes(STORE_OTHER);
 }
 
+/** The groups ticked within one department, in list order. */
+export function tickedGroups(draft: Record<string, string | number>, block: StoreBlockKey): string[] {
+  const chosen = tickedValues(draft, storeGroupsStep(block));
+  return groupsOfBlock(block).map((g) => g.key).filter((k) => chosen.includes(k));
+}
+
+/** The tick-list of a department's groups — the value is the group key. */
+export function storeGroupChoices(block: StoreBlockKey): { label: string; value: string }[] {
+  return groupsOfBlock(block).map((g) => ({ label: `${g.label} (${itemsOfGroup(g.key).length})`, value: g.key }));
+}
+
 /**
- * The tick-list for one department.
+ * The tick-list for one group.
  *
- * The VALUE is the item's position in its department, not its key: keys like
- * "elec2:Cable 4x16mm" would push the callback past Telegram's 64-byte limit.
- * The position only has to survive the few minutes the ticks live in a draft —
- * it is turned back into the permanent key before anything is saved.
+ * The VALUE is the item's position in its group, not its key: keys like
+ * "elec2:industrial-socket-16a" would push the callback past Telegram's 64-byte
+ * limit. The position only has to survive the few minutes the ticks live in a
+ * draft — it is turned back into the permanent key before anything is saved.
  */
-export function storeItemChoices(block: StoreBlockKey): { label: string; value: string }[] {
-  return itemsOfBlock(block).map((item, i) => ({ label: itemLabel(item), value: String(i) }));
+export function storeItemChoices(group: string): { label: string; value: string }[] {
+  return itemsOfGroup(group).map((item, i) => ({ label: templateName(item), value: String(i) }));
 }
 
 /** "BEARING 6210", "Oils Gas OIL (l)" — the group says what a bare "16A" is. */
@@ -81,15 +101,16 @@ export function itemLabel(item: StoreItem): string {
   return `${group} ${templateName(item)}`;
 }
 
-/** Every ticked item, in list order, across the ticked departments. */
+/** Every ticked item, in list order, across the ticked departments and groups. */
 export function tickedStoreItems(draft: Record<string, string | number>): StoreItem[] {
   const out: StoreItem[] = [];
   for (const block of tickedBlocks(draft)) {
-    const items = itemsOfBlock(block);
-    const picks = new Set(tickedValues(draft, storeItemsStep(block)).map(Number));
-    items.forEach((item, i) => {
-      if (picks.has(i)) out.push(item);
-    });
+    for (const group of tickedGroups(draft, block)) {
+      const picks = new Set(tickedValues(draft, storeItemsStep(group)).map(Number));
+      itemsOfGroup(group).forEach((item, i) => {
+        if (picks.has(i)) out.push(item);
+      });
+    }
   }
   return out;
 }

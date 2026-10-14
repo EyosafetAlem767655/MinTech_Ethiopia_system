@@ -20,6 +20,7 @@ import {
 import { DEPARTMENTS, DEPARTMENT_KEYS, type DepartmentKey } from "@/lib/departments";
 import { eatDateLabel } from "@/lib/dates";
 import { rangeWindow, RANGES, type RangeKey } from "@/lib/ranges";
+import { cashSales, creditTotals, millions, monthNetWorth } from "@/lib/finance-summary";
 
 export interface Kpi {
   label: string;
@@ -169,18 +170,21 @@ async function departmentKpis(
     }
 
     case "finance": {
-      const [r] = await sql<{ batches: string; spend: string; wht: string }[]>`
-        select
-          (select count(*) from finance_purchase_batches
-            where date >= ${start} and date < ${end})                       as batches,
-          (select coalesce(sum(total_amount), 0) from finance_purchase_batches
-            where date >= ${start} and date < ${end} and currency = 'ETB')  as spend,
-          (select count(*) from wht_holders where status = 'pending')       as wht
-      `.catch(() => [{ batches: "0", spend: "0", wht: "0" }]);
+      // Money owed and money held — the credit book and the monthly report —
+      // rather than the purchase-batch count, which has had no writer since
+      // the GRV replaced it and read 0 every day.
+      const [credit, cash, worth, [w]] = await Promise.all([
+        creditTotals(),
+        cashSales(start, end),
+        monthNetWorth(),
+        sql<{ wht: string }[]>`select count(*) as wht from wht_holders where status = 'pending'`.catch(() => [{ wht: "0" }]),
+      ]);
       return [
-        { icon: "🧾", label: "Purchase batches", value: Number(r.batches) || 0 },
-        { icon: "💰", label: "Purchase value", value: Number(r.spend) || 0, prefix: "ETB " },
-        { icon: "📄", label: "WHT receipts owed", value: Number(r.wht) || 0 },
+        { icon: "💳", label: "Credit outstanding (ETB)", value: credit.outstanding },
+        { icon: "⏰", label: `Overdue · ${credit.overdueSales} sale${credit.overdueSales === 1 ? "" : "s"} (ETB)`, value: credit.overdue },
+        { icon: "💵", label: "Cash sales (ETB)", value: cash },
+        { icon: "📊", label: "Stock net worth this month (ETB)", value: worth },
+        { icon: "📄", label: "WHT receipts owed", value: Number(w?.wht) || 0 },
       ];
     }
   }
@@ -507,28 +511,32 @@ async function departmentActivityCounts(
       };
     }
     case "finance": {
-      // Both of these do have a section on the finance tab (tool purchases, WHT
-      // receipt holders), so they stay. The total also counts the vouchers,
-      // which the tab renders through the same panel asset management uses.
-      const [[a], [v]] = await Promise.all([
-        sql<{ batches: string; wht: string }[]>`
+      // The card shows what Finance watches — the credit book and this month's
+      // report — in millions so a nine-digit birr figure fits a tile. The
+      // "updates" badge counts what Finance actually files now: credit
+      // collections, goods received and price lists.
+      const [credit, cash, worth, [a]] = await Promise.all([
+        creditTotals(),
+        cashSales(start, end),
+        monthNetWorth(),
+        sql<{ payments: string; grv: string; prices: string }[]>`
           select
-            (select count(*) from finance_purchase_batches where date >= ${start} and date < ${end}) as batches,
-            (select count(*) from wht_holders where created_at >= ${start} and created_at < ${end}) as wht
-        `.catch(() => [{ batches: "0", wht: "0" }]),
-        sql<{ grv: string; siv: string }[]>`
-          select
-            (select count(*) from goods_receiving_vouchers where date >= ${start} and date < ${end}) as grv,
-            (select count(*) from store_issue_vouchers     where date >= ${start} and date < ${end}) as siv
-        `.catch(() => [{ grv: "0", siv: "0" }]),
+            (select count(*) from sales_credit_payments    where created_at >= ${start} and created_at < ${end}) as payments,
+            (select count(*) from goods_receiving_vouchers where date >= ${start} and date < ${end})             as grv,
+            (select count(*) from monthly_price_lists      where updated_at >= ${start} and updated_at < ${end}) as prices
+        `.catch((e) => {
+          missing(e);
+          return [{ payments: "0", grv: "0", prices: "0" }];
+        }),
       ]);
-      const batches = Number(a.batches) || 0;
-      const wht = Number(a.wht) || 0;
+      const M = { suffix: " M", decimals: 2 } as const;
       return {
-        total: batches + wht + (Number(v.grv) || 0) + (Number(v.siv) || 0),
+        total: (Number(a.payments) || 0) + (Number(a.grv) || 0) + (Number(a.prices) || 0),
         headline: [
-          { icon: "🧾", label: "Purchase batches", value: batches },
-          { icon: "📄", label: "WHT holders", value: wht },
+          { icon: "💳", label: "Credit outstanding (ETB)", value: millions(credit.outstanding), ...M },
+          { icon: "⏰", label: `Overdue · ${credit.overdueSales} sale${credit.overdueSales === 1 ? "" : "s"}`, value: millions(credit.overdue), ...M },
+          { icon: "💵", label: "Cash sales (ETB)", value: millions(cash), ...M },
+          { icon: "📊", label: "Stock net worth, this month", value: millions(worth), ...M },
         ],
       };
     }

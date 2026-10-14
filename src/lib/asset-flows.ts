@@ -59,6 +59,7 @@ import {
   bagFinanceKey,
   baseBalanceTemplate,
   brandKey,
+  ppBagPriceTemplate,
   materialKey,
   priceListTemplate,
 } from "@/lib/finance-paste";
@@ -67,20 +68,26 @@ import { PURCHASE_DEPARTMENTS } from "@/lib/purchase-departments";
 import { rawMaterialTemplate, sectionMap } from "@/lib/raw-material-paste";
 import {
   STORE_BLOCKS,
+  STORE_GROUPS,
   STORE_ITEMS,
   STORE_ITEM_BY_KEY,
+  groupsOfBlock,
   itemsOfBlock,
+  itemsOfGroup,
   type StoreBlockKey,
 } from "@/lib/store-items";
-import { itemKey, storeBlockTemplate } from "@/lib/store-count-paste";
+import { itemKey, storeGroupTemplate } from "@/lib/store-count-paste";
 import {
   STORE_DEPTS_STEP,
   STORE_OTHER,
   STORE_QTY_STEP,
   itemLabel,
   storeCostKey,
+  storeGroupChoices,
+  storeGroupsStep,
   storeItemChoices,
   storeItemsStep,
+  tickedGroups,
   storeLines,
   storeVoucherTemplate,
   tickedBlocks,
@@ -250,7 +257,11 @@ const RAW_MATERIAL_STEPS: AssetStep[] = [
 /* ─────────────────────── The spare-parts store count ──────────────────────── */
 
 /**
- * One paste step per block, each skippable.
+ * Sections → groups → one paste step per ticked GROUP, each skippable.
+ *
+ * Per group, not per section, since the full store list: Electrical alone is
+ * 169 items, and a block that long passes Telegram's 4,096-character message
+ * limit — and nobody counts a whole department in one go anyway.
  *
  * A count is routinely partial in BOTH directions — the bearings today and the
  * electrics on Thursday, and within a block only the shelves that moved. So the
@@ -272,20 +283,31 @@ const STORE_COUNT_STEPS: AssetStep[] = [
     type: "multichoice",
     choices: STORE_BLOCKS.map((b) => ({ label: `${b.icon} ${b.label}`, value: b.key })),
   },
-  ...STORE_BLOCKS.map<AssetStep>((b) => ({
-    id: storeBlockStep(b.key),
-    label: b.label,
-    // Only the ticked sections are sent. Walking somebody through all three
+  ...STORE_BLOCKS.flatMap<AssetStep>((b) => [
+    {
+      id: countGroupsStep(b.key),
+      label: `${b.label} groups`,
+      prompt: `${b.icon} <b>${b.label}</b> — የትኞቹን ዓይነቶች ቆጠሩ? ይንኩ፣ ከዚያ ✅ ጨርሻለሁ ይጫኑ።`,
+      type: "multichoice" as const,
+      choices: groupsOfBlock(b.key).map((g) => ({ label: `${g.label} (${itemsOfGroup(g.key).length})`, value: g.key })),
+      when: (d: Record<string, string | number>) => ticked(d, STORE_SECTIONS_STEP).includes(b.key),
+    },
+    // Only the ticked groups are sent. Walking somebody through every shelf
     // when they came to update the oils is how a count sheet gets filled in
     // from memory.
-    when: (d: Record<string, string | number>) => ticked(d, STORE_SECTIONS_STEP).includes(b.key),
-    prompt:
-      `${b.icon} <b>${b.label}</b> — የቆጠሩትን ብቻ ይሙሉ።\n\n` +
-      "<i>ያልቆጠሩትን ባዶ ይተዉት — ምንም አይቀየርም። ምንም ከሌለ 0 ይፃፉ።</i>\n" +
-      '<i>ይህን ክፍል ጨርሶ ካልቆጠሩ "-" ይላኩ።</i>',
-    type: "paste",
-    skippable: true,
-  })),
+    ...groupsOfBlock(b.key).map<AssetStep>((g) => ({
+      id: storeGroupStep(g.key),
+      label: g.label,
+      when: (d: Record<string, string | number>) =>
+        ticked(d, STORE_SECTIONS_STEP).includes(b.key) && ticked(d, countGroupsStep(b.key)).includes(g.key),
+      prompt:
+        `${b.icon} <b>${g.label}</b> — የቆጠሩትን ብቻ ይሙሉ።\n\n` +
+        "<i>ያልቆጠሩትን ባዶ ይተዉት — ምንም አይቀየርም። ምንም ከሌለ 0 ይፃፉ።</i>\n" +
+        '<i>ይህን ዓይነት ጨርሶ ካልቆጠሩ "-" ይላኩ።</i>',
+      type: "paste",
+      skippable: true,
+    })),
+  ]),
 ];
 
 /**
@@ -312,15 +334,20 @@ export function toggleTick(current: string, value: string): string {
   return set.join(",");
 }
 
-/** Step id for one block of the store count. */
-export function storeBlockStep(block: StoreBlockKey): string {
-  return `block:${block}`;
+/** Step id of a section's group tick-list on the store count (no ":" — see tickKeyboard). */
+export function countGroupsStep(block: StoreBlockKey): string {
+  return `cntGroups_${block}`;
 }
 
-/** The block a store-count step is for, or null. */
-export function storeBlockOfStep(stepId: string): StoreBlockKey | null {
-  const key = stepId.startsWith("block:") ? stepId.slice(6) : "";
-  return STORE_BLOCKS.some((b) => b.key === key) ? (key as StoreBlockKey) : null;
+/** Step id for one group's paste block on the store count. */
+export function storeGroupStep(group: string): string {
+  return `grp:${group}`;
+}
+
+/** The group a store-count paste step is for, or null. */
+export function storeGroupOfStep(stepId: string): string | null {
+  const key = stepId.startsWith("grp:") ? stepId.slice(4) : "";
+  return STORE_GROUPS.some((g) => g.key === key) ? key : null;
 }
 
 /**
@@ -803,15 +830,28 @@ function storeListSteps(direction: "in" | "out"): AssetStep[] {
         { label: "📝 ሌላ (ከዝርዝሩ ውጪ)", value: STORE_OTHER },
       ],
     },
-    ...STORE_BLOCKS.map<AssetStep>((b) => ({
-      id: storeItemsStep(b.key),
-      label: `${b.label} items`,
-      prompt: `${b.icon} <b>${b.label}</b> — ${verb} ዕቃዎች ይንኩ፣ ከዚያ ✅ ጨርሻለሁ ይጫኑ።`,
-      type: "multichoice",
-      choices: storeItemChoices(b.key),
-      columns: 2,
-      when: (d: Record<string, string | number>) => tickedBlocks(d).includes(b.key),
-    })),
+    // Department → its groups → each ticked group's items. Telegram allows 100
+    // buttons on a keyboard; a whole department no longer fits on one.
+    ...STORE_BLOCKS.flatMap<AssetStep>((b) => [
+      {
+        id: storeGroupsStep(b.key),
+        label: `${b.label} groups`,
+        prompt: `${b.icon} <b>${b.label}</b> — ዕቃዎቹ ከየትኞቹ ዓይነቶች ናቸው? ይንኩ፣ ከዚያ ✅ ጨርሻለሁ ይጫኑ።`,
+        type: "multichoice" as const,
+        choices: storeGroupChoices(b.key),
+        when: (d: Record<string, string | number>) => tickedBlocks(d).includes(b.key),
+      },
+      ...groupsOfBlock(b.key).map<AssetStep>((g) => ({
+        id: storeItemsStep(g.key),
+        label: `${g.label} items`,
+        prompt: `${b.icon} <b>${g.label}</b> — ${verb} ዕቃዎች ይንኩ፣ ከዚያ ✅ ጨርሻለሁ ይጫኑ።`,
+        type: "multichoice",
+        choices: storeItemChoices(g.key),
+        columns: 2,
+        when: (d: Record<string, string | number>) =>
+          tickedBlocks(d).includes(b.key) && tickedGroups(d, b.key).includes(g.key),
+      })),
+    ]),
     {
       id: STORE_QTY_STEP,
       label: "Amounts",
@@ -949,6 +989,27 @@ const PRICE_LIST_STEPS: AssetStep[] = [
   })),
   { id: "usdRate", prompt: "💱 የዶላር ምንዛሪ (1 USD ስንት ብር)? ካልታወቀ 0 ይፃፉ።", type: "number" },
 ];
+
+/* ───────────────────── PP bag unit prices only (finance) ─────────────────── */
+
+/**
+ * The six PP bag prices, on their own — without re-filing the whole monthly
+ * price list. One block, pre-filled with this month's prices (seeded into the
+ * draft as `old:<kind>` when the flow opens); only the bag prices change on
+ * save, and only the ones sent back with a figure.
+ */
+const PP_BAG_PRICE_STEPS: AssetStep[] = [
+  {
+    id: "paste",
+    prompt:
+      "🧺 የዚህ ወር የPP ከረጢት ዋጋዎች እነዚህ ናቸው። የተቀየረውን ያርሙ፣ ቅጂውን ይመልሱት።\n\n" +
+      "<i>ዋጋውን በብር (ለአንድ ከረጢት) ከ = በኋላ ይፃፉ። ያልተቀየረውን እንዳለ ይተዉት።</i>",
+    type: "paste",
+  },
+];
+
+/** Draft key holding a bag kind's price before this update, for the card. */
+export const oldBagPriceKey = (kind: string) => `old:${kind}`;
 
 /* ──────────────────────── WHT receipt holder (finance) ────────────────────── */
 
@@ -1398,6 +1459,7 @@ const STEPS: Record<AssetFlowKind, AssetStep[]> = {
   pp_bag_used: PP_BAG_USED_STEPS,
   whiteness_check: WHITENESS_STEPS,
   price_list: PRICE_LIST_STEPS,
+  pp_bag_price: PP_BAG_PRICE_STEPS,
   wht_holder: WHT_HOLDER_STEPS,
   sales_invoice: SALES_INVOICE_STEPS,
 };
@@ -1418,6 +1480,14 @@ export function pasteTemplate(
   if (kind === "production_daily") return productionTemplate();
   if (kind === "base_balance") return baseBalanceTemplate();
   if (kind === "price_list") return priceListTemplate();
+  if (kind === "pp_bag_price") {
+    const prices: Record<string, number> = {};
+    for (const k of BAG_KIND_KEYS) {
+      const v = Number(draft[oldBagPriceKey(k)]) || 0;
+      if (v > 0) prices[k] = v;
+    }
+    return ppBagPriceTemplate(prices);
+  }
   if (kind === "sales_invoice") return salesTemplate(draft);
   if (kind === "raw_material") return rawMaterialTemplate();
   if (kind === "pp_bag_receipt") return ppBagTemplate();
@@ -1432,8 +1502,8 @@ export function pasteTemplate(
     return storeVoucherTemplate(draft, kind === "grv");
   }
   if (kind === "store_count") {
-    const block = storeBlockOfStep(step);
-    return block ? storeBlockTemplate(block) : "";
+    const group = storeGroupOfStep(step);
+    return group ? storeGroupTemplate(group) : "";
   }
   return "";
 }
@@ -2011,6 +2081,19 @@ export function assetPreview(state: AssetFlowState): string {
       .join("\n");
   }
 
+  if (state.kind === "pp_bag_price") {
+    const rows = BAG_KINDS.map(({ size, colour }) => {
+      const kind = `${size}:${colour}`;
+      const before = Number(d[oldBagPriceKey(kind)]) || 0;
+      const after = Number(d[bagFinanceKey(size, colour)]) || 0;
+      const label = `${bagLabel(size, colour)} PP`;
+      if (!after) return `${label}: ${before ? money(before) : "—"} <i>(አልተቀየረም)</i>`;
+      if (after === before) return `${label}: <b>${money(after)}</b>`;
+      return `${label}: ${before ? money(before) : "—"} → <b>${money(after)}</b>`;
+    });
+    return [`🧺 <b>የ${monthLabel()} PP ከረጢት ዋጋ</b> (ብር/ቁጥር)`, "", ...rows].join("\n");
+  }
+
   if (state.kind === "price_list") {
     const rows = priceListItems().map(
       (it) => `${it.label}: <b>${money(Number(d[priceKey(it.key)]) || 0)}</b>`
@@ -2301,19 +2384,19 @@ export async function saveAssetReport(
 
   if (state.kind === "store_count") {
     // Only what was actually counted. An item with no figure is absent from the
-    // row entirely, and a block with no figures at all is absent from `groups`
+    // row entirely, and a group with no figures at all is absent from `groups`
     // — which is what keeps "counted and found none" (a stored 0) apart from
     // "not counted this time" on the dashboard.
     const groups: string[] = [];
     const items: Record<string, number> = {};
-    for (const b of STORE_BLOCKS) {
-      const blockItems = itemsOfBlock(b.key).filter((i) => {
+    for (const g of STORE_GROUPS) {
+      const groupItems = itemsOfGroup(g.key).filter((i) => {
         const v = d[itemKey(i.key)];
         return v !== undefined && v !== "";
       });
-      if (blockItems.length === 0) continue;
-      groups.push(b.key);
-      for (const i of blockItems) items[i.key] = Number(d[itemKey(i.key)]) || 0;
+      if (groupItems.length === 0) continue;
+      groups.push(g.key);
+      for (const i of groupItems) items[i.key] = Number(d[itemKey(i.key)]) || 0;
     }
 
     const date = reportDate(d.date);
@@ -2632,6 +2715,26 @@ export async function saveAssetReport(
         prices = excluded.prices,
         usd_rate = excluded.usd_rate,
         reported_by = excluded.reported_by,
+        updated_at = now()
+      returning id`;
+    return { id: row.id, table: "monthly_price_lists" };
+  }
+
+  if (state.kind === "pp_bag_price") {
+    const month = monthLabel();
+    // Only the bag kinds sent back with a figure. Merged into the month's row
+    // with jsonb `||`, so the products, raw materials and dollar rate the
+    // monthly list holds are never touched — and a month with no list yet gets
+    // a row carrying just the bag prices.
+    const bags = jsonMap(d, BAG_PREFIX, BAG_KIND_KEYS);
+    if (Object.keys(bags).length === 0) throw new Error("No PP bag price was entered.");
+    const [row] = await sql<{ id: string }[]>`
+      insert into monthly_price_lists (month, prices, reported_by, source)
+      values (${month}, ${sql.json(bags)}, ${reportedBy}, 'telegram')
+      on conflict (month) do update set
+        prices = monthly_price_lists.prices || excluded.prices,
+        reported_by = excluded.reported_by,
+        source = 'telegram',
         updated_at = now()
       returning id`;
     return { id: row.id, table: "monthly_price_lists" };

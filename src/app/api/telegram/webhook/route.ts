@@ -36,8 +36,9 @@ import {
   pasteTemplate,
   RETIRED_FLOWS,
   DOWNTIME_ROWS_STEP,
+  oldBagPriceKey,
   saveAssetReport,
-  storeBlockOfStep,
+  storeGroupOfStep,
   ticked,
   toggleTick,
   stepsFor,
@@ -58,7 +59,7 @@ import { downtimeBlock, parseDowntimeSheet, parseReason, type DowntimeRow } from
 import { INVOICES_KEY, encodeInvoices, openCreditInvoices } from "@/lib/credit-bot";
 import { SETTLED_TOLERANCE_ETB } from "@/lib/credit";
 import { reconcileBags } from "@/lib/stock-reconciliation";
-import { parseStoreCountPaste } from "@/lib/store-count-paste";
+import { parseStoreGroupPaste } from "@/lib/store-count-paste";
 import {
   STORE_QTY_STEP,
   itemsAwaiting,
@@ -71,7 +72,8 @@ import { applySalesExtraction, parseSalesPaste, salesMissing } from "@/lib/sales
 import { applyFlowEdit, describeFlowChanges, editableFields, renderFieldList } from "@/lib/flow-edit";
 import { dailyHeartbeat } from "@/lib/heartbeat";
 import { loadImage, loadImages, telegramFileId } from "@/lib/images";
-import { PRODUCT_ORDER, productLabel } from "@/lib/products";
+import { BAG_KIND_KEYS, PRODUCT_ORDER, productLabel } from "@/lib/products";
+import { monthLabel } from "@/lib/finance-report";
 import { PP_BAG_PHOTO_KIND, processPpDamageReport, ppVerdictMessage } from "@/lib/pp-bag-damage";
 import {
   answerCallbackQuery,
@@ -895,6 +897,7 @@ const ASSET_FLOW_BY_CAP: Record<string, AssetFlowKind | undefined> = {
   store_issue: "store_issue",
   grv: "grv",
   price_list: "price_list",
+  pp_bag_price: "pp_bag_price",
   wht_holder: "wht_holder",
   sales_report: "sales_invoice",
 };
@@ -1523,6 +1526,16 @@ async function startAssetFlow(
       return false;
     }
     draft[INVOICES_KEY] = encodeInvoices(open);
+  }
+  // The bag price block opens with this month's prices already in it, so the
+  // person corrects what moved instead of retyping six figures.
+  if (kind === "pp_bag_price") {
+    const [row] = await sql<{ prices: Record<string, number> }[]>`
+      select prices from monthly_price_lists where month = ${monthLabel()}
+    `.catch(() => []);
+    for (const [k, v] of Object.entries(row?.prices ?? {})) {
+      if ((BAG_KIND_KEYS as readonly string[]).includes(k) && Number(v) > 0) draft[oldBagPriceKey(k)] = Number(v);
+    }
   }
   const state: AssetFlowState = { kind, step: firstStep(kind), draft };
   session.state = "asset_entry";
@@ -2322,7 +2335,7 @@ export async function POST(req: NextRequest) {
            the template left blank". `firstUnanswered` skips paste steps by
            design, and using it here would jump straight to the review card
            after the first block. */
-        const block = state.kind === "store_count" ? storeBlockOfStep(step.id) : null;
+        const block = state.kind === "store_count" ? storeGroupOfStep(step.id) : null;
         if (block) {
           const blockName = step.label || block;
           // Nothing counted in this block. The same outcome as sending it back
@@ -2334,7 +2347,7 @@ export async function POST(req: NextRequest) {
             return NextResponse.json({ ok: true });
           }
 
-          const parsed = parseStoreCountPaste(block, val);
+          const parsed = parseStoreGroupPaste(block, val);
           const readCount = Object.keys(parsed.values).length;
           const blockProblems = [...parsed.invalid, ...parsed.unknown].slice(0, 6);
 
@@ -2486,7 +2499,8 @@ export async function POST(req: NextRequest) {
             state.kind === "production_daily" ||
             state.kind === "base_balance" ||
             state.kind === "raw_material" ||
-            state.kind === "pp_bag_receipt";
+            state.kind === "pp_bag_receipt" ||
+            state.kind === "pp_bag_price";
           await sendMessage(
             chatId,
             `⚠️ እነዚህ መስመሮች አልተነበቡም፦\n${problems.map((p) => `• ${escapeHtml(p)}`).join("\n")}\n\n` +
