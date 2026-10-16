@@ -2,8 +2,6 @@
 
 import { Fragment, useCallback, useEffect, useState } from "react";
 import DecideBtn from "@/components/DecideButton";
-import BagStockCheckCard from "@/components/panels/BagStockCheck";
-import VoucherPanels from "@/components/panels/VoucherPanels";
 import { PriceListEditor, StoreCostEditor } from "@/components/panels/UnitCostEditors";
 import {
   ALARM_TONNES,
@@ -487,19 +485,9 @@ function MonthlyTab() {
       <h3 className="px-1 pt-2 text-xs font-bold uppercase tracking-widest text-stone-400">Unit costs</h3>
       <PriceListEditor month={data.month} onSaved={() => load(data.month)} />
       <StoreCostEditor month={data.month} />
-
-      {/* The bag stock check belongs to a month, so it belongs here — and only
-          here. It used to arrive from the voucher panel below the whole tab,
-          where it sat under the WHT list or the credit table as if it were part
-          of them. It follows the month selected above. */}
-      <h3 className="px-1 pt-2 text-xs font-bold uppercase tracking-widest text-stone-400">Bag stock check</h3>
-      <BagStockCheckCard month={data.month} />
-
-      {/* The vouchers behind the month's purchases and issues — here, and only
-          here, rather than under every finance sub-tab. */}
-      <div className="pt-2">
-        <VoucherPanels showStockCheck={false} />
-      </div>
+      {/* The PP bag stock check and the GRV/SIV voucher lists are asset
+          management's, and live on that tab only: repeated here they competed
+          with the monthly report for the same screen. */}
     </section>
   );
 }
