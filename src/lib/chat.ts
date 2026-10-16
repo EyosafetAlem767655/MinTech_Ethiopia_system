@@ -8,6 +8,7 @@ import {
   pendingPurchaseRequests,
 } from "@/lib/metrics";
 import sql from "@/lib/sql";
+import { withSalesFallback } from "@/lib/sales-sql";
 import { getLotBalances } from "@/lib/metrics";
 import { eatDateLabel } from "@/lib/dates";
 import { requiresDailyReport, resolveCapabilities } from "@/lib/positions";
@@ -18,6 +19,7 @@ import { rawMaterialCheck } from "@/lib/raw-material-stock";
 import { ALARM_TONNES, creditFigures, customerExposure } from "@/lib/credit";
 import { STALE_DAYS, groupStatuses, itemStatuses, recentCounts, storeMovements } from "@/lib/store-inventory";
 import { costsAt } from "@/lib/store-costs";
+import { loadCustomStoreItems } from "@/lib/store-custom";
 import { WHITENESS_SPECS, bandLabel, belowSpec, specFor } from "@/lib/whiteness-spec";
 
 /**
@@ -58,6 +60,9 @@ const READABLE_TABLES = {
   sales_credit_payments: "collected_on",
   daily_sales_summaries: "date",
   store_counts: "date",
+  store_item_costs: "effective_from",
+  store_custom_items: "created_at",
+  downtime_months: "created_at",
   delivery_reports: "date",
   purchase_item_reports: "date",
   pp_bag_damage_reports: "date",
@@ -103,6 +108,7 @@ const READABLE_TABLES = {
   bot_activity: "created_at",
   briefs: "created_at",
   system_errors: "created_at",
+  system_jobs: "started_at",
   // The recycle bin: what was deleted, by whom, and the whole row as it was.
   deleted_submissions: "deleted_at",
 } as const;
@@ -197,7 +203,7 @@ const tools: OpenAI.Chat.ChatCompletionTool[] = [
         type: "object",
         properties: {
           days: { type: "number", description: "How many days back to include. Default 30.", default: 30 },
-          customer: { type: "string", description: "Filter by customer name (partial match, optional)" },
+          customer: { type: "string", description: "Filter by customer name (partial match) or by TIN (digits), optional" },
           limit: { type: "number", default: 50 },
         },
       },
@@ -487,22 +493,28 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<unk
       // much in cash and on credit, which brands and how many tonnes, and the
       // bank the money went to. A customer filter is optional and matched loosely.
       const who = args.customer ? `%${String(args.customer)}%` : "%";
-      const rows = await sql`
+      // A digits-only filter is a TIN — the customer's real identity.
+      const byTin = /^\d{4,10}$/.test(String(args.customer || "").trim());
+      const rows = await withSalesFallback((legacy) => sql`
         select date, date_label as "dateLabel", customer,
+               ${legacy ? sql`null::text` : sql`tin`} as tin,
                invoice_cash as "invoiceCash", invoice_credit as "invoiceCredit",
-               qty as "tons", delivery_no as "deliveryNo", products, bank,
+               qty as "tons", products, bank,
+               ${legacy ? sql`null::jsonb` : sql`banks`} as banks,
                reported_by as "reportedBy"
           from sales_invoices
-         where date >= ${since} and customer ilike ${who}
-         order by date desc limit ${limit}`;
+         where date >= ${since}
+           and ${byTin && !legacy ? sql`tin like ${`%${String(args.customer).trim()}%`}` : sql`customer ilike ${who}`}
+         order by date desc limit ${limit}`);
 
       // Totals alongside the rows: the row list is capped by `limit`, so a model
       // adding up only what it can see would under-report on a busy month.
-      const [totals] = await sql<{ n: string; cash: string; credit: string; tons: string }[]>`
+      const [totals] = await withSalesFallback((legacy) => sql<{ n: string; cash: string; credit: string; tons: string }[]>`
         select count(*) as n, coalesce(sum(invoice_cash),0) as cash,
                coalesce(sum(invoice_credit),0) as credit, coalesce(sum(qty),0) as tons
           from sales_invoices
-         where date >= ${since} and customer ilike ${who}`;
+         where date >= ${since}
+           and ${byTin && !legacy ? sql`tin like ${`%${String(args.customer).trim()}%`}` : sql`customer ilike ${who}`}`);
 
       return {
         days,
@@ -773,6 +785,7 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<unk
       }
     }
     case "get_store_inventory": {
+      await loadCustomStoreItems();
       const [counts, movements, costs] = await Promise.all([
         recentCounts().catch(() => []),
         storeMovements().catch(() => []),
@@ -905,7 +918,9 @@ export async function companyChat(
         "bag-lot control, damage claims and purchase requests. " +
         "There are TWO distinct sales channels and you must not confuse them: `invoices` (credit sales, billed to " +
         "a client) and the sales team's Sales report (`sales_invoices`, one row per sale with customer, cash " +
-        "and credit amounts, tonnes per brand and bank, filed on the Telegram bot from the sale's " +
+        "and credit amounts, the buyer's TIN (`tin` — the customer's identity; names can be misspelt, so " +
+        "group a customer by TIN where it is set), tonnes per brand and the banks paid into (`banks`: " +
+        "[{bank, amount}]), filed on the Telegram bot from the sale's " +
         "receipts) — use get_sales_reports for the latter. If a question just says 'sales', check both " +
         "and say which channel each figure came from. " +
         "Staff file structured reports on the Telegram bot every day and you CAN read all of them: " +
@@ -937,14 +952,19 @@ export async function companyChat(
   while (convo.length > 0 && convo[0].role !== "user") convo.shift();
   if (convo.length === 0) return "I could not produce an answer.";
 
-  // Three model passes have to fit inside the route's maxDuration of 60s, with
-  // room for the DB queries between them — hence 12s each, not 20.
-  const CHAT_TIMEOUT_MS = 12000;
+  // Up to five model passes inside the route's maxDuration of 180s, with room
+  // for the DB queries between them.
+  const CHAT_TIMEOUT_MS = 25000;
+  // Gemini 3 spends output tokens THINKING before it writes, from the same
+  // budget. At 900 the thinking ate most of it and answers stopped mid-sentence.
+  const CHAT_MAX_TOKENS = 8192;
   const tools = geminiTools();
   let lastError = "";
   let toolsRan = false;
 
-  for (let round = 0; round < 2; round++) {
+  // Four rounds: a question like "compare this month's sales with credit and
+  // stock" needs one tool to find the period and more to read each side.
+  for (let round = 0; round < 4; round++) {
     const res = await geminiGenerate(convo, {
       systemInstruction: systemPrompt,
       tools,
@@ -953,7 +973,7 @@ export async function companyChat(
       // database" complaint, and flatly against this prompt's own rules.
       toolConfig: round === 0 ? { functionCallingConfig: { mode: "ANY" } } : undefined,
       temperature: 0.2,
-      maxOutputTokens: 900,
+      maxOutputTokens: CHAT_MAX_TOKENS,
       timeoutMs: CHAT_TIMEOUT_MS,
     });
 
@@ -1022,7 +1042,7 @@ export async function companyChat(
       tools,
       toolConfig: { functionCallingConfig: { mode: "NONE" } },
       temperature: 0.2,
-      maxOutputTokens: 900,
+      maxOutputTokens: CHAT_MAX_TOKENS,
       timeoutMs: CHAT_TIMEOUT_MS,
     }
   );
@@ -1040,7 +1060,7 @@ export async function companyChat(
  * A bare slice() ends mid-object and the model cannot tell clipped data from
  * complete data — it then reports a partial total as if it were the whole.
  */
-function clampResult(result: unknown, limit = 24000): string {
+function clampResult(result: unknown, limit = 60000): string {
   const json = JSON.stringify(result) ?? "null";
   if (json.length <= limit) return json;
   return (

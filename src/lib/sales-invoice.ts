@@ -4,8 +4,9 @@ import { BANKS, BANK_OTHER, matchBank } from "@/lib/banks";
 /**
  * One sale, as the sales sheet records it.
  *
- * Date · Deliver to · Invoice in cash · Invoice in credit · Invoice qty · Deli ·
- * one tonnage per brand · Bank. The bot fills this receipt-first: the photos are
+ * Date · Deliver to · TIN · Invoice in cash · Invoice in credit · Invoice qty ·
+ * one tonnage per brand · Bank(s). "Deli" was dropped from the sheet; old rows
+ * keep theirs in `delivery_no`. The bot fills this receipt-first: the photos are
  * read, whatever the model could not read is asked for as ONE fill-in block, and
  * the whole row is corrected on the review card before it is saved.
  *
@@ -19,7 +20,11 @@ export const SALES_KEYS = {
   customer: "customer",
   invoiceCash: "invoiceCash",
   invoiceCredit: "invoiceCredit",
+  /** The buyer's TIN — 10 digits, or "none" when the receipt has none. */
+  tin: "tin",
+  /** Kept for drafts started before Deli was dropped; no step asks for it. */
   deliveryNo: "deliveryNo",
+  /** One bank, or several comma-joined — the tick-list's answer. */
   bank: "bank",
   /** The typed name, only when `bank` is "Other". */
   bankOther: "bankOther",
@@ -36,12 +41,63 @@ export function salesQty(draft: Record<string, string | number>): number {
   return Math.round(sum * 1000) / 1000;
 }
 
-/** The bank as it is stored: the list entry, or the typed name behind "Other". */
+/** What a single bank received, when a sale was paid into more than one. */
+export const salesBankAmountKey = (bank: string) => `bankAmt:${bank}`;
+
+/** The banks ticked, in list order. */
+export function salesBanksTicked(draft: Record<string, string | number>): string[] {
+  const chosen = String(draft[SALES_KEYS.bank] || "")
+    .split(",")
+    .map((v) => v.trim())
+    .filter(Boolean);
+  return BANKS.filter((b) => chosen.includes(b));
+}
+
+/** Several banks: each needs its own amount. One bank simply takes the cash. */
+export const needsBankAmounts = (draft: Record<string, string | number>) => salesBanksTicked(draft).length > 1;
+
+/** A bank as it is stored: the list entry, or the typed name behind "Other". */
+const bankName = (draft: Record<string, string | number>, bank: string) =>
+  bank === BANK_OTHER ? String(draft[SALES_KEYS.bankOther] || "").trim() || BANK_OTHER : bank;
+
+/**
+ * Where the sale's money went: one entry per bank.
+ *
+ * A single bank received the whole cash invoice. Several banks each carry the
+ * amount on their own slip — the per-bank cash report adds these up, and
+ * crediting the whole sale to each of them would count it twice.
+ */
+export function salesBanks(draft: Record<string, string | number>): { bank: string; amount: number }[] {
+  const ticked = salesBanksTicked(draft);
+  if (ticked.length === 0) return [];
+  if (ticked.length === 1) {
+    return [{ bank: bankName(draft, ticked[0]), amount: Number(draft[SALES_KEYS.invoiceCash]) || 0 }];
+  }
+  return ticked.map((b) => ({ bank: bankName(draft, b), amount: Number(draft[salesBankAmountKey(b)]) || 0 }));
+}
+
+/** The bank column as older readers expect it: "CBE + Awash". */
 export function salesBank(draft: Record<string, string | number>): string | null {
-  const bank = String(draft[SALES_KEYS.bank] || "").trim();
-  if (!bank) return null;
-  if (bank === BANK_OTHER) return String(draft[SALES_KEYS.bankOther] || "").trim() || BANK_OTHER;
-  return bank;
+  const list = salesBanks(draft);
+  return list.length ? list.map((b) => b.bank).join(" + ") : null;
+}
+
+/** The TIN to store, or null when the receipt carried none. */
+export function salesTin(draft: Record<string, string | number>): string | null {
+  const v = String(draft[SALES_KEYS.tin] || "").trim();
+  return /^\d{10}$/.test(v) ? v : null;
+}
+
+/**
+ * An Ethiopian TIN: exactly ten digits. Spaces and dashes as printed are
+ * dropped. "-" / "none" means the receipt has no TIN, which is an answer.
+ */
+export function normaliseTin(raw: string): { ok: true; value: string } | { ok: false; error: string } {
+  const t = String(raw || "").trim();
+  if (/^(-+|none|no|n\/a|የለም)$/i.test(t)) return { ok: true, value: "none" };
+  const digits = t.replace(/[\s\-.]/g, "");
+  if (/^\d{10}$/.test(digits)) return { ok: true, value: digits };
+  return { ok: false, error: '⚠️ TIN 10 አሃዝ መሆን አለበት (ለምሳሌ 0012345678)። ከሌለ "-" ይላኩ።' };
 }
 
 /* ───────────────────────────── The template ──────────────────────────────── */
@@ -51,7 +107,8 @@ export function salesBank(draft: Record<string, string | number>): string | null
 const L_CUSTOMER = "Deliver to";
 const L_CASH = "Invoice cash";
 const L_CREDIT = "Invoice credit";
-const L_DELI = "Deli";
+const L_TIN = "TIN";
+const bankAmountLabel = (bank: string) => `${bank} amount`;
 const L_BANK = "Bank";
 const H_BRANDS = "--- Brands (Ton) ---";
 
@@ -75,7 +132,7 @@ export function salesTemplate(draft: Record<string, string | number> = {}): stri
   if (!answered(draft, SALES_KEYS.customer)) lines.push(`${L_CUSTOMER}=`);
   if (!answered(draft, SALES_KEYS.invoiceCash)) lines.push(`${L_CASH}=`);
   if (!answered(draft, SALES_KEYS.invoiceCredit)) lines.push(`${L_CREDIT}=`);
-  if (!answered(draft, SALES_KEYS.deliveryNo)) lines.push(`${L_DELI}=`);
+  if (!answered(draft, SALES_KEYS.tin)) lines.push(`${L_TIN}=`);
 
   const brands = DELIVERY_PRODUCTS.filter((code) => !answered(draft, salesProductKey(code)));
   if (brands.length > 0) {
@@ -84,6 +141,11 @@ export function salesTemplate(draft: Record<string, string | number> = {}): stri
   }
 
   if (!answered(draft, SALES_KEYS.bank)) lines.push(`${L_BANK}=`);
+  if (needsBankAmounts(draft)) {
+    for (const b of salesBanksTicked(draft)) {
+      if (!answered(draft, salesBankAmountKey(b))) lines.push(`${bankAmountLabel(b)}=`);
+    }
+  }
   return lines.join("\n");
 }
 
@@ -93,9 +155,12 @@ export function salesMissing(draft: Record<string, string | number>): string[] {
   if (!answered(draft, SALES_KEYS.customer)) out.push(L_CUSTOMER);
   if (!answered(draft, SALES_KEYS.invoiceCash)) out.push(L_CASH);
   if (!answered(draft, SALES_KEYS.invoiceCredit)) out.push(L_CREDIT);
-  if (!answered(draft, SALES_KEYS.deliveryNo)) out.push(L_DELI);
+  if (!answered(draft, SALES_KEYS.tin)) out.push(L_TIN);
   for (const code of DELIVERY_PRODUCTS) if (!answered(draft, salesProductKey(code))) out.push(productLabel(code));
   if (!answered(draft, SALES_KEYS.bank)) out.push(L_BANK);
+  if (needsBankAmounts(draft)) {
+    for (const b of salesBanksTicked(draft)) if (!answered(draft, salesBankAmountKey(b))) out.push(bankAmountLabel(b));
+  }
   return out;
 }
 
@@ -111,14 +176,16 @@ const FIELD_LOOKUP: Map<string, string> = (() => {
   add(SALES_KEYS.customer, L_CUSTOMER, "customer", "client", "deliverto", "ደንበኛ");
   add(SALES_KEYS.invoiceCash, L_CASH, "cash", "invoice in cash", "ጥሬ ገንዘብ");
   add(SALES_KEYS.invoiceCredit, L_CREDIT, "credit", "invoice in credit", "ብድር", "ዱቤ");
-  add(SALES_KEYS.deliveryNo, L_DELI, "delivery", "delivery no", "deli no", "deli.");
-  add(SALES_KEYS.bank, L_BANK, "bank name", "ባንክ");
+  add(SALES_KEYS.tin, L_TIN, "tin no", "tin number", "buyer tin", "customer tin", "ቲን");
+  add(SALES_KEYS.bank, L_BANK, "banks", "bank name", "ባንክ");
+  for (const b of BANKS) add(salesBankAmountKey(b), bankAmountLabel(b));
   for (const code of PRODUCT_ORDER) add(salesProductKey(code), code, productLabel(code));
   return m;
 })();
 
 const isProductKey = (key: string) => key.startsWith(SALES_PRODUCT_PREFIX);
-const isMoneyKey = (key: string) => key === SALES_KEYS.invoiceCash || key === SALES_KEYS.invoiceCredit;
+const isMoneyKey = (key: string) =>
+  key === SALES_KEYS.invoiceCash || key === SALES_KEYS.invoiceCredit || key.startsWith("bankAmt:");
 
 function parseNumber(raw: string): number | null {
   const cleaned = raw.replace(/,/g, "").replace(/\s*(etb|birr|ብር|t|ton|tons)\s*$/i, "").trim();
@@ -180,16 +247,33 @@ export function parseSalesPaste(text: string): ParsedSalesPaste {
 
     if (!value) continue;
 
+    if (key === SALES_KEYS.tin) {
+      const tin = normaliseTin(value);
+      if (tin.ok) values[key] = tin.value;
+      else invalid.push(line);
+      continue;
+    }
+
     if (key === SALES_KEYS.bank) {
-      const bank = matchBank(value);
-      if (!bank) {
+      // Several banks may be listed: "CBE, Awash" or "CBE + Awash".
+      const banks: string[] = [];
+      let bad = false;
+      for (const piece of value.split(/\s*[,+&]\s*|\s+and\s+/i).filter(Boolean)) {
+        const bank = matchBank(piece);
+        if (!bank) {
+          bad = true;
+          break;
+        }
+        if (!banks.includes(bank)) banks.push(bank);
+        // A name that only matched "Other" carries no bank of its own; the typed
+        // text is kept so the row still says which bank it was.
+        if (bank === BANK_OTHER && norm(piece) !== norm(BANK_OTHER)) values[SALES_KEYS.bankOther] = piece;
+      }
+      if (bad || banks.length === 0) {
         invalid.push(line);
         continue;
       }
-      values[key] = bank;
-      // A name that only matched "Other" carries no bank of its own; the typed
-      // text is kept so the row still says which bank it was.
-      if (bank === BANK_OTHER && norm(value) !== norm(BANK_OTHER)) values[SALES_KEYS.bankOther] = value;
+      values[key] = banks.join(",");
       continue;
     }
 
@@ -206,11 +290,12 @@ export interface SalesInvoiceRead {
   customer: string;
   invoiceCash: number;
   invoiceCredit: number;
-  deliveryNo: string;
+  /** The buyer's TIN as printed, "" if none. */
+  tin: string;
   /** Tonnes per product CODE (ETL15, 3EL, …). Only known codes are kept. */
   products: Record<string, number>;
-  /** Bank as printed; matched onto the list here, not by the model. */
-  bank: string;
+  /** One entry per bank slip; names matched onto the list here, not by the model. */
+  banks: { bank: string; amount: number }[];
   confidence: number; // 0-100
   notes: string;
 }
@@ -249,7 +334,10 @@ export function applySalesExtraction(
   // cash receipt with no credit line is the ordinary case, not a gap to ask about.
   if (read.invoiceCash > 0 && !answered(draft, SALES_KEYS.invoiceCredit)) draft[SALES_KEYS.invoiceCredit] = 0;
   if (read.invoiceCredit > 0 && !answered(draft, SALES_KEYS.invoiceCash)) draft[SALES_KEYS.invoiceCash] = 0;
-  if (read.deliveryNo.trim()) put(SALES_KEYS.deliveryNo, read.deliveryNo.trim());
+  if (read.tin.trim()) {
+    const tin = normaliseTin(read.tin);
+    if (tin.ok && tin.value !== "none") put(SALES_KEYS.tin, tin.value);
+  }
 
   let anyBrand = false;
   for (const code of DELIVERY_PRODUCTS) {
@@ -265,8 +353,22 @@ export function applySalesExtraction(
     }
   }
 
-  const bank = read.bank.trim() ? matchBank(read.bank) : null;
-  if (bank && bank !== BANK_OTHER) put(SALES_KEYS.bank, bank);
+  // Every slip whose bank is on the list. An unmatched name is left for the
+  // person to pick rather than guessed.
+  const merged = new Map<string, number>();
+  for (const slip of read.banks || []) {
+    const bank = String(slip.bank || "").trim() ? matchBank(slip.bank) : null;
+    if (!bank || bank === BANK_OTHER) continue;
+    merged.set(bank, (merged.get(bank) ?? 0) + (Number(slip.amount) || 0));
+  }
+  if (merged.size > 0 && !answered(draft, SALES_KEYS.bank)) {
+    put(SALES_KEYS.bank, BANKS.filter((b) => merged.has(b)).join(","));
+    if (merged.size > 1) {
+      for (const [bank, amount] of merged) {
+        if (amount > 0) put(salesBankAmountKey(bank), Math.round(amount * 100) / 100);
+      }
+    }
+  }
 
   return { filled };
 }

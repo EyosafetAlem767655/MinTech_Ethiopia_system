@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import sql from "@/lib/sql";
 import { costsAt, recordCosts } from "@/lib/store-costs";
 import { STORE_ITEM_BY_KEY } from "@/lib/store-items";
+import { loadCustomStoreItems } from "@/lib/store-custom";
 import { monthLabel } from "@/lib/finance-report";
 
 export const dynamic = "force-dynamic";
@@ -31,6 +32,7 @@ function bounds(month: string) {
 }
 
 export async function GET(req: NextRequest) {
+  await loadCustomStoreItems();
   const raw = req.nextUrl.searchParams.get("month") || "";
   const month = MONTH.test(raw) ? raw : monthLabel();
   const { start, end, lastDay } = bounds(month);
@@ -72,6 +74,7 @@ export async function GET(req: NextRequest) {
 }
 
 export async function PUT(req: NextRequest) {
+  await loadCustomStoreItems();
   const body = (await req.json().catch(() => ({}))) as { month?: string; costs?: Record<string, number> };
   const month = String(body.month || "");
   if (!MONTH.test(month)) return NextResponse.json({ error: "Choose a month (YYYY-MM)." }, { status: 400 });

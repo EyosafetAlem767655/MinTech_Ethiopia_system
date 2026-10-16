@@ -49,6 +49,24 @@ import {
 import { parseProductionPaste } from "@/lib/production-paste";
 import { parseFinancePaste } from "@/lib/finance-paste";
 import { logError, resolveErrors } from "@/lib/errors";
+import { readWithBusyRetry } from "@/lib/llm-retry";
+import {
+  GRV_APPEND_KEY,
+  GRV_LINES_EXAMPLE,
+  GRV_LINES_STEP,
+  GRV_MATCH_MORE,
+  GRV_MATCH_REDO,
+  GRV_MATCH_STEP,
+  MAX_GRV_LINES,
+  grvLines,
+  grvMatchCards,
+  parseGrvLines,
+  parseGrvOverrides,
+  setGrvLines,
+} from "@/lib/grv-lines";
+import { matchGrvLines } from "@/lib/store-match";
+import { loadCustomStoreItems } from "@/lib/store-custom";
+import { STORE_ITEM_BY_KEY } from "@/lib/store-items";
 import { archiveView, databaseView, errorsView, jobsView, overviewView, systemKeyboard } from "@/lib/system-status";
 import { insertRow } from "@/lib/insert";
 import { runAfter } from "@/lib/after";
@@ -1278,6 +1296,142 @@ async function sendBagBalanceNote(chatId: string): Promise<void> {
   }
 }
 
+/* ───────────── Background reads: busy retries, then hand back ───────────── */
+
+/**
+ * A photo read runs AFTER Telegram has been answered (runAfter), because it may
+ * now wait: a busy provider is asked again after a minute, up to three times
+ * (readWithBusyRetry). This is the ceiling it plans against — under the
+ * route's maxDuration of 300s, with room to write the result back.
+ */
+const READ_DEADLINE_MS = 280_000;
+/** A read older than this is assumed dead (the function was cut off). */
+const READING_TTL_MS = 6 * 60_000;
+
+/** Is a background read of this flow still in progress? */
+function stillReading(state: AssetFlowState): boolean {
+  return Boolean(state.readingSince) && Date.now() - Date.parse(state.readingSince!) < READING_TTL_MS;
+}
+
+/** "Busy — waiting a minute (n/3)", sent before each wait. */
+function busyWaitNotice(chatId: string) {
+  return (n: number, of: number) =>
+    sendMessage(
+      chatId,
+      `⏳ ሰርቨሩ ተጨናንቋል — እባክዎ ለ1 ደቂቃ ይጠብቁ፣ እንደገና እሞክራለሁ (${n}/${of})።\n` +
+        `<i>Server is busy — please wait a minute, trying again (${n}/${of}).</i>`
+    );
+}
+
+/** Every retry spent and still busy. The photos stay; the step stays. */
+async function sendServerDown(chatId: string): Promise<void> {
+  await sendMessage(
+    chatId,
+    "❌ ሰርቨሩ አሁን አይሰራም (ሦስት ጊዜ ተሞክሯል)።\n" +
+      "<i>The server is down right now — tried 3 times.</i>\n\n" +
+      `ፎቶዎቹ ተቀምጠዋል — ቆይተው "${PHOTOS_DONE_BTN}" ን ብቻ ይጫኑ።`,
+    { reply_markup: photosKeyboard }
+  );
+}
+
+/**
+ * The flow as it is NOW, if it is still the one this read started on.
+ *
+ * Minutes can pass during a read. The person may have cancelled, or started
+ * another report; writing the stale state back would resurrect the old flow
+ * over whatever they are doing. Null means: drop the result quietly.
+ */
+async function reclaimFlow(
+  chatId: string,
+  userName: string,
+  started: AssetFlowState
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+): Promise<{ session: any; state: AssetFlowState } | null> {
+  const session = await loadSession(chatId, userName);
+  const state = session.assetFlow as AssetFlowState | undefined;
+  if (session.state !== "asset_entry" || !state || state.kind !== started.kind || state.readingSince !== started.readingSince) {
+    return null;
+  }
+  delete state.readingSince;
+  return { session, state };
+}
+
+/**
+ * Start a background read: mark the flow as reading, answer at once, and let
+ * `work` finish after the response. A crash inside `work` clears the mark, so
+ * the person is never left with a step that answers "still reading" forever.
+ */
+async function startBackgroundRead(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  session: any,
+  chatId: string,
+  state: AssetFlowState,
+  notice: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  work: (session: any, chatId: string, started: AssetFlowState) => Promise<void>
+): Promise<void> {
+  state.readingSince = new Date().toISOString();
+  session.assetFlow = { ...state };
+  await persist(session);
+  await sendMessage(chatId, notice);
+  const started = { ...state, draft: { ...state.draft } };
+  runAfter(
+    work(session, chatId, started).catch(async (e) => {
+      console.error(`background read (${started.kind}) failed:`, e);
+      const claimed = await reclaimFlow(chatId, session.userName, started).catch(() => null);
+      if (!claimed) return;
+      claimed.session.assetFlow = { ...claimed.state };
+      await persist(claimed.session);
+      await sendMessage(chatId, MSG.genericError, { reply_markup: photosKeyboard }).catch(() => {});
+    })
+  );
+}
+
+/**
+ * Match the GRV's typed lines to the store list, then show the match card.
+ *
+ * Runs after the reply like the photo reads, with the same minute-apart
+ * retries when the AI is busy. Nothing is saved here: the card is the
+ * question, and the new items are only created when the voucher is.
+ */
+async function matchGrvIntoDraft(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  started_session: any,
+  chatId: string,
+  started: AssetFlowState
+): Promise<void> {
+  const { result, gaveUp } = await readWithBusyRetry(() => matchGrvLines(grvLines(started.draft)), {
+    onWait: busyWaitNotice(chatId),
+    deadlineMs: Date.parse(started.readingSince || "") + READ_DEADLINE_MS || Date.now() + READ_DEADLINE_MS,
+  });
+
+  const claimed = await reclaimFlow(chatId, started_session.userName, started);
+  if (!claimed) return;
+  const { session, state } = claimed;
+
+  if (!result.ok) {
+    await logError({ source: "grv-match", kind: gaveUp ? "grv_match_busy" : "grv_match_failed", message: result.error, chatId });
+    session.assetFlow = { ...state };
+    await persist(session);
+    await sendMessage(
+      chatId,
+      (gaveUp
+        ? "❌ ሰርቨሩ አሁን አይሰራም (ሦስት ጊዜ ተሞክሯል)።\n<i>The server is down right now — tried 3 times.</i>\n\n"
+        : "⚠️ ዕቃዎቹን ማገናኘት አልተቻለም።\n\n") + "ቆይተው ዝርዝሩን እንደገና ይላኩ።",
+      { reply_markup: CHANGE_CANCEL_KEYBOARD }
+    );
+    return;
+  }
+
+  setGrvLines(state.draft, result.data);
+  delete state.draft[GRV_MATCH_STEP];
+  state.step = GRV_MATCH_STEP;
+  session.assetFlow = { ...state };
+  await persist(session);
+  for (const part of grvMatchCards(result.data)) await sendMessage(chatId, part);
+  await askAssetStep(chatId, state);
+}
+
 /**
  * Read one sale's receipts into the sales sheet's columns, then ask for the rest.
  *
@@ -1293,14 +1447,33 @@ async function sendBagBalanceNote(chatId: string): Promise<void> {
  */
 async function extractSalesIntoDraft(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  session: any,
+  started_session: any,
   chatId: string,
-  state: AssetFlowState
+  started: AssetFlowState
 ): Promise<void> {
-  await sendMessage(chatId, "🔎 ደረሰኞቹን እያነበብኩ ነው…");
+  const images = await loadImages((started.photoFileIds || []).slice(0, MAX_FLOW_PHOTOS));
+  const { result: read, gaveUp } =
+    images.length > 0
+      ? await readWithBusyRetry(() => extractSalesInvoice(images), {
+          onWait: busyWaitNotice(chatId),
+          deadlineMs: Date.parse(started.readingSince || "") + READ_DEADLINE_MS || Date.now() + READ_DEADLINE_MS,
+        })
+      : { result: null, gaveUp: false };
 
-  const images = await loadImages((state.photoFileIds || []).slice(0, MAX_FLOW_PHOTOS));
-  const read = images.length > 0 ? await extractSalesInvoice(images) : null;
+  const claimed = await reclaimFlow(chatId, started_session.userName, started);
+  if (!claimed) return;
+  const { session, state } = claimed;
+
+  if (gaveUp && read && !read.ok) {
+    // Still busy after three waits. The receipts are what the sheet should
+    // come from, so the photos are kept and the step stays where it is:
+    // pressing ✅ later reads them again, nothing re-sent.
+    await logError({ source: "sales-invoice", kind: "sales_receipt_read_busy", message: read.error, chatId });
+    session.assetFlow = { ...state };
+    await persist(session);
+    await sendServerDown(chatId);
+    return;
+  }
 
   if (!read || !read.ok) {
     const reason = read && !read.ok ? read.error : "no photo could be read back";
@@ -1353,24 +1526,43 @@ async function extractSalesIntoDraft(
  */
 async function extractDowntimeIntoDraft(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  session: any,
+  started_session: any,
   chatId: string,
-  state: AssetFlowState
+  started: AssetFlowState
 ): Promise<void> {
-  const fileIds = (state.photoFileIds || []).slice(0, MAX_FLOW_PHOTOS);
-  await sendMessage(chatId, "🔎 ሉሁን እያነበብኩ ነው…");
-
-  const month = String(state.draft.month || "");
+  const fileIds = (started.photoFileIds || []).slice(0, MAX_FLOW_PHOTOS);
+  const month = String(started.draft.month || "");
   let read: Awaited<ReturnType<typeof extractDowntimeSheet>> | null = null;
+  let gaveUp = false;
   try {
     const images: { base64: string; contentType: string }[] = [];
     for (const id of fileIds) {
       const bytes = await getPhotoBase64(id).catch(() => null);
       if (bytes) images.push(bytes);
     }
-    if (images.length > 0) read = await extractDowntimeSheet(images, month);
+    if (images.length > 0) {
+      const r = await readWithBusyRetry(() => extractDowntimeSheet(images, month), {
+        onWait: busyWaitNotice(chatId),
+        deadlineMs: Date.parse(started.readingSince || "") + READ_DEADLINE_MS || Date.now() + READ_DEADLINE_MS,
+      });
+      read = r.result;
+      gaveUp = r.gaveUp;
+    }
   } catch (e) {
     console.error("extractDowntimeIntoDraft failed:", e);
+  }
+
+  const claimed = await reclaimFlow(chatId, started_session.userName, started);
+  if (!claimed) return;
+  const { session, state } = claimed;
+
+  if (gaveUp && read && !read.ok) {
+    // As for receipts: still busy after three waits, so keep the photos and the step.
+    await logError({ source: "downtime-sheet", kind: "downtime_read_busy", message: read.error, chatId });
+    session.assetFlow = { ...state };
+    await persist(session);
+    await sendServerDown(chatId);
+    return;
   }
 
   const rows: DowntimeRow[] = [];
@@ -1620,6 +1812,10 @@ export async function POST(req: NextRequest) {
      gets one message a day however many updates arrive. Placed after the dedupe
      so a redelivery storm cannot multiply the work. */
   runAfter(dailyHeartbeat());
+
+  // The items GRVs have added to the store list, so every store keyboard and
+  // block built below includes them. Cached for a minute per instance.
+  await loadCustomStoreItems().catch(() => []);
 
   /* ── Inline-button callbacks (purchase decisions, owner only) ── */
   const cb = update?.callback_query;
@@ -2245,6 +2441,12 @@ export async function POST(req: NextRequest) {
       // here — the whole point is that the analysis happens after saving.
       if (step.type === "photos") {
         const collected = state.photoFileIds || [];
+        // A read is already running (it may be waiting out a busy server).
+        // A second ✅ or another photo now would start a second read.
+        if (stillReading(state)) {
+          await sendMessage(chatId, "⏳ ፎቶዎቹን እያነበብኩ ነው — እባክዎ ይጠብቁ።\n<i>Still reading, please wait.</i>");
+          return NextResponse.json({ ok: true });
+        }
         if (hasPhoto(msg)) {
           if (collected.length >= MAX_FLOW_PHOTOS) {
             await sendMessage(chatId, `📷 ከ${MAX_FLOW_PHOTOS} በላይ ፎቶ አይቻልም። "✅ ጨርሻለሁ" ይጫኑ።`, {
@@ -2280,12 +2482,14 @@ export async function POST(req: NextRequest) {
           }
           // A sale is the one flow whose photos are still read: the receipts are the source, and what
           // they do not answer is asked for in one block afterwards.
+          // Read after the reply: a busy provider is now waited out (a minute,
+          // up to three times), which no webhook response could sit through.
           if (state.kind === "sales_invoice" && collected.length > 0) {
-            await extractSalesIntoDraft(session, chatId, state);
+            await startBackgroundRead(session, chatId, state, "🔎 ደረሰኞቹን እያነበብኩ ነው…", extractSalesIntoDraft);
             return NextResponse.json({ ok: true });
           }
           if (state.kind === "downtime" && collected.length > 0) {
-            await extractDowntimeIntoDraft(session, chatId, state);
+            await startBackgroundRead(session, chatId, state, "🔎 ሉሁን እያነበብኩ ነው…", extractDowntimeIntoDraft);
             return NextResponse.json({ ok: true });
           }
           await advanceAsset(session, chatId, state);
@@ -2311,6 +2515,45 @@ export async function POST(req: NextRequest) {
           return NextResponse.json({ ok: true });
         }
         state.draft.date = val;
+      } else if (step.type === "choice" && state.kind === "grv" && step.id === GRV_MATCH_STEP) {
+        /* ── The GRV match card: confirm, add, start over — or correct a line ── */
+        const lines = grvLines(state.draft);
+        if (/^\d+\s*[=:]/.test(val)) {
+          const { changes, bad } = parseGrvOverrides(val, lines.length);
+          for (const c of changes) {
+            const l = lines[c.n - 1];
+            const item = c.match ? STORE_ITEM_BY_KEY.get(c.match) : undefined;
+            Object.assign(l, item ? { match: item.key, group: item.group, unit: item.unit } : { match: null }, { how: "manual" });
+          }
+          setGrvLines(state.draft, lines);
+          session.assetFlow = { ...state };
+          await persist(session);
+          if (bad.length) {
+            await sendMessage(
+              chatId,
+              `⚠️ ያልገቡ፦\n${bad.slice(0, 6).map((b) => `• ${escapeHtml(b)}`).join("\n")}\n` +
+                "<i>የመስመሩ ቁጥር እና <code>new</code> ወይም ትክክለኛ የዕቃ ቁልፍ (ለምሳሌ brg:6210) ያስፈልጋል።</i>"
+            );
+          }
+          for (const part of grvMatchCards(lines)) await sendMessage(chatId, part);
+          await askAssetStep(chatId, state);
+          return NextResponse.json({ ok: true });
+        }
+        const pick = choicesOf(step, state.draft).find((c) => normaliseChoice(c.label) === normText);
+        if (!pick) {
+          await askAssetStep(chatId, state);
+          return NextResponse.json({ ok: true });
+        }
+        if (pick.value === GRV_MATCH_MORE || pick.value === GRV_MATCH_REDO) {
+          if (pick.value === GRV_MATCH_MORE) state.draft[GRV_APPEND_KEY] = 1;
+          else setGrvLines(state.draft, []);
+          state.step = GRV_LINES_STEP;
+          session.assetFlow = { ...state };
+          await persist(session);
+          await askAssetStep(chatId, state);
+          return NextResponse.json({ ok: true });
+        }
+        state.draft[step.id] = pick.value;
       } else if (step.type === "choice") {
         const choices = choicesOf(step, state.draft);
         const match = choices.find((c) => normaliseChoice(c.label) === normText);
@@ -2329,6 +2572,43 @@ export async function POST(req: NextRequest) {
         }
         state.draft[step.id] = n;
       } else if (step.type === "paste") {
+        /* ── The GRV's typed items ──────────────────────────────────────────
+           One line per item; matched to the store list after the reply (it
+           may wait out a busy AI), then shown on the match card. */
+        if (state.kind === "grv" && step.id === GRV_LINES_STEP) {
+          if (stillReading(state)) {
+            await sendMessage(chatId, "⏳ ዕቃዎቹን እያገናኘሁ ነው — እባክዎ ይጠብቁ።\n<i>Still matching, please wait.</i>");
+            return NextResponse.json({ ok: true });
+          }
+          const parsed = parseGrvLines(val);
+          if (parsed.lines.length === 0) {
+            await sendMessage(
+              chatId,
+              "⚠️ ምንም ዕቃ ማንበብ አልተቻለም። በዚህ መልክ ይፃፉ፦\n" +
+                `<pre>${escapeHtml(GRV_LINES_EXAMPLE)}</pre>` +
+                (parsed.bad.length ? `\nያልተነበቡ፦\n${parsed.bad.slice(0, 6).map((b) => `• ${escapeHtml(b)}`).join("\n")}` : ""),
+              { reply_markup: CHANGE_CANCEL_KEYBOARD }
+            );
+            return NextResponse.json({ ok: true });
+          }
+          const keep = state.draft[GRV_APPEND_KEY] ? grvLines(state.draft) : [];
+          delete state.draft[GRV_APPEND_KEY];
+          const typed = parsed.lines.map((l) => ({ ...l, match: null, group: "added", unit: "pcs" as const, how: "pending" as const }));
+          const all = [...keep, ...typed];
+          if (all.length > MAX_GRV_LINES) {
+            await sendMessage(chatId, `⚠️ በአንድ ቫውቸር እስከ ${MAX_GRV_LINES} ዕቃ ብቻ። ቀሪውን በሌላ ቫውቸር ያስገቡ።`);
+          }
+          setGrvLines(state.draft, all);
+          if (parsed.bad.length > 0) {
+            await sendMessage(
+              chatId,
+              `⚠️ እነዚህ መስመሮች አልተነበቡም (ብዛት የላቸውም)፦\n${parsed.bad.slice(0, 6).map((b) => `• ${escapeHtml(b)}`).join("\n")}\n` +
+                '<i>በኋላ "➕ ተጨማሪ ዕቃ" ብለው ይጨምሯቸው።</i>'
+            );
+          }
+          await startBackgroundRead(session, chatId, state, "🔎 ከመጋዘን ዝርዝሩ ጋር እያገናኘሁ ነው…", matchGrvIntoDraft);
+          return NextResponse.json({ ok: true });
+        }
         /* ── The store count: one block per paste step ──────────────────────
            Handled before the others because it is the only flow with SEVERAL
            paste steps, so what happens next is "the next block", not "whatever

@@ -125,6 +125,8 @@ export function daysLeftLabel(f: Pick<CreditFigures, "status" | "daysLeft">): st
 
 export interface CreditRowLike {
   customer: string;
+  /** The buyer's TIN when recorded — the customer's identity; names vary. */
+  tin?: string | null;
   /** Tonnes on this invoice. */
   qty: number;
   outstanding: number;
@@ -134,6 +136,7 @@ export interface CreditRowLike {
 
 export interface CustomerExposure {
   customer: string;
+  tin?: string | null;
   /** Tonnes on invoices that still have credit outstanding. */
   unpaidTonnes: number;
   outstanding: number;
@@ -156,10 +159,15 @@ export function customerExposure(rows: CreditRowLike[]): CustomerExposure[] {
 
   for (const r of rows) {
     if (r.status === "settled") continue;
-    const key = String(r.customer || "").trim() || "—";
+    // One customer per TIN: "Abebe Trading" and "Abebe Trading PLC" with the
+    // same TIN are one buyer and one credit exposure. No TIN yet → the name,
+    // with case and spacing ignored. The first name seen (rows arrive newest
+    // first) is the one shown.
+    const name = String(r.customer || "").trim() || "—";
+    const key = r.tin ? `tin:${r.tin}` : `name:${name.toLowerCase().replace(/\s+/g, " ")}`;
     const cur =
       byCustomer.get(key) ??
-      ({ customer: key, unpaidTonnes: 0, outstanding: 0, invoices: 0, worstOverdueDays: 0, alarm: false } as CustomerExposure);
+      ({ customer: name, tin: r.tin ?? null, unpaidTonnes: 0, outstanding: 0, invoices: 0, worstOverdueDays: 0, alarm: false } as CustomerExposure);
     cur.unpaidTonnes += Number(r.qty) || 0;
     cur.outstanding += Number(r.outstanding) || 0;
     cur.invoices += 1;

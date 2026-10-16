@@ -5,7 +5,7 @@ import { claimChatRequest, peekChatQuota, releaseChatRequest, CHAT_DAILY_LIMIT }
 import { envValue } from "@/lib/env";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+export const maxDuration = 180;
 
 function chatErrorMessage(e: unknown) {
   const message = e instanceof Error ? e.message : String(e);

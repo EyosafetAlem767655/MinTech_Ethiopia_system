@@ -124,7 +124,10 @@ export default function SalesAnalyticsPanel() {
                       cursor={{ fill: "rgba(0,131,0,0.06)" }}
                       formatter={(v: number, _n, item) => {
                         const c = item?.payload as SalesAnalytics["customers"][number];
-                        return [`${etb(v)} · ${tons(c.tons)} · ${c.sales} sale${c.sales === 1 ? "" : "s"}`, "Invoiced"];
+                        return [
+                          `${etb(v)} · ${tons(c.tons)} · ${c.sales} sale${c.sales === 1 ? "" : "s"}${c.tin ? ` · TIN ${c.tin}` : " · no TIN yet"}`,
+                          "Invoiced",
+                        ];
                       }}
                     />
                     <Bar dataKey="etb" fill={INK} radius={[0, 4, 4, 0]} maxBarSize={18} />
@@ -198,7 +201,7 @@ export default function SalesAnalyticsPanel() {
           </Card>
 
           {/* Where the money lands */}
-          <Card title="Sales by bank · ETB invoiced">
+          <Card title="Cash by bank · ETB deposited">
             {data.banks.length === 0 ? (
               <Empty />
             ) : (
@@ -213,7 +216,7 @@ export default function SalesAnalyticsPanel() {
                       cursor={{ fill: "rgba(0,131,0,0.06)" }}
                       formatter={(v: number, _n, item) => {
                         const b = item?.payload as SalesAnalytics["banks"][number];
-                        return [`${etb(v)} · ${b.sales} sale${b.sales === 1 ? "" : "s"}`, "Invoiced"];
+                        return [`${etb(v)} · ${b.sales} sale${b.sales === 1 ? "" : "s"}`, "Cash"];
                       }}
                     />
                     <Bar dataKey="etb" fill={INK} radius={[0, 4, 4, 0]} maxBarSize={18} />

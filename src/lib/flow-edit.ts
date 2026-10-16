@@ -146,7 +146,8 @@ export function editableFields(
     // A tick-list is not a value to type over either: its answer is a list of
     // positions ("3,7,12"), and a typed correction could only corrupt it. The
     // amounts it led to are listed as their own fields below.
-    if (step.type === "multichoice") {
+    // The GRV's "are these matches right?" is a gate, not a value.
+    if (step.type === "multichoice" || step.id === "grvMatch") {
       taken.add(step.id);
       continue;
     }
@@ -167,6 +168,9 @@ export function editableFields(
     if (key.startsWith("hc:")) continue;
     // What the downtime sheet read, before the person checked it.
     if (key === "readRows") continue;
+    // The typed GRV's lines (JSON) and its bookkeeping: corrected on the match
+    // card ("3 = new"), not typed over here.
+    if (key.startsWith("gl:") || key === "grvAppend" || key === "grvMatch") continue;
     // Numeric where the value is numeric, so a correction is still checked as a
     // number rather than stored as text.
     const numeric = typeof draft[key] === "number" || /^-?\d*\.?\d+$/.test(String(draft[key]));
@@ -179,7 +183,7 @@ export function editableFields(
   // reporter forgot was to cancel and retype the whole voucher — the exact
   // complaint the editor exists to answer. Removing a line is the reverse:
   // its description set to "-".
-  if (VOUCHER_KINDS.has(kind)) {
+  if (VOUCHER_KINDS.has(kind) && draft["gl:1"] === undefined) {
     const slot = firstEmptyItem(draft);
     if (slot !== null && slot > 1) {
       const step = findStep(kind, itemKeys(slot).description);

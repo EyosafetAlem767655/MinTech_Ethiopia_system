@@ -1,6 +1,7 @@
 import sql from "@/lib/sql";
 import { PRODUCT_ORDER, orderProducts } from "@/lib/products";
 import { rangeWindow, type RangeKey } from "@/lib/ranges";
+import { customerIdentity, salesBankLines, withSalesFallback } from "@/lib/sales-sql";
 
 /**
  * What the sales rows say when read together: who buys, what sells, how much
@@ -32,6 +33,8 @@ export const SALES_ANALYTICS_RANGES: RangeKey[] = ["weekly", "monthly", "d90", "
 
 export interface CustomerStat {
   customer: string;
+  /** The TIN they are grouped by, or null for a customer known only by name. */
+  tin: string | null;
   etb: number;
   cashEtb: number;
   creditEtb: number;
@@ -94,29 +97,31 @@ export async function salesAnalytics(range: RangeKey, now = new Date()): Promise
       return [];
     });
 
-  const [totals, customers, products, series, banks] = await Promise.all([
+  const [totals, customers, products, series, banks] = await withSalesFallback((legacy) => Promise.all([
     guard(
       sql<{ sales: string; cash: string; credit: string; tons: string; customers: string }[]>`
         select count(*) as sales,
                coalesce(sum(invoice_cash), 0)   as cash,
                coalesce(sum(invoice_credit), 0) as credit,
                coalesce(sum(qty), 0)            as tons,
-               count(distinct lower(trim(customer))) as customers
+               count(distinct ${customerIdentity(legacy)}) as customers
           from sales_invoices
          where date >= ${start} and date < ${end}`
     ),
-    // Grouped on a normalised name so "Abebe Trading" and "abebe trading " are
-    // one customer; the most common spelling is what the chart shows.
+    // Grouped by TIN — names are typed with every spelling there is, the TIN
+    // on the invoice is not. A customer with no TIN yet falls back to the name
+    // with case and spacing ignored. The latest spelling is what the chart shows.
     guard(
-      sql<{ customer: string; cash: string; credit: string; tons: string; sales: string }[]>`
-        select mode() within group (order by trim(customer)) as customer,
+      sql<{ customer: string; tin: string | null; cash: string; credit: string; tons: string; sales: string }[]>`
+        select (array_agg(trim(customer) order by date desc, created_at desc))[1] as customer,
+               ${legacy ? sql`null::text` : sql`max(tin)`} as tin,
                coalesce(sum(invoice_cash), 0)   as cash,
                coalesce(sum(invoice_credit), 0) as credit,
                coalesce(sum(qty), 0)            as tons,
                count(*)                         as sales
           from sales_invoices
          where date >= ${start} and date < ${end}
-         group by lower(trim(customer))
+         group by ${customerIdentity(legacy)}
          order by sum(invoice_cash + invoice_credit) desc
          limit 12`
     ),
@@ -151,19 +156,20 @@ export async function salesAnalytics(range: RangeKey, now = new Date()): Promise
           from buckets left join sales on sales.b = buckets.b
          order by buckets.b`
     ),
-    // A sale with no bank recorded is still a sale; it is shown as its own bar
-    // rather than dropped, because "not recorded" is worth seeing too.
+    // CASH per bank — what actually landed there. A sale paid into two banks
+    // counts in each for that bank's share only. A cash sale with no bank
+    // recorded is its own bar: "not recorded" is worth seeing too.
     guard(
       sql<{ bank: string; etb: string; sales: string }[]>`
-        select coalesce(nullif(trim(bank), ''), '—') as bank,
-               coalesce(sum(invoice_cash + invoice_credit), 0) as etb,
-               count(*) as sales
-          from sales_invoices
+        select coalesce(bank, '—') as bank,
+               coalesce(sum(cash), 0) as etb,
+               count(distinct id) as sales
+          from (${salesBankLines(legacy)}) l
          where date >= ${start} and date < ${end}
          group by 1
          order by 2 desc`
     ),
-  ]);
+  ]));
 
   const t = totals[0];
   if (!t) return empty;
@@ -187,6 +193,7 @@ export async function salesAnalytics(range: RangeKey, now = new Date()): Promise
     },
     customers: customers.map((c) => ({
       customer: c.customer,
+      tin: c.tin ?? null,
       etb: n(c.cash) + n(c.credit),
       cashEtb: n(c.cash),
       creditEtb: n(c.credit),

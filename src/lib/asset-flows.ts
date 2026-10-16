@@ -28,11 +28,30 @@ import {
   SALES_PRODUCT_PREFIX,
   bankChoices,
   salesBank,
+  salesBanks,
+  salesBanksTicked,
+  salesBankAmountKey,
+  needsBankAmounts,
+  salesTin,
+  normaliseTin,
   salesProductKey,
   salesQty,
   salesTemplate,
 } from "@/lib/sales-invoice";
-import { BANK_OTHER } from "@/lib/banks";
+import { BANKS, BANK_OTHER } from "@/lib/banks";
+import { linkCustomerTin } from "@/lib/sales-tin";
+import {
+  GRV_LINES_EXAMPLE,
+  GRV_LINES_STEP,
+  GRV_MATCH_MORE,
+  GRV_MATCH_OK,
+  GRV_MATCH_REDO,
+  GRV_MATCH_STEP,
+  grvLines,
+  hasGrvLines,
+  setGrvLines,
+} from "@/lib/grv-lines";
+import { createCustomItems } from "@/lib/store-custom";
 import { eatDateLabel } from "@/lib/dates";
 import { chosenInvoice, customerChoices, invoiceChoices } from "@/lib/credit-bot";
 import { SETTLED_TOLERANCE_ETB } from "@/lib/credit";
@@ -70,6 +89,7 @@ import {
   STORE_BLOCKS,
   STORE_GROUPS,
   STORE_ITEMS,
+  allStoreItems,
   STORE_ITEM_BY_KEY,
   groupsOfBlock,
   itemsOfBlock,
@@ -147,6 +167,14 @@ export interface AssetFlowState {
    * be a migration for a field that exists for one exchange.
    */
   pendingCap?: string;
+  /**
+   * When a background read of this flow's photos (or the GRV's typed lines)
+   * started. While set — and younger than a few minutes — the step answers
+   * "still reading" instead of starting a second read, and the read's result is
+   * only written back if it is still the same read (the person may have
+   * cancelled meanwhile).
+   */
+  readingSince?: string;
 }
 
 /**
@@ -289,7 +317,14 @@ const STORE_COUNT_STEPS: AssetStep[] = [
       label: `${b.label} groups`,
       prompt: `${b.icon} <b>${b.label}</b> — የትኞቹን ዓይነቶች ቆጠሩ? ይንኩ፣ ከዚያ ✅ ጨርሻለሁ ይጫኑ።`,
       type: "multichoice" as const,
-      choices: groupsOfBlock(b.key).map((g) => ({ label: `${g.label} (${itemsOfGroup(g.key).length})`, value: g.key })),
+      // A getter, not a value: items a GRV added are registered after this
+      // table is built, and the list has to include them when it is SHOWN.
+      // Empty groups (a new "Added from GRV" before anything was added) are hidden.
+      get choices() {
+        return groupsOfBlock(b.key)
+          .filter((g) => itemsOfGroup(g.key).length > 0)
+          .map((g) => ({ label: `${g.label} (${itemsOfGroup(g.key).length})`, value: g.key }));
+      },
       when: (d: Record<string, string | number>) => ticked(d, STORE_SECTIONS_STEP).includes(b.key),
     },
     // Only the ticked groups are sent. Walking somebody through every shelf
@@ -838,7 +873,10 @@ function storeListSteps(direction: "in" | "out"): AssetStep[] {
         label: `${b.label} groups`,
         prompt: `${b.icon} <b>${b.label}</b> — ዕቃዎቹ ከየትኞቹ ዓይነቶች ናቸው? ይንኩ፣ ከዚያ ✅ ጨርሻለሁ ይጫኑ።`,
         type: "multichoice" as const,
-        choices: storeGroupChoices(b.key),
+        // Getters, like the count's: GRV-added items appear without a redeploy.
+        get choices() {
+          return storeGroupChoices(b.key);
+        },
         when: (d: Record<string, string | number>) => tickedBlocks(d).includes(b.key),
       },
       ...groupsOfBlock(b.key).map<AssetStep>((g) => ({
@@ -846,7 +884,9 @@ function storeListSteps(direction: "in" | "out"): AssetStep[] {
         label: `${g.label} items`,
         prompt: `${b.icon} <b>${g.label}</b> — ${verb} ዕቃዎች ይንኩ፣ ከዚያ ✅ ጨርሻለሁ ይጫኑ።`,
         type: "multichoice",
-        choices: storeItemChoices(g.key),
+        get choices() {
+          return storeItemChoices(g.key);
+        },
         columns: 2,
         when: (d: Record<string, string | number>) =>
           tickedBlocks(d).includes(b.key) && tickedGroups(d, b.key).includes(g.key),
@@ -889,17 +929,34 @@ const GRV_STEPS: AssetStep[] = [
   { id: "date", prompt: "📅 ዕቃው የገባበትን ቀን ይምረጡ።", type: "date" },
   { id: "grvNo", prompt: "🔢 የቫውቸሩን ቁጥር (No.) ይፃፉ — ለምሳሌ 5516።", type: "text", skippable: true },
   { id: "supplier", prompt: "🏢 አቅራቢውን (Supplier) ይፃፉ።", type: "text", skippable: true },
-  ...storeListSteps("in"),
-  // No stock-item question any more. PP bags arriving have their own form
-  // (🧺 የPP ከረጢት ገቢ), which records them per kind without depending on how a
-  // voucher line happened to be worded — so this voucher is now purely typed,
-  // and a delivery can no longer be filed twice in two places.
-  ...voucherItemSteps({
-    kinds: [],
-    costSkippable: false,
-    askUnitCost: true,
-    askLedger: false,
-  }),
+  // The items, TYPED — one line each, as the supplier's invoice has them — and
+  // matched to the store list by AI (grv-lines.ts, store-match.ts). No
+  // department → group → item keyboards: a clerk holding the paper should not
+  // have to find a bearing three menus deep. A line nothing matches becomes a
+  // new store item when the voucher is saved.
+  {
+    id: GRV_LINES_STEP,
+    label: "Items",
+    prompt:
+      "📦 የገቡትን ዕቃዎች ይፃፉ — በአንድ መስመር አንድ ዕቃ፦\n" +
+      "<b>ስም | መግለጫ | ብዛት | የነጠላ ዋጋ</b>\n\n" +
+      `<pre>${GRV_LINES_EXAMPLE}</pre>\n` +
+      "<i>ብዙ ዕቃ በአንድ መልዕክት መላክ ይቻላል። ከመጋዘን ዝርዝሩ ጋር በራሱ ይገናኛል፤ የሌለ ዕቃ አዲስ ሆኖ ይገባል።</i>",
+    type: "paste",
+  },
+  {
+    id: GRV_MATCH_STEP,
+    label: "Item matches",
+    prompt: "✅ ከላይ ያሉት ግንኙነቶች ትክክል ናቸው?",
+    type: "choice",
+    choices: [
+      { label: "✅ ትክክል ነው", value: GRV_MATCH_OK },
+      { label: "➕ ተጨማሪ ዕቃ", value: GRV_MATCH_MORE },
+      { label: "✏️ ሁሉንም እንደገና", value: GRV_MATCH_REDO },
+    ],
+    // Only once the lines exist; a draft from before the change keeps its own items.
+    when: (d) => hasGrvLines(d),
+  },
   {
     id: "currency",
     prompt: "💱 በየትኛው ገንዘብ ተከፍሏል?",
@@ -1415,7 +1472,15 @@ const SALES_INVOICE_STEPS: AssetStep[] = [
     prompt: "🧾 በብድር (credit) የተቆረጠውን ደረሰኝ መጠን በብር ይፃፉ። ከሌለ 0።",
     type: "number",
   },
-  { id: SALES_KEYS.deliveryNo, label: "Deli", prompt: "📄 የማድረሻ ቁጥሩን (Deli.) ይፃፉ።", type: "text", skippable: true },
+  {
+    id: SALES_KEYS.tin,
+    label: "TIN",
+    prompt: '🆔 የገዢውን TIN ቁጥር ይፃፉ (10 አሃዝ)። ደረሰኙ TIN ከሌለው "-" ይላኩ።',
+    type: "text",
+    // "-" is an answer here ("none"), not a skip: a skipped field reads as
+    // unanswered and would be asked again after every paste.
+    validate: normaliseTin,
+  },
   ...DELIVERY_PRODUCTS.map<AssetStep>((code) => ({
     id: salesProductKey(code),
     label: productLabel(code),
@@ -1425,17 +1490,28 @@ const SALES_INVOICE_STEPS: AssetStep[] = [
   {
     id: SALES_KEYS.bank,
     label: "Bank",
-    prompt: "🏦 ገንዘቡ የገባበትን ባንክ ይምረጡ።",
-    type: "choice",
+    // A sale can be paid into more than one bank, so this is a tick-list.
+    prompt: "🏦 ገንዘቡ የገባበትን ባንክ/ባንኮች ይምረጡ፣ ከዚያ ✅ ጨርሻለሁ ይጫኑ።",
+    type: "multichoice",
     choices: bankChoices(),
+    columns: 3,
   },
   {
     id: SALES_KEYS.bankOther,
     label: "Bank (other)",
     prompt: "🏦 የባንኩን ስም ይፃፉ።",
     type: "text",
-    when: (d) => d[SALES_KEYS.bank] === BANK_OTHER,
+    when: (d) => salesBanksTicked(d).includes(BANK_OTHER),
   },
+  // Several banks: what each one received, from its own slip. One bank needs no
+  // question — it received the cash invoice.
+  ...BANKS.map<AssetStep>((b) => ({
+    id: salesBankAmountKey(b),
+    label: `${b} amount`,
+    prompt: `💵 ወደ <b>${b === BANK_OTHER ? "ሌላ ባንክ" : b}</b> የገባው ገንዘብ ስንት ብር ነው?`,
+    type: "number",
+    when: (d) => needsBankAmounts(d) && salesBanksTicked(d).includes(b),
+  })),
 ];
 
 const STEPS: Record<AssetFlowKind, AssetStep[]> = {
@@ -1498,6 +1574,9 @@ export function pasteTemplate(
   }
   // The store count is the one flow with several paste steps, so its template
   // depends on WHICH block is being asked for, not just the flow.
+  // The typed GRV: a header to write under; the examples are in the prompt, so
+  // nothing copied back by accident becomes an item.
+  if (kind === "grv" && step === GRV_LINES_STEP) return "Name | Description | Qty | Unit price";
   if ((kind === "grv" || kind === "store_issue") && step === STORE_QTY_STEP) {
     return storeVoucherTemplate(draft, kind === "grv");
   }
@@ -1832,7 +1911,7 @@ export function assetPreview(state: AssetFlowState): string {
     return (
       head +
       `📅 Date: ${esc(d.date)}\n\n${lines}\n\n` +
-      `🔢 ጠቅላላ: <b>${STORE_ITEMS.filter(counted).length}</b> ዕቃ\n` +
+      `🔢 ጠቅላላ: <b>${allStoreItems().filter(counted).length}</b> ዕቃ\n` +
       "<i>ያልተቆጠሩት ዕቃዎች የቀድሞ ቁጥራቸውን ይይዛሉ።</i>\n"
     );
   }
@@ -1882,6 +1961,20 @@ export function assetPreview(state: AssetFlowState): string {
       .join("\n");
     const cash = Number(d[SALES_KEYS.invoiceCash]) || 0;
     const credit = Number(d[SALES_KEYS.invoiceCredit]) || 0;
+    const banks = salesBanks(d);
+    const bankSum = banks.reduce((a, b) => a + b.amount, 0);
+    const bankLines =
+      banks.length <= 1
+        ? `🏦 Bank: <b>${esc(salesBank(d) || "—")}</b>${mark(SALES_KEYS.bank)}\n\n`
+        : `🏦 <b>Banks</b>${mark(SALES_KEYS.bank)}\n` +
+          banks.map((b) => `  • ${esc(b.bank)}: ${money(b.amount)} ETB`).join("\n") +
+          "\n" +
+          // Said, not refused: a deposit can legitimately include an earlier
+          // balance, but a typo usually shows up exactly here.
+          (Math.abs(bankSum - cash) > 0.5
+            ? `  ⚠️ <i>የባንኮቹ ድምር ${money(bankSum)} ETB — ከጥሬ ገንዘቡ (${money(cash)}) ጋር አይመሳሰልም።</i>\n`
+            : "") +
+          "\n";
 
     return (
       head +
@@ -1890,8 +1983,8 @@ export function assetPreview(state: AssetFlowState): string {
       `💵 Invoice in cash: ${money(cash)} ETB${mark(SALES_KEYS.invoiceCash)}\n` +
       `🧾 Invoice in credit: ${money(credit)} ETB${mark(SALES_KEYS.invoiceCredit)}\n` +
       `  <b>ጠቅላላ: ${money(cash + credit)} ETB</b>\n` +
-      `📄 Deli.: ${esc(d[SALES_KEYS.deliveryNo]) || "—"}${mark(SALES_KEYS.deliveryNo)}\n` +
-      `🏦 Bank: <b>${esc(salesBank(d) || "—")}</b>${mark(SALES_KEYS.bank)}\n\n` +
+      `🆔 TIN: <b>${esc(salesTin(d) || "—")}</b>${mark(SALES_KEYS.tin)}\n` +
+      bankLines +
       `⚖️ <b>ብዛት (ቶን)</b>\n${brands || "  —"}\n` +
       `  ─────────\n  <b>Invoice qty: ${qty(salesQty(d))}</b>\n` +
       (ex?.checked
@@ -2011,9 +2104,17 @@ export function assetPreview(state: AssetFlowState): string {
           }`
         : "";
       const code = it.stockCode ? ` <i>[${esc(it.stockCode)}]</i>` : "";
+      // The typed GRV: say which store item each line moves, or that it is new.
+      const store =
+        isGrv && hasGrvLines(d)
+          ? it.ledgerKey
+            ? `\n     └ 📦 ${esc(STORE_ITEM_BY_KEY.get(it.ledgerKey)?.name ?? it.ledgerKey)}`
+            : "\n     └ 🆕 አዲስ ዕቃ ሆኖ ይገባል"
+          : "";
       return (
         `${i + 1}. ${esc(it.description)}${code} — <b>${qty(it.quantity)}</b> ${esc(it.unit) || "—"}${cost}` +
-        ledger
+        ledger +
+        store
       );
     });
 
@@ -2064,7 +2165,8 @@ export function assetPreview(state: AssetFlowState): string {
     // bags were never classified simply does not move the stock balance, and the
     // reporter is the only person who can still fix that — after saving, nobody
     // is looking.
-    const unclassified = isGrv ? voucherItems(d).filter((it) => !it.ledgerKey).length : 0;
+    // (On the typed GRV a line with no key is a NEW item, not an unclassified one.)
+    const unclassified = isGrv && !hasGrvLines(d) ? voucherItems(d).filter((it) => !it.ledgerKey).length : 0;
 
     return [
       ...head,
@@ -2188,6 +2290,21 @@ export interface VoucherItem {
  * no balance — which is the whole point of asking.
  */
 export function voucherItems(draft: Record<string, string | number>): VoucherItem[] {
+  // The GRV's typed, AI-matched lines. A line still without a key is a new
+  // item, given one when the voucher is saved (saveAssetFlow).
+  if (hasGrvLines(draft)) {
+    return grvLines(draft).map((l) => ({
+      stockCode: null,
+      description: l.desc ? `${l.name} — ${l.desc}` : l.name,
+      unit: l.match ? STORE_ITEM_BY_KEY.get(l.match)?.unit ?? l.unit : l.unit,
+      quantity: l.qty,
+      unitCost: l.cost,
+      totalAmount: l.cost ? Math.round(l.cost * l.qty * 100) / 100 : null,
+      ledgerKind: "store",
+      ledgerKey: l.match,
+      ledgerQty: l.qty,
+    }));
+  }
   // Warehouse-list lines first, in list order, then whatever was typed.
   const out: VoucherItem[] = storeLines(draft).map((l) => ({
     stockCode: null,
@@ -2497,15 +2614,21 @@ export async function saveAssetReport(
         invoice_cash: Number(d[SALES_KEYS.invoiceCash]) || 0,
         invoice_credit: Number(d[SALES_KEYS.invoiceCredit]) || 0,
         qty: salesQty(d),
+        // No longer asked; a draft from before the change may still carry one.
         delivery_no: String(d[SALES_KEYS.deliveryNo] || "").trim() || null,
         products: sql.json(jsonMap(d, SALES_PRODUCT_PREFIX, DELIVERY_PRODUCTS)),
         bank: salesBank(d),
+        banks: sql.json(salesBanks(d)),
+        tin: salesTin(d),
         extraction: state.extraction ? sql.json({ ...state.extraction }) : null,
         reported_by: reportedBy,
         source: "telegram",
       },
-      { source: "asset-flows" }
+      { source: "asset-flows", optional: ["banks", "tin"] }
     );
+    // The customer's other sales learn the TIN, and this one learns it from
+    // them. Never fatal: the sale is already saved.
+    await linkCustomerTin(row.id).catch((e) => console.error("TIN back-fill skipped:", e));
     return { id: row.id, table: "sales_invoices" };
   }
 
@@ -2585,6 +2708,24 @@ export async function saveAssetReport(
   if (state.kind === "grv" || state.kind === "store_issue") {
     const isGrv = state.kind === "grv";
     const date = reportDate(d.date);
+    // The typed GRV's new lines become store items FIRST, so every saved line
+    // points at a key and moves a balance from this voucher on. Written back
+    // into the draft, so a retried save does not add them twice.
+    if (isGrv && hasGrvLines(d)) {
+      const lines = grvLines(d);
+      const fresh = lines.filter((l) => !l.match);
+      if (fresh.length > 0) {
+        const keys = await createCustomItems(
+          fresh.map((l) => ({ name: l.name, description: l.desc, unit: l.unit, group: l.group })),
+          String(d.grvNo || "").trim() || null,
+          reportedBy
+        );
+        fresh.forEach((l, i) => {
+          l.match = keys[i];
+        });
+        setGrvLines(d, lines);
+      }
+    }
     let items = voucherItems(d);
     // An issue is valued at what each item cost ON the voucher's date, read
     // fresh here rather than trusted from the draft: the date can be corrected
@@ -2682,16 +2823,22 @@ export async function saveAssetReport(
     // re-recording it would just restate the old price as news. A failure here
     // costs the price history, never the voucher that is already saved.
     if (isGrv) {
-      const typed = tickedStoreItems(d)
+      const fromTicks = tickedStoreItems(d)
         .filter((item) => Number(d[storeCostKey(item.key)]) > 0)
-        .map((item) => ({
-          itemKey: item.key,
-          unitCost: Number(d[storeCostKey(item.key)]),
-          effectiveFrom: date.toISOString().slice(0, 10),
-          source: "grv" as const,
-          ref: voucherNo,
-          recordedBy: reportedBy,
-        }));
+        .map((item) => ({ itemKey: item.key, unitCost: Number(d[storeCostKey(item.key)]) }));
+      // Every typed line with a price — new items get their first cost here.
+      const fromLines = hasGrvLines(d)
+        ? grvLines(d)
+            .filter((l) => l.match && l.cost && l.cost > 0)
+            .map((l) => ({ itemKey: l.match!, unitCost: l.cost! }))
+        : [];
+      const typed = [...fromTicks, ...fromLines].map((c) => ({
+        ...c,
+        effectiveFrom: date.toISOString().slice(0, 10),
+        source: "grv" as const,
+        ref: voucherNo,
+        recordedBy: reportedBy,
+      }));
       await recordCosts(typed).catch((e) => console.error("GRV prices could not be recorded:", e));
     }
 

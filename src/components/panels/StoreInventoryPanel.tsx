@@ -197,7 +197,14 @@ function ItemTable({ rows, showGroup = false }: { rows: ItemStatus[]; showGroup?
           const change = s.qty !== null && s.previous !== null ? s.qty - s.previous : null;
           return (
             <tr key={s.item.key} className="border-t border-clay-50">
-              <td className="p-2 text-left font-semibold text-stone-800">{s.item.name}</td>
+              <td className="p-2 text-left font-semibold text-stone-800">
+                {s.item.name}
+                {s.item.custom && (
+                  <span className="ml-1 rounded bg-amber-50 px-1 text-[9px] font-bold text-amber-700" title="Added from a GRV">
+                    🆕
+                  </span>
+                )}
+              </td>
               {showGroup && <td className="p-2 text-left text-stone-500">{label(s.item.group)}</td>}
               <td className={`p-2 font-bold tabular-nums ${s.balance <= 0 && (s.qty !== null || s.received || s.issued) ? "text-red-700" : "text-stone-800"}`}>
                 {s.qty === null && !s.received && !s.issued ? (

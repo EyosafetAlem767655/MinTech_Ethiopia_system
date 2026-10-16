@@ -80,7 +80,9 @@ export function tickedGroups(draft: Record<string, string | number>, block: Stor
 
 /** The tick-list of a department's groups — the value is the group key. */
 export function storeGroupChoices(block: StoreBlockKey): { label: string; value: string }[] {
-  return groupsOfBlock(block).map((g) => ({ label: `${g.label} (${itemsOfGroup(g.key).length})`, value: g.key }));
+  return groupsOfBlock(block)
+    .filter((g) => itemsOfGroup(g.key).length > 0)
+    .map((g) => ({ label: `${g.label} (${itemsOfGroup(g.key).length})`, value: g.key }));
 }
 
 /**

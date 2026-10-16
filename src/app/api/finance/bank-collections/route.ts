@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import sql from "@/lib/sql";
 import { BANKS } from "@/lib/banks";
+import { salesBankLines, withSalesFallback } from "@/lib/sales-sql";
 
 export const dynamic = "force-dynamic";
 
@@ -35,19 +36,22 @@ export async function GET(req: NextRequest) {
 
   try {
     if (MONTH.test(month)) {
-      const sales = await sql<
-        { date_label: string; customer: string; delivery_no: string | null; bank: string | null; cash: string }[]
+      // One line per bank: a sale paid into two banks appears under each with
+      // that bank's share, so every month total adds up from these lines.
+      const sales = await withSalesFallback((legacy) => sql<
+        { date_label: string; customer: string; tin: string | null; delivery_no: string | null; bank: string | null; cash: string }[]
       >`
-        select date_label, customer, delivery_no, bank, invoice_cash as cash
-          from sales_invoices
-         where invoice_cash > 0 and ${eatMonth()} = ${month}
+        select date_label, customer, tin, delivery_no, bank, cash
+          from (${salesBankLines(legacy)}) l
+         where ${eatMonth()} = ${month}
          order by date, created_at
-      `;
+      `);
       return NextResponse.json({
         month,
         sales: sales.map((s) => ({
           date: s.date_label,
           customer: s.customer,
+          tin: s.tin,
           deliveryNo: s.delivery_no,
           bank: s.bank?.trim() || NO_BANK,
           cash: Number(s.cash) || 0,
@@ -55,13 +59,12 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    const rows = await sql<{ month: string; bank: string | null; cash: string; n: string }[]>`
-      select ${eatMonth()} as month, nullif(trim(bank), '') as bank, sum(invoice_cash) as cash, count(*) as n
-        from sales_invoices
-       where invoice_cash > 0
-         and date >= date_trunc('month', now() at time zone 'Africa/Addis_Ababa') - interval '11 months'
+    const rows = await withSalesFallback((legacy) => sql<{ month: string; bank: string | null; cash: string; n: string }[]>`
+      select ${eatMonth()} as month, bank, sum(cash) as cash, count(distinct id) as n
+        from (${salesBankLines(legacy)}) l
+       where date >= date_trunc('month', now() at time zone 'Africa/Addis_Ababa') - interval '11 months'
        group by 1, 2
-    `;
+    `);
 
     const byMonth = new Map<string, { banks: Record<string, number>; counts: Record<string, number> }>();
     for (const r of rows) {

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { groupStatuses, itemStatuses, recentCounts, storeMovements } from "@/lib/store-inventory";
 import { costsAt } from "@/lib/store-costs";
+import { loadCustomStoreItems } from "@/lib/store-custom";
 
 export const dynamic = "force-dynamic";
 
@@ -13,6 +14,7 @@ export const dynamic = "force-dynamic";
  * only exist once.
  */
 export async function GET() {
+  await loadCustomStoreItems();
   const [counts, movements, costs] = await Promise.all([recentCounts(), storeMovements(), costsAt(new Date())]);
   return NextResponse.json({
     items: itemStatuses(counts, movements, costs),

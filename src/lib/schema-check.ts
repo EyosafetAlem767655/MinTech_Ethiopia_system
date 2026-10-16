@@ -44,6 +44,8 @@ export const EXPECTED_COLUMNS: ExpectedColumn[] = [
   // alerts every admin and HR user again, so its absence is loud rather than
   // quiet — worth naming here alongside the silent ones.
   { table: "whiteness_checks", column: "alerted_at", migration: "0032_whiteness_alerts.sql" },
+  { table: "sales_invoices", column: "tin", migration: "0039_grv_sales_tin.sql" },
+  { table: "sales_invoices", column: "banks", migration: "0039_grv_sales_tin.sql" },
 ];
 
 /** Tables the app cannot work without, and the migration that creates each. */
@@ -58,6 +60,7 @@ export const EXPECTED_TABLES: { table: string; migration: string }[] = [
   { table: "system_jobs", migration: "0036_system_jobs.sql" },
   { table: "store_item_costs", migration: "0037_store_movements.sql" },
   { table: "downtime_months", migration: "0038_downtime_monthly.sql" },
+  { table: "store_custom_items", migration: "0039_grv_sales_tin.sql" },
 ];
 
 /** The file to run to fix everything at once, whatever is missing. */

@@ -9,9 +9,10 @@ import {
   VISION_MODEL,
   geminiAttempt,
   nvidiaVisionAI,
-  textAI,
+  resolveQwenModel,
   visionAI,
 } from "@/lib/llm";
+import OpenAI from "openai";
 import { stripReasoning } from "@/lib/llm-crossing";
 import { checkSchema } from "@/lib/schema-check";
 import { smsDiagnostics } from "@/lib/sms";
@@ -79,7 +80,7 @@ const RED_PIXEL =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
 
 /** Long enough for Gemini's receipt budget; every check runs in parallel. */
-const TIMEOUT_MS = 50_000;
+const TIMEOUT_MS = 65_000;
 
 /**
  * A provider saying "full right now" — NVIDIA's shared endpoint answers 503
@@ -193,7 +194,19 @@ const CHECKS: Record<HealthKey, () => Promise<{ ok: boolean; detail: string; ski
       : { ok: false, detail: `${res.model || GEMINI_MODEL}: ${res.error}` };
   },
 
-  nemotron_text: () => askOpenAi(() => (envValue("NIVIDA_API_KEY") || envValue("NVIDIA_API_KEY") ? textAI() : null), TEXT_MODEL, false),
+  // Its own client with a minute to answer: the shared one is cut at 45s for
+  // the chat's sake, and the big Nemotron can take longer than that cold.
+  nemotron_text: () => {
+    const key = envValue("NIVIDA_API_KEY") || envValue("NVIDIA_API_KEY");
+    return askOpenAi(
+      () =>
+        key
+          ? new OpenAI({ apiKey: key, baseURL: envValue("NVIDIA_BASE_URL") || "https://integrate.api.nvidia.com/v1", timeout: 60_000, maxRetries: 0 })
+          : null,
+      TEXT_MODEL,
+      false
+    );
+  },
 
   nemotron_vision: () => askOpenAi(nvidiaVisionAI, NEMOTRON_VISION_MODEL, true, true),
 
@@ -201,10 +214,17 @@ const CHECKS: Record<HealthKey, () => Promise<{ ok: boolean; detail: string; ski
     // The endpoint and model are named on a failure: a 404 is either the wrong
     // address or a model name that provider does not serve, and only those two
     // values tell which.
-    const where = `${VISION_MODEL} at ${QWEN_ENDPOINT}${QWEN_ON_NVIDIA ? " (NVIDIA key)" : ""}`;
+    const { model, available } = await resolveQwenModel();
+    const offered = QWEN_ON_NVIDIA
+      ? available.length
+        ? ` · Qwen vision models on NVIDIA: ${available.join(", ")} (set QWEN_MODEL to one)`
+        : " · NVIDIA lists no Qwen vision model for this key"
+      : "";
+    const where = `${model} at ${QWEN_ENDPOINT}${QWEN_ON_NVIDIA ? " (NVIDIA key)" : ""}`;
     try {
-      const r = await askOpenAi(() => (envValue("QWEN_API") ? visionAI() : null), VISION_MODEL, true);
-      return r.ok || r.skipped ? r : { ...r, detail: `${r.detail} — ${where}` };
+      const r = await askOpenAi(() => (envValue("QWEN_API") ? visionAI() : null), model, true);
+      if (r.ok && model !== VISION_MODEL) return { ...r, detail: `${r.detail} (${VISION_MODEL} is not served — using ${model})` };
+      return r.ok || r.skipped ? r : { ...r, detail: `${r.detail} — ${where}${offered}` };
     } catch (e) {
       return { ok: false, detail: `${short(e)} — ${where}` };
     }
@@ -239,7 +259,14 @@ const CHECKS: Record<HealthKey, () => Promise<{ ok: boolean; detail: string; ski
     } catch (e) {
       // A real VAPID public key is 87 characters and a private one 43. A
       // different length means a different value was pasted, not a format slip.
-      return { ok: false, detail: `${short(e)} — public key ${pub.length} chars (should be 87), private ${priv.length} (should be 43)` };
+      // "B..." and "..." are the .env.example placeholders, copied as they were.
+      const placeholder = pub.length < 20 || priv.length < 20;
+      return {
+        ok: false,
+        detail: placeholder
+          ? `the VAPID keys are still the placeholders from .env.example (public ${pub.length} chars, private ${priv.length}). Run "npx web-push generate-vapid-keys" and set VAPID_PUBLIC_KEY, NEXT_PUBLIC_VAPID_PUBLIC_KEY (same value) and VAPID_PRIVATE_KEY in Vercel.`
+          : `${short(e)} — public key ${pub.length} chars (should be 87), private ${priv.length} (should be 43)`,
+      };
     }
     return { ok: true, detail: `keys valid · subject ${vapidSubject()}` };
   },

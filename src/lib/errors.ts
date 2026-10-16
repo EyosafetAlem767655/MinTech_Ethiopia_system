@@ -55,6 +55,22 @@ export const INFO_KINDS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Does this failure only mean "the AI provider is full right now"?
+ *
+ * A 503 "high demand" from Gemini or NVIDIA passes on its own within minutes,
+ * and the person holding the phone is told to try again shortly. Paging the
+ * administrators for it says nothing they can act on. A message that ALSO names
+ * a wrong key or a missing model (401/403/404) is not "just busy" — the
+ * fallback chain joins every provider's error into one line, and a dead key
+ * hiding behind a busy Gemini must still be reported.
+ */
+export function isProviderBusy(message: string | undefined | null): boolean {
+  const m = String(message || "");
+  if (!/\b(503|429)\b|overloaded|request limit|resource.?exhausted|high demand|unavailable/i.test(m)) return false;
+  return !/\b(401|403|404)\b|unauthori[sz]ed|forbidden|not found|invalid (api )?key/i.test(m);
+}
+
+/**
  * Record a failure. Returns whether this is the first of its kind this hour,
  * which is what the caller uses to decide whether to alert a human.
  *
@@ -86,7 +102,10 @@ export async function logError(rec: ErrorRecord): Promise<{ logged: boolean; sho
     // Nothing called alertAdmins for months, so every error in this table was
     // one nobody was told about. runAfter keeps the Telegram round trip off the
     // caller's path, which is why the two were kept apart in the first place.
-    if (shouldAlert && !INFO_KINDS.has(rec.kind)) {
+    // A provider that is only busy is recorded (Settings → Errors still shows
+    // how often) but not messaged: it clears itself, and the daily API check
+    // reports one that stays down.
+    if (shouldAlert && !INFO_KINDS.has(rec.kind) && !isProviderBusy(rec.message)) {
       runAfter(alertAdmins({ ...rec, shouldAlert }));
     }
     return { logged: true, shouldAlert };

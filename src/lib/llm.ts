@@ -41,6 +41,49 @@ const QWEN_BASE =
 export const QWEN_ENDPOINT = QWEN_BASE;
 export const VISION_MODEL =
   envValue("QWEN_MODEL") || (QWEN_ON_NVIDIA ? "qwen/qwen2.5-vl-72b-instruct" : "qwen-vl-max-latest");
+
+/**
+ * The Qwen vision model actually used — VISION_MODEL, unless that name is not
+ * in NVIDIA's catalogue.
+ *
+ * NVIDIA renames and retires models, and a guessed default answered "404 page
+ * not found". With an NVIDIA key and no QWEN_MODEL set, the catalogue
+ * (GET /models) is asked once per instance: the configured name is kept if it
+ * is listed, otherwise the first Qwen vision model there is used. An explicit
+ * QWEN_MODEL is never second-guessed.
+ */
+let qwenResolved: Promise<{ model: string; available: string[] }> | null = null;
+
+export function resolveQwenModel(): Promise<{ model: string; available: string[] }> {
+  if (!QWEN_ON_NVIDIA || envValue("QWEN_MODEL")) return Promise.resolve({ model: VISION_MODEL, available: [] });
+  if (!qwenResolved) {
+    qwenResolved = (async () => {
+      try {
+        const res = await fetch(`${QWEN_BASE}/models`, {
+          headers: { authorization: `Bearer ${envValue("QWEN_API")}` },
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const body = (await res.json()) as { data?: { id?: string }[] };
+        const ids = (body.data || []).map((m) => String(m.id || "")).filter(Boolean);
+        const available = ids.filter((id) => /qwen/i.test(id) && /vl|omni|vision/i.test(id));
+        const model = ids.includes(VISION_MODEL) ? VISION_MODEL : available[0] || VISION_MODEL;
+        return { model, available };
+      } catch (e) {
+        console.warn("Qwen model list unavailable:", e);
+        qwenResolved = null; // ask again next time rather than caching a failure
+        return { model: VISION_MODEL, available: [] };
+      }
+    })();
+  }
+  return qwenResolved;
+}
+
+/** The Qwen vision model name to send. */
+export async function qwenModel(): Promise<string> {
+  return (await resolveQwenModel()).model;
+}
+
 /**
  * Nemotron that can SEE — the image fallback when every Gemini model is down.
  * Same NVIDIA key and endpoint as the text model; this one reads images.
@@ -249,7 +292,7 @@ export function textAI(): OpenAI {
     // Hard timeout + no retry storm: a slow or unresponsive endpoint must fail
     // fast (surfaced as an error) rather than hang the serverless function past
     // its maxDuration, which leaves the UI spinner stuck forever.
-    _textClient = new OpenAI({ apiKey, baseURL: NVIDIA_BASE, timeout: 20000, maxRetries: 0 });
+    _textClient = new OpenAI({ apiKey, baseURL: NVIDIA_BASE, timeout: 45000, maxRetries: 0 });
     _textKey = apiKey;
   }
   return _textClient;
@@ -294,7 +337,7 @@ export function visionAI(): OpenAI {
  * so pull out the first balanced {...} object.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function extractJson(raw?: string | null): any {
+export function extractJson(raw?: string | null): any {
   if (!raw) return {};
   let s = String(raw).trim();
   s = s.replace(/<think>[\s\S]*?<\/think>/gi, "");
@@ -353,7 +396,7 @@ export async function checkClaimPhoto(
 ): Promise<PhotoVerdict> {
   try {
     const res = await visionAI().chat.completions.create({
-      model: VISION_MODEL,
+      model: await qwenModel(),
       max_tokens: 500,
       messages: [
         {
@@ -684,7 +727,7 @@ async function crossProvider(
     let lastModel = "";
     for (const v of [
       { model: NEMOTRON_VISION_MODEL, client: () => nvidiaVisionAI(), reasoning: true },
-      { model: VISION_MODEL, client: () => (envValue("QWEN_API") ? visionAI() : null), reasoning: false },
+      { model: await qwenModel(), client: () => (envValue("QWEN_API") ? visionAI() : null), reasoning: false },
     ]) {
       const client = v.client();
       if (!client) continue;
@@ -1108,14 +1151,16 @@ const SALES_INVOICE_SYSTEM =
   "You read the paperwork for ONE sale by an Ethiopian producer of ground minerals and return STRICT " +
   "JSON only.\n" +
   "The images are the DIFFERENT DOCUMENTS of that one sale — typically the cash-sale or credit-sale " +
-  "invoice, a delivery note, and sometimes a bank deposit slip — or several angles of the same page. " +
+  "invoice, a delivery note, and one or more bank deposit slips — or several angles of the same page. " +
   "They describe ONE sale: merge them into ONE result and NEVER add quantities or totals across images.\n" +
   'Return exactly: { "customer": string (the buyer / "Deliver to" name as printed), ' +
   '"invoiceCash": number (ETB invoiced and paid in cash; 0 if this was a credit sale), ' +
   '"invoiceCredit": number (ETB invoiced on credit / to be paid later; 0 if paid in cash), ' +
-  '"deliveryNo": string (the delivery note number, digits as printed, "" if none), ' +
+  '"tin": string (the BUYER\'s TIN — Tax Identification Number, 10 digits, as printed for the customer; ' +
+  'NOT the seller\'s own TIN; "" if none), ' +
   '"products": { "<code>": number } (tonnes sold per product, keyed by CODE), ' +
-  '"bank": string (the bank named on a deposit slip or payment line, "" if none), ' +
+  '"banks": [ { "bank": string, "amount": number } ] (ONE entry per bank deposit slip or payment line — ' +
+  'a sale can be paid into several banks; amount is the ETB on that slip; [] if none), ' +
   '"confidence": number (0-100), "notes": string (one short sentence) }.\n' +
   `Product codes, exactly as keys: ${PRODUCT_ORDER.join(", ")}. On paper they appear as ${PRODUCT_ORDER.map(
     (c) => `${productLabel(c)} (${c})`
@@ -1146,7 +1191,7 @@ export async function extractSalesInvoice(
 ): Promise<SalesInvoiceReadResult> {
   if (images.length === 0) return { ok: false, error: "no image to read" };
 
-  const parts: GeminiPart[] = images.slice(0, 3).map((img) => ({
+  const parts: GeminiPart[] = images.slice(0, 6).map((img) => ({
     inline_data: { mime_type: img.contentType || "image/jpeg", data: img.base64 },
   }));
   parts.push({ text: "Read this sale's documents into the sales sheet columns." });
@@ -1184,9 +1229,14 @@ export async function extractSalesInvoice(
         customer: String(p.customer || "").trim(),
         invoiceCash: receiptNum(p.invoiceCash),
         invoiceCredit: receiptNum(p.invoiceCredit),
-        deliveryNo: String(p.deliveryNo || "").trim(),
+        tin: String(p.tin || "").trim(),
         products,
-        bank: String(p.bank || "").trim(),
+        banks: (Array.isArray(p.banks) ? p.banks : p.bank ? [{ bank: p.bank, amount: 0 }] : [])
+          .map((b: unknown) => {
+            const o = (b ?? {}) as { bank?: unknown; amount?: unknown };
+            return { bank: String(o.bank || "").trim(), amount: receiptNum(o.amount) };
+          })
+          .filter((b: { bank: string }) => b.bank),
         confidence: Math.max(0, Math.min(100, Math.round(Number(p.confidence) || 0))),
         notes: String(p.notes || "").trim(),
       },
@@ -1355,7 +1405,7 @@ export async function analyseDamagePhoto(
   // Tier 2 — Qwen-VL. Still a real look at the image.
   try {
     const res = await visionAI().chat.completions.create({
-      model: VISION_MODEL,
+      model: await qwenModel(),
       max_tokens: 400,
       messages: [
         { role: "system", content: DAMAGE_PROMPT },
@@ -1432,7 +1482,7 @@ export interface QRCheckResult {
 export async function checkReceiptQRCode(imageBase64: string, contentType: string): Promise<QRCheckResult> {
   try {
     const res = await visionAI().chat.completions.create({
-      model: VISION_MODEL,
+      model: await qwenModel(),
       max_tokens: 200,
       messages: [
         {
@@ -1535,7 +1585,7 @@ export async function verifyRequestLegitimacy(
 
   try {
     const res = await visionAI().chat.completions.create({
-      model: VISION_MODEL,
+      model: await qwenModel(),
       max_tokens: 400,
       messages: [
         {
@@ -1653,7 +1703,7 @@ export async function classifyIngestion(opts: {
     ];
 
     const params: Record<string, unknown> = {
-      model: useVision ? VISION_MODEL : TEXT_MODEL,
+      model: useVision ? await qwenModel() : TEXT_MODEL,
       max_tokens: 900,
       messages,
     };

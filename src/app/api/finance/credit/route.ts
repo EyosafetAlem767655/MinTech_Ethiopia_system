@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import sql, { isUuid } from "@/lib/sql";
 import { creditFigures, customerExposure, type CreditRowLike } from "@/lib/credit";
+import { withSalesFallback } from "@/lib/sales-sql";
 
 export const dynamic = "force-dynamic";
 
@@ -23,8 +24,9 @@ interface PaymentRow {
 
 /** One invoice with its payment history, ready for the panel. */
 async function loadRows() {
-  const invoices = await sql<Record<string, unknown>[]>`
-    select i.id as "_id", i.date, i.customer, i.qty, i.invoice_credit as "invoiceCredit",
+  const invoices = await withSalesFallback((legacy) => sql<Record<string, unknown>[]>`
+    select i.id as "_id", i.date, i.customer, ${legacy ? sql`null::text` : sql`i.tin`} as tin,
+           i.qty, i.invoice_credit as "invoiceCredit",
            i.invoice_cash as "invoiceCash", i.delivery_no as "deliveryNo", i.bank,
            i.reported_by as "reportedBy",
            coalesce((select sum(p.amount) from sales_credit_payments p where p.invoice_id = i.id), 0) as "paid"
@@ -32,7 +34,7 @@ async function loadRows() {
      where i.invoice_credit > 0
      order by i.date desc
      limit 500
-  `;
+  `);
   if (invoices.length === 0) return [];
 
   const ids = invoices.map((r) => String(r._id));
@@ -68,6 +70,7 @@ async function loadRows() {
       _id: String(r._id),
       date: String(r.date),
       customer: String(r.customer || ""),
+      tin: (r.tin as string) ?? null,
       qty: Number(r.qty) || 0,
       invoiceCash: Number(r.invoiceCash) || 0,
       deliveryNo: (r.deliveryNo as string) ?? null,

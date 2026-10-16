@@ -39,6 +39,12 @@ export interface StoreItem {
   /** As written on the managers' list. */
   name: string;
   unit: StoreUnit;
+  /**
+   * Added from a GRV rather than written here (table `store_custom_items`).
+   * Such an item carries the voucher's description too.
+   */
+  custom?: boolean;
+  description?: string;
 }
 
 export interface StoreGroup {
@@ -100,6 +106,8 @@ export const STORE_GROUPS: StoreGroup[] = [
   { key: "filt", label: "Filters", block: "workshop" },
   { key: "steel", label: "Steel, pipe & sheet", block: "workshop" },
   { key: "safety", label: "Safety & tools", block: "workshop" },
+  // Where an item a GRV adds goes when no group above fits it.
+  { key: "added", label: "Added from GRV", block: "workshop" },
 ];
 
 /** Shorthand so the list below reads like the list it came from. */
@@ -613,26 +621,60 @@ export const STORE_ITEMS: StoreItem[] = [
   it("safety:wool-fabric-10", "safety", "Industrial wool Fabric (10x1x2)"),
 ];
 
+/* ──────────────────────── items added from a GRV ─────────────────────────── */
+
+/**
+ * Items the GRV added because nothing on the list matched them. They live in
+ * the database (store_custom_items, 0039), not here; `loadCustomStoreItems`
+ * (store-custom.ts) registers them on each instance so every reader of this
+ * file — the voucher tick-lists, the count blocks, the inventory — sees them.
+ *
+ * They are appended AFTER the written list within each group, in the order
+ * they were created, so the tick-list position of every existing item (what a
+ * live keyboard's callbacks refer to) never shifts.
+ */
+const CUSTOM_ITEMS: StoreItem[] = [];
+
+/** Any group a new item may be filed under; the AI picks one, this is the fallback. */
+export const ADDED_GROUP = "added";
+
+/** Every item: the written list, then what the GRVs added. */
+export function allStoreItems(): StoreItem[] {
+  return CUSTOM_ITEMS.length ? [...STORE_ITEMS, ...CUSTOM_ITEMS] : STORE_ITEMS;
+}
+
 /* ──────────────────────────────── lookups ─────────────────────────────────── */
 
 export const STORE_ITEM_BY_KEY = new Map(STORE_ITEMS.map((i) => [i.key, i]));
 
 export const GROUP_BY_KEY = new Map(STORE_GROUPS.map((g) => [g.key, g]));
 
+/** Make GRV-added items visible on this instance. Idempotent; never replaces a written key. */
+export function registerCustomItems(items: StoreItem[]): void {
+  for (const raw of items) {
+    if (STORE_ITEMS.some((i) => i.key === raw.key)) continue;
+    const item: StoreItem = { ...raw, group: GROUP_BY_KEY.has(raw.group) ? raw.group : ADDED_GROUP, custom: true };
+    const at = CUSTOM_ITEMS.findIndex((i) => i.key === item.key);
+    if (at >= 0) CUSTOM_ITEMS[at] = item;
+    else CUSTOM_ITEMS.push(item);
+    STORE_ITEM_BY_KEY.set(item.key, item);
+  }
+}
+
 /** The groups of one block, in list order. */
 export function groupsOfBlock(block: StoreBlockKey): StoreGroup[] {
   return STORE_GROUPS.filter((g) => g.block === block);
 }
 
-/** The items of one group, in list order. */
+/** The items of one group, in list order (GRV additions last). */
 export function itemsOfGroup(group: string): StoreItem[] {
-  return STORE_ITEMS.filter((i) => i.group === group);
+  return allStoreItems().filter((i) => i.group === group);
 }
 
 /** The items of one block, in list order. */
 export function itemsOfBlock(block: StoreBlockKey): StoreItem[] {
   const groups = new Set(groupsOfBlock(block).map((g) => g.key));
-  return STORE_ITEMS.filter((i) => groups.has(i.group));
+  return allStoreItems().filter((i) => groups.has(i.group));
 }
 
 /** "4 pcs", "12 l" — the figure with the unit it was counted in. */

@@ -123,7 +123,7 @@ export default function ChatPage() {
     // Never let the UI hang forever: abort the request if the server hasn't
     // responded in time (it should fail much sooner via its own timeouts).
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 65000);
+    const timer = setTimeout(() => ctrl.abort(), 185000);
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
