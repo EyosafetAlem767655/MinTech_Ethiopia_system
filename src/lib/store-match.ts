@@ -44,7 +44,7 @@ function exactMatch(line: TypedGrvLine, items: StoreItem[]): StoreItem | null {
   return hits.length === 1 ? hits[0] : null;
 }
 
-function fuzzyMatch(line: TypedGrvLine, items: StoreItem[]): StoreItem | null {
+function fuzzyMatch(line: TypedGrvLine, items: StoreItem[], loose = false): StoreItem | null {
   const typed = words(`${line.name} ${line.desc}`);
   if (typed.size === 0) return null;
   let best: { item: StoreItem; score: number } | null = null;
@@ -59,7 +59,11 @@ function fuzzyMatch(line: TypedGrvLine, items: StoreItem[]): StoreItem | null {
       best = { item: it, score };
     } else if (score > second) second = score;
   }
-  return best && best.score >= 0.6 && best.score - second >= 0.2 ? best.item : null;
+  // Issuing takes the nearest similar item (it is on the shelf already); a
+  // receipt only an unmistakable one, since a wrong match there adds stock to
+  // the wrong part.
+  const [floor, margin] = loose ? [0.35, 0.1] : [0.6, 0.2];
+  return best && best.score >= floor && best.score - second >= margin ? best.item : null;
 }
 
 const SYSTEM =
@@ -78,11 +82,31 @@ const SYSTEM =
   "for a match, the item's unit.";
 
 /**
+ * The same task for an ISSUE (SIV): what leaves the store was on the shelf, so
+ * a line is matched to the NEAREST similar item even when worded differently;
+ * a new item is created only when nothing on the list is that kind of part.
+ */
+const SYSTEM_ISSUE =
+  "You match the lines of a Store Issue Voucher (items taken OUT of the spare-parts store) at an Ethiopian " +
+  "mineral-grinding plant to the store list, and return STRICT JSON only.\n" +
+  'Return exactly: { "matches": [ { "line": number, "key": string | null, "group": string, "unit": string } ] } ' +
+  "with ONE entry per voucher line.\n" +
+  "Each line is \"name — description\". The item was taken from the store, so it is almost always on the list: " +
+  "pick the CLOSEST existing item of the same kind, allowing for different wording, spelling, abbreviations, " +
+  "Amharic/English names and word order. When a size or code is given (6210, C-150, 16A), prefer the item " +
+  "with that size. key is null ONLY when nothing on the list is that kind of part at all — then it becomes a " +
+  "new item, and group / unit say where to file it (one of pcs, l, m, roll, pak, kg, set, bottle, drum, tin, berga).";
+
+/**
  * Match every line still pending. A line already decided — matched earlier, or
  * corrected by hand on the card — is kept as it is, so "➕ add more" only asks
  * about the new lines.
  */
-export async function matchGrvLines(typed: (TypedGrvLine | GrvLine)[]): Promise<Retryable<GrvLine[]>> {
+export async function matchGrvLines(
+  typed: (TypedGrvLine | GrvLine)[],
+  opts: { mode?: "receive" | "issue" } = {}
+): Promise<Retryable<GrvLine[]>> {
+  const issue = opts.mode === "issue";
   const items = allStoreItems();
   const out: GrvLine[] = typed.map((l) => {
     const prior = l as Partial<GrvLine>;
@@ -114,7 +138,13 @@ export async function matchGrvLines(typed: (TypedGrvLine | GrvLine)[]): Promise<
         parts: [{ text: `GROUPS:\n${groups}\n\nSTORE LIST (key | group | name | unit):\n${catalogue}\n\nVOUCHER LINES:\n${asked}` }],
       },
     ],
-    { json: true, systemInstruction: SYSTEM, errorSource: "grv-match", maxOutputTokens: 8192, timeoutMs: 40_000 }
+    {
+      json: true,
+      systemInstruction: issue ? SYSTEM_ISSUE : SYSTEM,
+      errorSource: issue ? "siv-match" : "grv-match",
+      maxOutputTokens: 8192,
+      timeoutMs: 40_000,
+    }
   );
 
   if (!res.ok && isProviderBusy(res.error)) return { ok: false, error: res.error || "busy" };
@@ -156,7 +186,7 @@ export async function matchGrvLines(typed: (TypedGrvLine | GrvLine)[]): Promise<
       continue;
     }
     // No AI answer for this line: the best a word count can do, or new.
-    const guess = fuzzyMatch(l, items);
+    const guess = fuzzyMatch(l, items, issue);
     Object.assign(
       l,
       guess

@@ -13,13 +13,6 @@ import { BagStockCheck, type Reconciliation } from "@/components/panels/BagStock
  * number worth looking at.
  */
 
-interface ReceiptCheck {
-  checked: boolean;
-  score: number;
-  printedTotal: number | null;
-  mismatches: string[];
-}
-
 interface Item {
   voucherId: string;
   position: number;
@@ -53,7 +46,6 @@ interface Voucher {
   /** Telegram file ids, for vouchers photographed after receipts stopped being
    *  uploaded. /api/files serves either kind, so both render the same way. */
   tgFileIds?: string[];
-  receiptCheck?: ReceiptCheck | null;
 }
 
 interface Payload {
@@ -217,7 +209,6 @@ function VoucherCard({ v, items, isGrv }: { v: Voucher; items: Item[]; isGrv: bo
             <p className="text-sm font-bold tabular-nums text-clay-900">
               {fmt(v.totalAmount)} {v.currency}
             </p>
-            <ReceiptBadge check={v.receiptCheck ?? null} />
           </div>
         )}
       </div>
@@ -319,21 +310,3 @@ function VoucherCard({ v, items, isGrv }: { v: Voucher; items: Item[]; isGrv: bo
   );
 }
 
-/**
- * The receipt cross-check.
- *
- * Never red when the check has not run: "we could not read it" is its own
- * outcome and must not look like an accusation about the paperwork.
- */
-function ReceiptBadge({ check }: { check: ReceiptCheck | null }) {
-  if (!check) return <span className="text-[10px] text-stone-400">receipt not checked</span>;
-  if (!check.checked) return <span className="text-[10px] text-stone-400">check unavailable</span>;
-  if (check.mismatches.length > 0) {
-    return (
-      <span className="text-[10px] font-bold text-red-700" title={check.mismatches.join("; ")}>
-        ⚠️ total disagrees
-      </span>
-    );
-  }
-  return <span className="text-[10px] font-bold text-green-700">✓ matches receipt</span>;
-}

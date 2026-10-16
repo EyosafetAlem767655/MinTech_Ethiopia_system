@@ -56,6 +56,8 @@ import {
   GRV_LINES_STEP,
   GRV_MATCH_MORE,
   GRV_MATCH_DROP,
+  GRV_MATCH_REDO,
+  SIV_COUNT_STEP,
   GRV_MATCH_STEP,
   MAX_GRV_LINES,
   grvLines,
@@ -74,7 +76,7 @@ import { runAfter } from "@/lib/after";
 import { whitenessAlert } from "@/lib/whiteness-alert";
 import { parseRawMaterialPaste } from "@/lib/raw-material-paste";
 import { parsePpBagPaste } from "@/lib/pp-bag-paste";
-import { hoursBlock, parseHoursBlock } from "@/lib/downtime-sheet";
+import { parseHoursBlock, setHoursCells } from "@/lib/downtime-sheet";
 import { INVOICES_KEY, chosenInvoice, encodeInvoices, openCreditInvoices } from "@/lib/credit-bot";
 import { LOADS_KEY, chosenLoad, encodeLoads, loadRemaining, openRmLoads } from "@/lib/rm-credit";
 import { SETTLED_TOLERANCE_ETB } from "@/lib/credit";
@@ -1404,17 +1406,21 @@ async function matchGrvIntoDraft(
   chatId: string,
   started: AssetFlowState
 ): Promise<void> {
-  const { result, gaveUp } = await readWithBusyRetry(() => matchGrvLines(grvLines(started.draft)), {
+  const isIssue = started.kind === "store_issue";
+  const { result, gaveUp } = await readWithBusyRetry(
+    () => matchGrvLines(grvLines(started.draft), { mode: isIssue ? "issue" : "receive" }),
+    {
     onWait: busyWaitNotice(chatId),
     deadlineMs: Date.parse(started.readingSince || "") + READ_DEADLINE_MS || Date.now() + READ_DEADLINE_MS,
-  });
+  }
+  );
 
   const claimed = await reclaimFlow(chatId, started_session.userName, started);
   if (!claimed) return;
   const { session, state } = claimed;
 
   if (!result.ok) {
-    await logError({ source: "grv-match", kind: gaveUp ? "grv_match_busy" : "grv_match_failed", message: result.error, chatId });
+    await logError({ source: isIssue ? "siv-match" : "grv-match", kind: gaveUp ? "grv_match_busy" : "grv_match_failed", message: result.error, chatId });
     session.assetFlow = { ...state };
     await persist(session);
     await sendMessage(
@@ -1434,9 +1440,14 @@ async function matchGrvIntoDraft(
   state.step = GRV_MATCH_STEP;
   session.assetFlow = { ...state };
   await persist(session);
-  // Just the row(s) this message added, and the running count — not the whole
-  // list again after every item. The review card shows them all.
-  await sendMessage(chatId, grvAddedCard(result.data, added));
+  if (isIssue) {
+    // The SIV's whole list at once, to confirm or send again.
+    for (const part of grvMatchCards(result.data, { withCost: false })) await sendMessage(chatId, part);
+  } else {
+    // The GRV: just the row(s) this message added and the running count — not
+    // the whole list after every item. The review card shows them all.
+    await sendMessage(chatId, grvAddedCard(result.data, added));
+  }
   await askAssetStep(chatId, state);
 }
 
@@ -1573,10 +1584,12 @@ async function extractDowntimeIntoDraft(
     return;
   }
 
-  // The read becomes the block to check; an unread sheet gives the empty
-  // three-line block to type into.
+  // A good read is held cell by cell and goes straight to the review card, to
+  // be confirmed or corrected field by field. Only an unread sheet falls back
+  // to typing the lines into the empty block.
   const rows = read?.ok ? read.data.rows : [];
-  state.draft.readRows = hoursBlock(rows);
+  setHoursCells(state.draft, rows);
+  delete state.draft.readRows;
 
   state.extraction = read?.ok
     ? {
@@ -1595,22 +1608,20 @@ async function extractDowntimeIntoDraft(
         error: read && !read.ok ? read.error : "no sheet could be read back",
       };
 
-  state.step = DOWNTIME_ROWS_STEP;
+  state.step = rows.length > 0 ? "review" : DOWNTIME_ROWS_STEP;
   session.assetFlow = { ...state };
   await persist(session);
 
-  // The read's own arithmetic, pointed out before the block is sent back.
-  const check = rows.length ? parseHoursBlock(hoursBlock(rows), String(state.draft.month || "")) : null;
   await sendMessage(
     chatId,
-    read?.ok
-      ? `✅ ${rows.length} የምርት መስመር ከሉሁ ተነብቧል (እርግጠኝነት ${read.data.confidence}%)።` +
-          (check?.warnings.length ? `\n⚠️ ${check.warnings.map((w) => escapeHtml(w)).join("\n⚠️ ")}` : "") +
+    rows.length > 0 && read?.ok
+      ? `✅ ${rows.length} የምርት መስመር ከሉሁ ተነብቧል (እርግጠኝነት ${read.data.confidence}%)። ከታች ያረጋግጡ — ስህተት ካለ "✏️" ይጫኑ።` +
           (read.data.unmatched.length
-            ? `\n⚠️ ያልተነበቡ መስመሮች፦\n${read.data.unmatched.map((u) => `• ${escapeHtml(u)}`).join("\n")}`
+            ? `\n⚠️ ያልተነበቡ፦\n${read.data.unmatched.map((u) => `• ${escapeHtml(u)}`).join("\n")}`
             : "")
-      : "ℹ️ ሉሁን ማንበብ አልተቻለም። ቅጂውን ሞልተው ይመልሱት።"
+      : "ℹ️ ሉሁን ማንበብ አልተቻለም። ከታች ባለው ቅጂ ላይ ሞልተው ይላኩ።"
   );
+  // The review card (with the sum warnings) — or the empty block to type into.
   await askAssetStep(chatId, state);
 }
 
@@ -2549,7 +2560,7 @@ export async function POST(req: NextRequest) {
           return NextResponse.json({ ok: true });
         }
         state.draft.date = val;
-      } else if (step.type === "choice" && state.kind === "grv" && step.id === GRV_MATCH_STEP) {
+      } else if (step.type === "choice" && (state.kind === "grv" || state.kind === "store_issue") && step.id === GRV_MATCH_STEP) {
         /* ── The GRV match card: confirm, add, start over — or correct a line ── */
         const lines = grvLines(state.draft);
         if (/^\d+\s*[=:]/.test(val)) {
@@ -2569,7 +2580,7 @@ export async function POST(req: NextRequest) {
                 "<i>የመስመሩ ቁጥር እና <code>new</code> ወይም ትክክለኛ የዕቃ ቁልፍ (ለምሳሌ brg:6210) ያስፈልጋል።</i>"
             );
           }
-          for (const part of grvMatchCards(lines)) await sendMessage(chatId, part);
+          for (const part of grvMatchCards(lines, { withCost: state.kind === "grv" })) await sendMessage(chatId, part);
           await askAssetStep(chatId, state);
           return NextResponse.json({ ok: true });
         }
@@ -2589,6 +2600,15 @@ export async function POST(req: NextRequest) {
             chatId,
             `🗑 ${escapeHtml(dropped?.name || "")} ተሰርዟል።` + (lines.length ? ` እስካሁን <b>${lines.length}</b> ዕቃ።` : "")
           );
+          await askAssetStep(chatId, state);
+          return NextResponse.json({ ok: true });
+        }
+        if (pick.value === GRV_MATCH_REDO) {
+          // The SIV's list, thrown away and sent again.
+          setGrvLines(state.draft, []);
+          state.step = GRV_LINES_STEP;
+          session.assetFlow = { ...state };
+          await persist(session);
           await askAssetStep(chatId, state);
           return NextResponse.json({ ok: true });
         }
@@ -2621,17 +2641,18 @@ export async function POST(req: NextRequest) {
         /* ── The GRV's typed items ──────────────────────────────────────────
            One line per item; matched to the store list after the reply (it
            may wait out a busy AI), then shown on the match card. */
-        if (state.kind === "grv" && step.id === GRV_LINES_STEP) {
+        if ((state.kind === "grv" || state.kind === "store_issue") && step.id === GRV_LINES_STEP) {
+          const isIssue = state.kind === "store_issue";
           if (stillReading(state)) {
             await sendMessage(chatId, "⏳ ዕቃዎቹን እያገናኘሁ ነው — እባክዎ ይጠብቁ።\n<i>Still matching, please wait.</i>");
             return NextResponse.json({ ok: true });
           }
-          const parsed = parseGrvLines(val);
+          const parsed = parseGrvLines(val, { withCost: !isIssue });
           if (parsed.lines.length === 0) {
             await sendMessage(
               chatId,
               "⚠️ ምንም ዕቃ ማንበብ አልተቻለም። በዚህ መልክ ይፃፉ፦\n" +
-                `<pre>${escapeHtml(GRV_LINES_EXAMPLE)}</pre>` +
+                `<pre>${escapeHtml(isIssue ? "Ball bearing | 6210 | 2" : GRV_LINES_EXAMPLE)}</pre>` +
                 (parsed.bad.length ? `\nያልተነበቡ፦\n${parsed.bad.slice(0, 6).map((b) => `• ${escapeHtml(b)}`).join("\n")}` : ""),
               { reply_markup: CHANGE_CANCEL_KEYBOARD }
             );
@@ -2644,6 +2665,27 @@ export async function POST(req: NextRequest) {
           const all = [...keep, ...typed];
           if (all.length > MAX_GRV_LINES) {
             await sendMessage(chatId, `⚠️ በአንድ ቫውቸር እስከ ${MAX_GRV_LINES} ዕቃ ብቻ። ቀሪውን በሌላ ቫውቸር ያስገቡ።`);
+          }
+          // The SIV was told how many items to expect. More is a mistake to
+          // resend; fewer keeps what came and asks for just the rest.
+          if (isIssue) {
+            const expected = Math.max(1, Math.round(Number(state.draft[SIV_COUNT_STEP]) || 1));
+            if (all.length > expected) {
+              await sendMessage(
+                chatId,
+                `⚠️ ${expected} ዕቃ ብለዋል፣ ግን ${all.length} መስመር ተልኳል። እባክዎ ቁጥሩ የሚስማማ ዝርዝር እንደገና ይላኩ።`,
+                { reply_markup: CHANGE_CANCEL_KEYBOARD }
+              );
+              return NextResponse.json({ ok: true });
+            }
+            if (all.length < expected) {
+              setGrvLines(state.draft, all);
+              session.assetFlow = { ...state };
+              await persist(session);
+              await sendMessage(chatId, `✅ ${all.length}/${expected} ዕቃ ደርሷል። ቀሪዎቹን ${expected - all.length} ይላኩ።`);
+              await askAssetStep(chatId, state);
+              return NextResponse.json({ ok: true });
+            }
           }
           setGrvLines(state.draft, all);
           if (parsed.bad.length > 0) {
@@ -2760,8 +2802,13 @@ export async function POST(req: NextRequest) {
             await sendMessage(chatId, `<pre>${escapeHtml(val)}</pre>`);
             return NextResponse.json({ ok: true });
           }
-          state.draft[DOWNTIME_ROWS_STEP] = hoursBlock(sheet.rows);
-          await advanceAsset(session, chatId, state);
+          // Typed lines become cells too, so there is one review and one save.
+          setHoursCells(state.draft, sheet.rows);
+          delete state.draft[DOWNTIME_ROWS_STEP];
+          state.step = "review";
+          session.assetFlow = { ...state };
+          await persist(session);
+          await askAssetStep(chatId, state);
           return NextResponse.json({ ok: true });
         }
 

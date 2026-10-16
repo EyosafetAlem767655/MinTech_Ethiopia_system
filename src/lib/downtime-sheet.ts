@@ -188,3 +188,65 @@ export function parseHoursBlock(text: string, month: string): ParsedHoursBlock {
   if (rows.length === 0 && bad.length === 0) bad.push("No line rows — one row per production line is needed.");
   return { rows: rows.sort((a, b) => a.line - b.line), bad, warnings };
 }
+
+/* ───────────────────── the read, held cell by cell in the draft ───────────── */
+
+/**
+ * One draft key per cell: "ph:1:working" → "538:50 / 22.5".
+ *
+ * The read is shown on the review card and confirmed or corrected there, one
+ * numbered field at a time ("4 = 540:00 / 22.5") — never as a block to copy,
+ * edit and paste back. No ":" problem here: these are never tick-list step ids.
+ */
+export const cellKey = (line: number, kind: HoursKind) => `ph:${line}:${kind}`;
+
+const CELL_KEY = /^ph:(\d+):(working|power|mech|elec|raw|total)$/;
+
+export const isCellKey = (key: string) => CELL_KEY.test(key);
+
+/** "Line 1 · Working (h / days)" — the field's name in the editor. */
+export function cellKeyLabel(key: string): string | null {
+  const m = key.match(CELL_KEY);
+  return m ? `Line ${m[1]} · ${HOURS_LABEL[m[2] as HoursKind]} (h / days)` : null;
+}
+
+export function hasHoursCells(draft: Record<string, string | number>): boolean {
+  return Object.keys(draft).some(isCellKey);
+}
+
+/** Write rows into the draft as cells, replacing any already there. */
+export function setHoursCells(draft: Record<string, string | number>, rows: ProductionHoursRow[]): void {
+  for (const k of Object.keys(draft)) if (isCellKey(k)) delete draft[k];
+  for (const r of rows) for (const k of HOURS_KINDS) draft[cellKey(r.line, k)] = cellText(r.cells[k]);
+}
+
+/**
+ * The rows the cells describe, and any cell that no longer reads (an edit
+ * gone wrong is caught here, named, before anything is saved).
+ */
+export function rowsFromDraft(draft: Record<string, string | number>): { rows: ProductionHoursRow[]; bad: string[] } {
+  const byLine = new Map<number, ProductionHoursRow>();
+  const bad: string[] = [];
+  for (const [key, value] of Object.entries(draft)) {
+    const m = key.match(CELL_KEY);
+    if (!m) continue;
+    const line = Number(m[1]);
+    const row = byLine.get(line) ?? emptyRow(line);
+    const cell = parseCell(String(value));
+    if (cell) row.cells[m[2] as HoursKind] = cell;
+    else bad.push(`${cellKeyLabel(key)}: "${value}"`);
+    byLine.set(line, row);
+  }
+  return { rows: [...byLine.values()].sort((a, b) => a.line - b.line), bad };
+}
+
+/** Validate one edited cell: the value to store, or why not. */
+export function normaliseCell(raw: string): { ok: true; value: string } | { ok: false; error: string } {
+  const c = parseCell(raw);
+  return c ? { ok: true, value: cellText(c) } : { ok: false, error: 'ሰዓት / ቀን መሆን አለበት — ለምሳሌ "540:00 / 22.5" ወይም "-"' };
+}
+
+/** The same checks as the block (parts vs total, total vs month), on rows. */
+export function hoursWarnings(rows: ProductionHoursRow[], month: string): string[] {
+  return parseHoursBlock(hoursBlock(rows), month).warnings;
+}

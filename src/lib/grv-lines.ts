@@ -28,6 +28,19 @@ export const GRV_MATCH_OK = "ok";
 export const GRV_MATCH_MORE = "more";
 /** Remove the last row (a typo is fixed by dropping it and sending it again). */
 export const GRV_MATCH_DROP = "drop";
+/** Throw the list away and send it again (the SIV's correction). */
+export const GRV_MATCH_REDO = "redo";
+
+/** The SIV's answer to "how many items are going out?". */
+export const SIV_COUNT_STEP = "sivCount";
+
+/** The SIV's fill-in block: a header, then the numbered lines still to fill. */
+export function sivTemplate(count: number, have = 0): string {
+  const n = Math.max(1, Math.min(MAX_GRV_LINES, Math.round(count) || 1));
+  const rows: string[] = ["Name | Description | Qty"];
+  for (let i = have + 1; i <= n; i++) rows.push(`${i}. `);
+  return rows.join("\n");
+}
 
 /** Lines per voucher. A card of more than this would pass Telegram's 4096 characters. */
 export const MAX_GRV_LINES = 40;
@@ -103,11 +116,16 @@ export type TypedGrvLine = Pick<GrvLine, "name" | "desc" | "qty" | "cost">;
  *
  * A line with no quantity is reported back, not guessed.
  */
-export function parseGrvLines(text: string): { lines: TypedGrvLine[]; bad: string[] } {
+export function parseGrvLines(
+  text: string,
+  opts: { withCost?: boolean } = {}
+): { lines: TypedGrvLine[]; bad: string[] } {
+  const withCost = opts.withCost !== false;
   const lines: TypedGrvLine[] = [];
   const bad: string[] = [];
   for (const raw of String(text || "").split(/\r?\n/)) {
-    const line = raw.trim().replace(/^\d+[.)]\s+/, ""); // "1. …" numbering
+    // "1. …" numbering — and a template line left blank ("3.") is skipped.
+    const line = raw.trim().replace(/^\d+[.)]\s*/, "");
     if (!line || /^[-—#>]/.test(line) || /^name\s*\|/i.test(line)) continue;
     const parts = line.split(/\s*[|\t]\s*|\s+-\s+/).map((p) => p.trim());
     while (parts.length && !parts[parts.length - 1]) parts.pop();
@@ -116,7 +134,9 @@ export function parseGrvLines(text: string): { lines: TypedGrvLine[]; bad: strin
       continue;
     }
     const last = toNumber(parts[parts.length - 1]);
-    const prev = parts.length >= 3 ? toNumber(parts[parts.length - 2]) : null;
+    // No price on an issue: the last field is the quantity, and a numeric
+    // description before it ("6210") stays a description.
+    const prev = withCost && parts.length >= 3 ? toNumber(parts[parts.length - 2]) : null;
     let qty: number | null;
     let cost: number | null;
     let text: string[];
@@ -174,8 +194,9 @@ const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
 const money = (n: number) => (Math.round(n * 100) / 100).toLocaleString();
 
 /** One line on the card: what was typed, and what it was matched to. */
-export function grvLineSummary(l: GrvLine, n: number): string {
-  const typed = `${esc(l.name)}${l.desc ? ` <i>ref ${esc(l.desc)}</i>` : ""} · ${money(l.qty)}${l.cost ? ` × ${money(l.cost)}` : " × <b>?</b>"}`;
+export function grvLineSummary(l: GrvLine, n: number, withCost = true): string {
+  const price = !withCost ? "" : l.cost ? ` × ${money(l.cost)}` : " × <b>?</b>";
+  const typed = `${esc(l.name)}${l.desc ? ` <i>${withCost ? "ref " : ""}${esc(l.desc)}</i>` : ""} · ${money(l.qty)}${price}`;
   const item = l.match ? STORE_ITEM_BY_KEY.get(l.match) : undefined;
   const target = item
     ? `→ ${esc(itemLabel(item))} <code>${esc(item.key)}</code>`
@@ -191,9 +212,10 @@ const CARD_LIMIT = 3800;
  * messages when the voucher is long (40 lines of real invoice wording run past
  * Telegram's 4096 characters). Never splits a line.
  */
-export function grvMatchCards(lines: GrvLine[]): string[] {
+export function grvMatchCards(lines: GrvLine[], opts: { withCost?: boolean } = {}): string[] {
+  const withCost = opts.withCost !== false;
   const news = lines.filter((l) => !l.match).length;
-  const unpriced = lines.filter((l) => !l.cost).length;
+  const unpriced = withCost ? lines.filter((l) => !l.cost).length : 0;
   const head = `📦 <b>${lines.length} ዕቃ</b> — ከመጋዘን ዝርዝሩ ጋር ተገናኝቷል:\n\n`;
   const tail =
     (news ? `\n\n🆕 ${news} አዲስ ዕቃ ወደ ዝርዝሩ ይገባል።` : "") +
@@ -202,7 +224,7 @@ export function grvMatchCards(lines: GrvLine[]): string[] {
   const out: string[] = [];
   let cur = head;
   lines.forEach((l, i) => {
-    const entry = grvLineSummary(l, i + 1);
+    const entry = grvLineSummary(l, i + 1, withCost);
     if (cur.length + entry.length + 1 > CARD_LIMIT) {
       out.push(cur.trimEnd());
       cur = "";

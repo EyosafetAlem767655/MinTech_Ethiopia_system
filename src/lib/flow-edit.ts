@@ -12,6 +12,7 @@ import {
   type AssetFlowKind,
   type AssetStep,
 } from "@/lib/asset-flows";
+import { isCellKey, normaliseCell } from "@/lib/downtime-sheet";
 
 /** The two flows whose draft is a list of line items that can grow or shrink. */
 const VOUCHER_KINDS = new Set<AssetFlowKind>(["grv", "store_issue"]);
@@ -171,6 +172,11 @@ export function editableFields(
     // The typed GRV's lines (JSON) and its bookkeeping: corrected on the match
     // card ("3 = new"), not typed over here.
     if (key.startsWith("gl:") || key === "grvAdded" || key === "grvMatch") continue;
+    // A Production Hours cell: corrected as "h:mm / days", checked like one.
+    if (isCellKey(key)) {
+      push({ id: key, prompt: key, type: "text", validate: normaliseCell }, draftKeyLabel(key));
+      continue;
+    }
     // Numeric where the value is numeric, so a correction is still checked as a
     // number rather than stored as text.
     const numeric = typeof draft[key] === "number" || /^-?\d*\.?\d+$/.test(String(draft[key]));

@@ -3,6 +3,7 @@
 import { Fragment, useCallback, useEffect, useState } from "react";
 import DecideBtn from "@/components/DecideButton";
 import BagStockCheckCard from "@/components/panels/BagStockCheck";
+import VoucherPanels from "@/components/panels/VoucherPanels";
 import { PriceListEditor, StoreCostEditor } from "@/components/panels/UnitCostEditors";
 import {
   ALARM_TONNES,
@@ -32,7 +33,8 @@ const fmt = (n: number | null | undefined, dp = 2) =>
 const fmtDate = (d: string) => new Date(d).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
 
 export default function FinancePanels() {
-  const [tab, setTab] = useState<Tab>("rmcredit");
+  // Monthly is what finance opens the tab for; the others are looked up.
+  const [tab, setTab] = useState<Tab>("monthly");
   return (
     <div className="space-y-4">
       <div className="flex gap-1 rounded-full bg-clay-50 p-0.5">
@@ -492,6 +494,12 @@ function MonthlyTab() {
           of them. It follows the month selected above. */}
       <h3 className="px-1 pt-2 text-xs font-bold uppercase tracking-widest text-stone-400">Bag stock check</h3>
       <BagStockCheckCard month={data.month} />
+
+      {/* The vouchers behind the month's purchases and issues — here, and only
+          here, rather than under every finance sub-tab. */}
+      <div className="pt-2">
+        <VoucherPanels showStockCheck={false} />
+      </div>
     </section>
   );
 }

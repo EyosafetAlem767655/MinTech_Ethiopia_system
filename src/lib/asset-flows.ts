@@ -12,7 +12,6 @@ import {
   PRODUCTION_PRODUCTS,
   bagLabel,
   bagLedgerKey,
-  ledgerChoices,
   ledgerLabel,
   looksLikeStockItem,
   parseBagLedgerKey,
@@ -47,6 +46,9 @@ import {
   GRV_MATCH_MORE,
   GRV_MATCH_OK,
   GRV_MATCH_DROP,
+  GRV_MATCH_REDO,
+  SIV_COUNT_STEP,
+  sivTemplate,
   GRV_MATCH_STEP,
   grvLines,
   hasGrvLines,
@@ -60,10 +62,14 @@ import { SETTLED_TOLERANCE_ETB } from "@/lib/credit";
 import {
   HOURS_KINDS,
   HOURS_LABEL,
+  cellKeyLabel,
   fmtHours,
+  hasHoursCells,
   hoursBlock,
+  hoursWarnings,
   lostMinutes,
   parseHoursBlock,
+  rowsFromDraft,
 } from "@/lib/downtime-sheet";
 import {
   bagKey as ppBagKey,
@@ -90,7 +96,6 @@ import { rawMaterialTemplate, sectionMap } from "@/lib/raw-material-paste";
 import {
   STORE_BLOCKS,
   STORE_GROUPS,
-  STORE_ITEMS,
   allStoreItems,
   STORE_ITEM_BY_KEY,
   groupsOfBlock,
@@ -101,18 +106,11 @@ import {
 import { itemKey, storeGroupTemplate } from "@/lib/store-count-paste";
 import {
   STORE_DEPTS_STEP,
-  STORE_OTHER,
   STORE_QTY_STEP,
   itemLabel,
   storeCostKey,
-  storeGroupChoices,
-  storeGroupsStep,
-  storeItemChoices,
-  storeItemsStep,
-  tickedGroups,
   storeLines,
   storeVoucherTemplate,
-  tickedBlocks,
   tickedStoreItems,
   wantsOtherItems,
 } from "@/lib/store-voucher";
@@ -694,220 +692,12 @@ export function suggestsStockItem(draft: Record<string, string | number>, i: num
   return looksLikeStockItem(String(draft[k.description] || ""));
 }
 
-/** The choice list for a classification step, plus the opt-out. */
-function ledgerStepChoices(kinds: readonly LedgerKind[]) {
-  return [
-    ...ledgerChoices(kinds).map((c) => ({
-      label: c.kind === "bag" ? `🧺 ${c.label}` : `⛏ ${c.label}`,
-      value: c.key,
-    })),
-    { label: "➖ የክምችት ዕቃ አይደለም", value: LEDGER_NONE },
-  ];
-}
-
 /** The unit a confirmed ledger key is counted in. */
 export function ledgerUnitOf(key: string): "pcs" | "t" | null {
   if (!key || key === LEDGER_NONE) return null;
   if (parseBagLedgerKey(key)) return "pcs";
   if ((FINANCE_RAW_MATERIALS as readonly string[]).includes(key)) return "t";
   return null;
-}
-
-/**
- * The repeating line block, shared by both vouchers.
- *
- * `ledgerQty` is asked separately from `quantity` and never derived from it: a
- * line of "100 pak" is not 100 pieces, and inferring a pack size the system was
- * never told is how a bag count silently triples. The prompt shows what was
- * typed so the common case is one keystroke.
- */
-function voucherItemSteps(opts: {
-  kinds: readonly LedgerKind[];
-  costSkippable: boolean;
-  /**
-   * Whether to ask what the line cost.
-   *
-   * False for the store issue voucher. Finance prices every issued item from the
-   * monthly price list, so asking the storekeeper invites a second number that
-   * disagrees with the one the report is actually built from. The GRV still
-   * asks: there the supplier's invoice IS the price.
-   */
-  askUnitCost: boolean;
-  /**
-   * Whether to ask for the printed Stock Code.
-   *
-   * False on both vouchers now. It was a second identifier for a line the
-   * description already names, skippable, and in practice always skipped — so
-   * it cost a question on every line and answered nothing.
-   */
-  askStockCode?: boolean;
-  /**
-   * Whether to ask which stock item a line is.
-   *
-   * GRV only. It is the sole record of PP bags ARRIVING, so the bag stock check
-   * and the finance bag rows are built on it. The store issue voucher no longer
-   * asks: bags LEAVING are already recorded per kind by the daily PP bag usage
-   * report, which is where the issued side now comes from.
-   */
-  askLedger: boolean;
-}): AssetStep[] {
-  return Array.from({ length: MAX_VOUCHER_ITEMS }).flatMap<AssetStep>((_, idx) => {
-    const i = idx + 1;
-    const k = itemKeys(i);
-    const asked = (d: Record<string, string | number>) => voucherItemAsked(d, i);
-
-    const steps: AssetStep[] = [
-      {
-        id: k.description,
-        label: `ዕቃ ${i} · Description`,
-        prompt: `📝 ዕቃ ${i} — ስሙንና ዝርዝሩን (Description/Specification) ይፃፉ።`,
-        type: "text",
-        when: asked,
-      },
-      ...(opts.askStockCode
-        ? [
-            {
-              id: k.stockCode,
-              label: `ዕቃ ${i} · Stock Code`,
-              prompt: `🔖 ዕቃ ${i} — የStock Code ቁጥር ይፃፉ።`,
-              type: "text" as const,
-              skippable: true,
-              when: asked,
-            },
-          ]
-        : []),
-      {
-        id: k.unit,
-        prompt: `📏 ዕቃ ${i} — መለኪያውን (Unit) ይፃፉ — ለምሳሌ pcs, pak, kg።`,
-        type: "text",
-        skippable: true,
-        when: asked,
-      },
-      {
-        id: k.quantity,
-        prompt: `🔢 ዕቃ ${i} — ብዛቱን (Qty) ይፃፉ።`,
-        type: "number",
-        when: asked,
-      },
-      ...(opts.askUnitCost
-        ? [
-            {
-              id: k.unitCost,
-              label: `ዕቃ ${i} · Unit Cost`,
-              prompt: `💲 ዕቃ ${i} — የነጠላ ዋጋ (Unit Cost)። ${
-                opts.costSkippable ? 'ካልታወቀ "-" ይላክ።' : "ካልታወቀ 0 ይጻፉ።"
-              }`,
-              type: "number" as const,
-              skippable: opts.costSkippable,
-              when: asked,
-            },
-          ]
-        : []),
-      ...(!opts.askLedger ? [] : [{
-        id: k.ledger,
-        label: `ዕቃ ${i} · Stock item`,
-        prompt:
-          `📦 ዕቃ ${i} — ይህ ከየትኛው የክምችት ዕቃ ነው?\n` +
-          `<i>የክምችት ሒሳብ የሚያዘው በዚህ መልስ ብቻ ነው።</i>`,
-        type: "choice" as const,
-        choices: ledgerStepChoices(opts.kinds),
-        when: (d: Record<string, string | number>) => suggestsStockItem(d, i),
-      },
-      {
-        id: k.ledgerQty,
-        label: `ዕቃ ${i} · Stock qty`,
-        prompt: `🔢 ዕቃ ${i} — በክምችት አሃድ ስንት ነው? <i>(የተፃፈው Qty ተመሳሳይ ከሆነ እሱኑ ይፃፉ)</i>`,
-        type: "number" as const,
-        when: (d: Record<string, string | number>) => {
-          const key = String(d[itemKeys(i).ledger] || "");
-          return Boolean(key) && key !== LEDGER_NONE;
-        },
-      }]),
-    ];
-
-    // No "add another?" after the last slot — there is nowhere left to go.
-    if (i < MAX_VOUCHER_ITEMS) {
-      steps.push({
-        id: k.more,
-        prompt: "➕ ሌላ ዕቃ አለ?",
-        type: "choice",
-        choices: [
-          { label: "➕ አዎ፣ ሌላ ዕቃ", value: "yes" },
-          { label: "✅ በቃ", value: "no" },
-        ],
-        when: asked,
-      });
-    }
-    return steps;
-  });
-}
-
-/* ── The warehouse list, shared by both vouchers ──────────────────────────── */
-
-/**
- * Departments → items → one block of amounts. See store-voucher.ts.
- *
- * `direction` only changes the wording: what came IN on a GRV, what went OUT
- * on an SIV. The GRV block also takes a unit cost per line, because there the
- * supplier's invoice is the price; the SIV is valued from the cost already
- * known for each item.
- */
-function storeListSteps(direction: "in" | "out"): AssetStep[] {
-  const verb = direction === "in" ? "የገቡትን" : "የወጡትን";
-  return [
-    {
-      id: STORE_DEPTS_STEP,
-      label: "Departments",
-      prompt:
-        `🏷 ${verb} ዕቃዎች ከየትኞቹ ክፍሎች ናቸው? የሚመለከታቸውን ይንኩ፣ ከዚያ ✅ ጨርሻለሁ ይጫኑ።\n\n` +
-        "<i>ከመጋዘን ዝርዝሩ ውጪ ያለ ዕቃ ካለ 📝 ሌላ ይንኩ — በጽሑፍ ይጠየቃል።</i>",
-      type: "multichoice",
-      choices: [
-        ...STORE_BLOCKS.map((b) => ({ label: `${b.icon} ${b.label}`, value: b.key })),
-        { label: "📝 ሌላ (ከዝርዝሩ ውጪ)", value: STORE_OTHER },
-      ],
-    },
-    // Department → its groups → each ticked group's items. Telegram allows 100
-    // buttons on a keyboard; a whole department no longer fits on one.
-    ...STORE_BLOCKS.flatMap<AssetStep>((b) => [
-      {
-        id: storeGroupsStep(b.key),
-        label: `${b.label} groups`,
-        prompt: `${b.icon} <b>${b.label}</b> — ዕቃዎቹ ከየትኞቹ ዓይነቶች ናቸው? ይንኩ፣ ከዚያ ✅ ጨርሻለሁ ይጫኑ።`,
-        type: "multichoice" as const,
-        // Getters, like the count's: GRV-added items appear without a redeploy.
-        get choices() {
-          return storeGroupChoices(b.key);
-        },
-        when: (d: Record<string, string | number>) => tickedBlocks(d).includes(b.key),
-      },
-      ...groupsOfBlock(b.key).map<AssetStep>((g) => ({
-        id: storeItemsStep(g.key),
-        label: `${g.label} items`,
-        prompt: `${b.icon} <b>${g.label}</b> — ${verb} ዕቃዎች ይንኩ፣ ከዚያ ✅ ጨርሻለሁ ይጫኑ።`,
-        type: "multichoice",
-        get choices() {
-          return storeItemChoices(g.key);
-        },
-        columns: 2,
-        when: (d: Record<string, string | number>) =>
-          tickedBlocks(d).includes(b.key) && tickedGroups(d, b.key).includes(g.key),
-      })),
-    ]),
-    {
-      id: STORE_QTY_STEP,
-      label: "Amounts",
-      prompt:
-        direction === "in"
-          ? "📋 ለእያንዳንዱ ዕቃ ብዛቱንና የነጠላ ዋጋውን ይሙሉ፣ ቅጂውን ይመልሱት።\n\n" +
-            "<i>ብዛት x ዋጋ — ለምሳሌ፦</i>\n<code>6210 = 4 x 1500</code>\n" +
-            "<i>ዋጋው ቀድሞ ከተሞላ ብዛቱን ብቻ ይፃፉ።</i>"
-          : "📋 ለእያንዳንዱ ዕቃ የወጣውን ብዛት ይሙሉ፣ ቅጂውን ይመልሱት።\n\n" +
-            "<i>ለምሳሌ፦</i>\n<code>6210 = 2</code>",
-      type: "paste",
-      when: (d: Record<string, string | number>) => tickedStoreItems(d).length > 0,
-    },
-  ];
 }
 
 /* ── Goods Receiving Voucher (finance) ────────────────────────────────────── */
@@ -1000,13 +790,37 @@ const STORE_ISSUE_STEPS: AssetStep[] = [
     prompt: "🏷 የትኛው ክፍል ነው የጠየቀው (Requesting Department)?",
     type: "text",
   },
-  ...storeListSteps("out"),
-  ...voucherItemSteps({
-    kinds: [],
-    costSkippable: true,
-    askUnitCost: false,
-    askLedger: false,
-  }),
+  // How many items, then their names as one list — matched to the store list
+  // (the nearest similar item counts: what leaves the store was on its shelf).
+  // Only a line nothing on the list resembles becomes a new item. No more
+  // department → group → item keyboards.
+  {
+    id: SIV_COUNT_STEP,
+    label: "Items",
+    prompt: "🔢 ስንት ዕቃ ነው የሚወጣው?",
+    type: "number",
+  },
+  {
+    id: GRV_LINES_STEP,
+    label: "Items",
+    prompt:
+      "📦 የሚወጡትን ዕቃዎች ይፃፉ — በአንድ መስመር አንድ ዕቃ፦\n" +
+      "<b>ስም | መግለጫ | ብዛት</b>\n" +
+      "<i>ለምሳሌ፦</i> <code>Ball bearing | 6210 | 2</code>\n\n" +
+      "<i>ከታች ያለውን ቅጂ ሞልተው ይላኩ። ከመጋዘን ዝርዝሩ ጋር በራሱ ይገናኛል።</i>",
+    type: "paste",
+  },
+  {
+    id: GRV_MATCH_STEP,
+    label: "Item matches",
+    prompt: "✅ ከላይ ያሉት ግንኙነቶች ትክክል ናቸው?",
+    type: "choice",
+    choices: [
+      { label: "✅ ትክክል ነው", value: GRV_MATCH_OK },
+      { label: "✏️ ዝርዝሩን እንደገና", value: GRV_MATCH_REDO },
+    ],
+    when: (d) => hasGrvLines(d),
+  },
   { id: "approvedBy", prompt: "🧑 ያፀደቀው (Approved by) ማን ነው?", type: "text", skippable: true },
   { id: "receivedBy", prompt: "🧑 የተረከበው (Received by) ማን ነው?", type: "text", skippable: true },
   // No photo step, and none of the fields the pad has that nobody fills in.
@@ -1318,15 +1132,19 @@ const DOWNTIME_STEPS: AssetStep[] = [
     id: "photos",
     prompt:
       `📷 የወሩን Production Hours Report ፎቶ ይላኩ — እስከ ${MAX_FLOW_PHOTOS} ፎቶ። ከጨረሱ "✅ ጨርሻለሁ" ይጫኑ።\n` +
-      "<i>ሉሁ ተነብቦ ይሞላል — እርስዎ አርመው ይመልሱታል።</i>",
+      "<i>ሉሁ ተነብቦ ይታያል — ትክክል ከሆነ ያረጋግጣሉ፣ ካልሆነ ያርማሉ።</i>",
     type: "photos",
     required: true,
   },
+  // Only when the photo could NOT be read: then the lines are typed. A good
+  // read goes straight to the review card, held cell by cell (ph:<line>:<kind>),
+  // and is confirmed or corrected there — never copied, edited and pasted back.
   {
     id: DOWNTIME_ROWS_STEP,
     label: "Production hours",
+    when: (d) => !hasHoursCells(d),
     prompt:
-      "📋 ከሉሁ የተነበበው ይህ ነው። ያረጋግጡ፣ ስህተት ካለ ያርሙ፣ ከዚያ ቅጂውን መልሰው ይላኩ።\n\n" +
+      "📋 ሉሁን ማንበብ አልተቻለም። እባክዎ ከታች ባለው ቅጂ ላይ ሞልተው ይላኩ።\n\n" +
       "<i>በአንድ መስመር አንድ የምርት መስመር፦ ሰዓት (ሰ:ደ) / ቀን</i>\n" +
       "<code>1 | 538:50 / 22.5 | 125:05 / 5.2 | 56:35 / 2.4 | 23:30 / 1 | - | 744 / 31</code>\n" +
       "<i>ዓምዶቹ፦ Line | Working | Power | Mechanical | Electrical | Raw material | Total። ባዶ ከሆነ \"-\"።</i>",
@@ -1628,6 +1446,9 @@ export function pasteTemplate(
   // The typed GRV: a header to write under; the examples are in the prompt, so
   // nothing copied back by accident becomes an item.
   if (kind === "grv" && step === GRV_LINES_STEP) return "Name | Reference no. | Qty | Unit price";
+  if (kind === "store_issue" && step === GRV_LINES_STEP) {
+    return sivTemplate(Number(draft[SIV_COUNT_STEP]) || 1, grvLines(draft).length);
+  }
   if ((kind === "grv" || kind === "store_issue") && step === STORE_QTY_STEP) {
     return storeVoucherTemplate(draft, kind === "grv");
   }
@@ -1692,6 +1513,10 @@ export function allStepsFor(kind: AssetFlowKind): AssetStep[] {
  * looked like from the bot.
  */
 export function draftKeyLabel(key: string): string {
+  // A Production Hours cell: "ph:1:working" → "Line 1 · Working (h / days)".
+  const hoursCell = cellKeyLabel(key);
+  if (hoursCell) return hoursCell;
+
   const bag = (rest: string) => {
     const parsed = parseBagLedgerKey(rest);
     return parsed ? `${bagLabel(parsed.size, parsed.colour)}` : rest;
@@ -1902,7 +1727,12 @@ export function assetPreview(state: AssetFlowState): string {
 
   if (state.kind === "downtime") {
     const month = String(d.month || "");
-    const sheet = parseHoursBlock(String(d[DOWNTIME_ROWS_STEP] || ""), month);
+    // The read (or a typed block converted on arrival) lives cell by cell; a
+    // draft from before that still has its block.
+    const fromCells = hasHoursCells(d) ? rowsFromDraft(d) : null;
+    const sheet = fromCells
+      ? { rows: fromCells.rows, bad: fromCells.bad, warnings: hoursWarnings(fromCells.rows, month) }
+      : parseHoursBlock(String(d[DOWNTIME_ROWS_STEP] || ""), month);
     // One short block per line: phones cannot show the sheet's 13 columns.
     const lines = sheet.rows
       .map((r) => {
@@ -2158,7 +1988,7 @@ export function assetPreview(state: AssetFlowState): string {
       const code = it.stockCode ? ` <i>[${esc(it.stockCode)}]</i>` : "";
       // The typed GRV: say which store item each line moves, or that it is new.
       const store =
-        isGrv && hasGrvLines(d)
+        hasGrvLines(d)
           ? it.ledgerKey
             ? `\n     └ 📦 ${esc(STORE_ITEM_BY_KEY.get(it.ledgerKey)?.name ?? it.ledgerKey)}`
             : "\n     └ 🆕 አዲስ ዕቃ ሆኖ ይገባል"
@@ -2566,8 +2396,9 @@ export async function saveAssetReport(
 
   if (state.kind === "downtime") {
     const month = String(d.month || "") || monthLabel();
-    const sheet = parseHoursBlock(String(d[DOWNTIME_ROWS_STEP] || ""), month);
-    if (sheet.bad.length > 0) throw new Error(`The sheet still has lines that do not read: ${sheet.bad[0]}`);
+    const sheet = hasHoursCells(d) ? rowsFromDraft(d) : parseHoursBlock(String(d[DOWNTIME_ROWS_STEP] || ""), month);
+    if (sheet.bad.length > 0) throw new Error(`Some figures do not read — correct them first: ${sheet.bad[0]}`);
+    if (sheet.rows.length === 0) throw new Error("No production line on the sheet.");
     const lostHours = Math.round((sheet.rows.reduce((a, r) => a + lostMinutes(r), 0) / 60) * 100) / 100;
 
     // One transaction: the month's lines are replaced and the filing is
@@ -2835,16 +2666,18 @@ export async function saveAssetReport(
   if (state.kind === "grv" || state.kind === "store_issue") {
     const isGrv = state.kind === "grv";
     const date = reportDate(d.date);
-    // The typed GRV's new lines become store items FIRST, so every saved line
-    // points at a key and moves a balance from this voucher on. Written back
-    // into the draft, so a retried save does not add them twice.
-    if (isGrv && hasGrvLines(d)) {
+    // The typed voucher's new lines become store items FIRST, so every saved
+    // line points at a key and moves a balance from this voucher on. Written
+    // back into the draft, so a retried save does not add them twice. On an
+    // SIV such an item starts below zero — issued before it was ever counted or
+    // received — which the inventory shows rather than hides.
+    if (hasGrvLines(d)) {
       const lines = grvLines(d);
       const fresh = lines.filter((l) => !l.match);
       if (fresh.length > 0) {
         const keys = await createCustomItems(
           fresh.map((l) => ({ name: l.name, description: l.desc, unit: l.unit, group: l.group })),
-          String(d.grvNo || "").trim() || null,
+          String((isGrv ? d.grvNo : d.sivNo) || "").trim() || null,
           reportedBy
         );
         fresh.forEach((l, i) => {
