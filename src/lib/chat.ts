@@ -63,6 +63,12 @@ const READABLE_TABLES = {
   store_item_costs: "effective_from",
   store_custom_items: "created_at",
   downtime_months: "created_at",
+  // The monthly Production Hours Report, one row per line: minutes and days
+  // working / power / mech / elec / raw / total.
+  production_hours: "created_at",
+  // Raw material bought on credit, and what has been paid against each load.
+  raw_material_credits: "date",
+  raw_material_credit_payments: "paid_on",
   delivery_reports: "date",
   purchase_item_reports: "date",
   pp_bag_damage_reports: "date",

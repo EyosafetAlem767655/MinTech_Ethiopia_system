@@ -1,138 +1,190 @@
-import { HOURS_PER_DAY, REASON_LABEL, MAINTENANCE_LABEL, type DowntimeReason } from "@/lib/downtime";
-
 /**
- * The monthly downtime sheet: one photographed page, one line per stoppage.
+ * The monthly Production Hours Report — one photographed sheet, one row per
+ * production line.
  *
- * Downtime used to be a typed form filed every day. The floor keeps it on a
- * monthly sheet anyway, so the bot now takes a photo of that sheet once a
- * month, the model reads it into the block below, and the person checks the
- * block and sends it back — corrected where the read was wrong. What is saved
- * is the block as sent back, never the read itself.
+ * This is the plant's own sheet ("Min-Tech p.l.c · Production Hours Report ·
+ * August 2026"), so the system reads it in its own shape: for each line, the
+ * hours (h:mm) and days spent working, stopped by a power interruption, stopped
+ * for mechanical or electrical maintenance, stopped for want of raw material,
+ * and the month's total. On a filled sheet the parts add up to the total —
+ * 538:50 + 125:05 + 56:35 + 23:30 = 744:00, which is 31 days × 24 hours.
  *
- *     DD | hours | reason | note
- *     05 | 2.5   | maintenance-mechanical | belt changed
- *     12 | 1     | power
+ * The bot photographs the sheet, the model reads it into the block below, and
+ * the person checks the block and sends it back. What is saved is the block as
+ * sent back, never the read itself.
  *
- * Pure — no `sql` — so the bot, the review card and the tests share it.
+ *     # Line | Working | Power | Mechanical | Electrical | Raw material | Total
+ *     1 | 538:50 / 22.5 | 125:05 / 5.2 | 56:35 / 2.4 | 23:30 / 1 | - | 744 / 31
+ *
+ * Pure — no `sql` — so the bot, the review card, the panel and the tests share it.
  */
 
-export interface DowntimeRow {
-  /** Day of the month, 1–31. */
-  day: number;
-  hours: number;
-  reason: DowntimeReason;
-  maintenanceKind: "mechanical" | "electrical" | "both" | null;
-  note: string;
+export const HOURS_KINDS = ["working", "power", "mech", "elec", "raw", "total"] as const;
+export type HoursKind = (typeof HOURS_KINDS)[number];
+
+/** The sheet's column headings. */
+export const HOURS_LABEL: Record<HoursKind, string> = {
+  working: "Working",
+  power: "Power",
+  mech: "Mechanical",
+  elec: "Electrical",
+  raw: "Raw material",
+  total: "Total",
+};
+
+/** The four ways a line loses time — everything but working and the total. */
+export const LOST_KINDS = ["power", "mech", "elec", "raw"] as const;
+
+export interface HoursCell {
+  minutes: number;
+  days: number;
+}
+
+export interface ProductionHoursRow {
+  line: number;
+  cells: Record<HoursKind, HoursCell>;
 }
 
 /** The header line on the block. Lines starting with "#" are never data. */
-export const DOWNTIME_HEADER = "# DD | hours | reason | note";
-
-/**
- * Every way a reason is written, onto the stored pair. Loose on purpose: the
- * sheet is handwritten and the model copies it as printed.
- */
-const REASONS: [RegExp, DowntimeReason, DowntimeRow["maintenanceKind"]][] = [
-  [/^(maintenance|maint|mnt|ጥገና)[\s\-_/]*(mech|mechanical|ሜካኒካል)/i, "maintenance", "mechanical"],
-  [/^(maintenance|maint|mnt|ጥገና)[\s\-_/]*(elec|electrical|ኤሌክትሪካል)/i, "maintenance", "electrical"],
-  [/^(maintenance|maint|mnt|ጥገና)[\s\-_/]*(both|ሁለቱም)/i, "maintenance", "both"],
-  [/^(mech|mechanical|ሜካኒካል)$/i, "maintenance", "mechanical"],
-  [/^(elec|electrical|ኤሌክትሪካል)$/i, "maintenance", "electrical"],
-  [/^(maintenance|maint|mnt|ጥገና)$/i, "maintenance", null],
-  [/^(power|power cut|power interruption|outage|electricity|መብራት|ኃይል|የኃይል መቋረጥ)$/i, "power", null],
-  [/^(raw[\s\-_]*material|raw|material|ጥሬ ዕቃ|ጥሬ)$/i, "raw_material", null],
-];
-
-export function parseReason(text: string): { reason: DowntimeReason; maintenanceKind: DowntimeRow["maintenanceKind"] } | null {
-  const t = text.trim();
-  for (const [re, reason, kind] of REASONS) if (re.test(t)) return { reason, maintenanceKind: kind };
-  return null;
-}
-
-/** The reason as written back on the block: "maintenance-mechanical", "power", "raw-material". */
-export function reasonToken(row: Pick<DowntimeRow, "reason" | "maintenanceKind">): string {
-  if (row.reason === "maintenance") return row.maintenanceKind ? `maintenance-${row.maintenanceKind}` : "maintenance";
-  return row.reason === "raw_material" ? "raw-material" : row.reason;
-}
-
-/** "Maintenance (mechanical)" — for the review card. */
-export function reasonLabel(row: Pick<DowntimeRow, "reason" | "maintenanceKind">): string {
-  const base = REASON_LABEL[row.reason] || row.reason;
-  return row.reason === "maintenance" && row.maintenanceKind
-    ? `${base} (${MAINTENANCE_LABEL[row.maintenanceKind] || row.maintenanceKind})`
-    : base;
-}
+export const HOURS_HEADER = `# Line | ${HOURS_KINDS.map((k) => HOURS_LABEL[k]).join(" | ")}`;
 
 export function daysInMonth(month: string): number {
   const [y, m] = month.split("-").map(Number);
   return new Date(Date.UTC(y, m, 0)).getUTCDate();
 }
 
-/** The block for a set of rows — empty rows give just the header. */
-export function downtimeBlock(rows: DowntimeRow[]): string {
-  return [
-    DOWNTIME_HEADER,
-    ...rows
-      .slice()
-      .sort((a, b) => a.day - b.day)
-      .map((r) =>
-        [String(r.day).padStart(2, "0"), String(r.hours), reasonToken(r), r.note].filter((p, i) => i < 3 || p).join(" | ")
-      ),
-  ].join("\n");
-}
-
-export interface ParsedDowntimeSheet {
-  rows: DowntimeRow[];
-  /** Lines that could not be read, each with why. */
-  bad: string[];
-  /** True when the block says there were no stoppages ("-"). */
-  none: boolean;
-}
+const EMPTY = /^(-+|—|–|none|nil|0|)$/i;
 
 /**
- * Read the block back. A line that fails is reported with its reason and
- * nothing from the block is saved until every line reads — a month half
- * recorded looks exactly like a month with fewer stoppages.
+ * Hours as printed, in minutes: "538:50" → 32330, "744" → 44640, "12.5" → 750,
+ * "-" → 0. Null when it is not a time at all.
  */
-export function parseDowntimeSheet(text: string, month: string): ParsedDowntimeSheet {
-  const trimmed = text.trim();
-  if (/^(-|--|none|no|የለም|ምንም)$/i.test(trimmed)) return { rows: [], bad: [], none: true };
-
-  const maxDay = /^\d{4}-\d{2}$/.test(month) ? daysInMonth(month) : 31;
-  const rows: DowntimeRow[] = [];
-  const bad: string[] = [];
-
-  for (const raw of trimmed.split(/\r?\n/)) {
-    const line = raw.trim();
-    if (!line || line.startsWith("#")) continue;
-    const parts = line.split("|").map((p) => p.trim());
-    if (parts.length < 3) {
-      bad.push(`${line} — needs day | hours | reason`);
-      continue;
-    }
-    const day = Number(parts[0].replace(/^0+(?=\d)/, ""));
-    const hours = Number(parts[1].replace(/[^0-9.]/g, ""));
-    const reason = parseReason(parts[2]);
-    if (!Number.isInteger(day) || day < 1 || day > maxDay) {
-      bad.push(`${line} — day must be 1–${maxDay}`);
-      continue;
-    }
-    if (!(hours > 0) || hours > HOURS_PER_DAY) {
-      bad.push(`${line} — hours must be above 0 and at most ${HOURS_PER_DAY}`);
-      continue;
-    }
-    if (!reason) {
-      bad.push(`${line} — reason must be power, maintenance(-mechanical/-electrical/-both) or raw-material`);
-      continue;
-    }
-    rows.push({ day, hours: Math.round(hours * 100) / 100, ...reason, note: parts.slice(3).join(" | ").trim() });
+export function parseHours(raw: string): number | null {
+  const t = String(raw ?? "").trim().replace(/\s+/g, "").replace(/h$/i, "");
+  if (EMPTY.test(t)) return 0;
+  const hm = t.match(/^(\d+)[:.;](\d{1,2})$/);
+  // "125:05" is h:mm. "12.5" is ambiguous on paper; the sheet writes minutes
+  // with a colon, so a dot followed by ONE digit is read as decimal hours.
+  if (hm && (t.includes(":") || t.includes(";") || hm[2].length === 2)) {
+    const m = Number(hm[2]);
+    if (m >= 60) return null;
+    return Number(hm[1]) * 60 + m;
   }
-
-  if (rows.length === 0 && bad.length === 0) bad.push('No stoppage lines — send "-" if there were none this month.');
-  return { rows, bad, none: false };
+  if (/^\d*\.?\d+$/.test(t)) return Math.round(Number(t) * 60);
+  return null;
 }
 
-/** Total hours stopped, rounded for display. */
-export function totalHours(rows: DowntimeRow[]): number {
-  return Math.round(rows.reduce((a, r) => a + r.hours, 0) * 100) / 100;
+/** Minutes back to the sheet's h:mm; "-" for none. */
+export function fmtHours(minutes: number): string {
+  if (!minutes) return "-";
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return m ? `${h}:${String(m).padStart(2, "0")}` : String(h);
+}
+
+const parseDays = (raw: string): number | null => {
+  const t = String(raw ?? "").trim();
+  if (EMPTY.test(t)) return 0;
+  return /^\d*\.?\d+$/.test(t) ? Math.round(Number(t) * 100) / 100 : null;
+};
+
+/** "538:50 / 22.5", "744/31", "-" → a cell; null if unreadable. */
+export function parseCell(raw: string): HoursCell | null {
+  const t = String(raw ?? "").trim();
+  if (EMPTY.test(t)) return { minutes: 0, days: 0 };
+  const [h, d = ""] = t.split("/").map((p) => p.trim());
+  const minutes = parseHours(h);
+  const days = parseDays(d);
+  if (minutes === null || days === null) return null;
+  return { minutes, days };
+}
+
+export function cellText(c: HoursCell): string {
+  if (!c.minutes && !c.days) return "-";
+  return `${fmtHours(c.minutes)} / ${c.days || 0}`;
+}
+
+const emptyCells = (): Record<HoursKind, HoursCell> =>
+  Object.fromEntries(HOURS_KINDS.map((k) => [k, { minutes: 0, days: 0 }])) as Record<HoursKind, HoursCell>;
+
+export function emptyRow(line: number): ProductionHoursRow {
+  return { line, cells: emptyCells() };
+}
+
+/** The block for a set of rows; no rows gives the header and three blank lines. */
+export function hoursBlock(rows: ProductionHoursRow[]): string {
+  const list = rows.length ? rows.slice().sort((a, b) => a.line - b.line) : [1, 2, 3].map(emptyRow);
+  return [HOURS_HEADER, ...list.map((r) => [String(r.line), ...HOURS_KINDS.map((k) => cellText(r.cells[k]))].join(" | "))].join("\n");
+}
+
+/** Minutes lost: power + mechanical + electrical + raw material. */
+export function lostMinutes(row: ProductionHoursRow): number {
+  return LOST_KINDS.reduce((a, k) => a + row.cells[k].minutes, 0);
+}
+
+export interface ParsedHoursBlock {
+  rows: ProductionHoursRow[];
+  /** Lines that could not be read, each with why. Nothing is saved while any remain. */
+  bad: string[];
+  /** Figures that read but do not add up — shown on the card, not refused. */
+  warnings: string[];
+}
+
+/** How far the parts may be from the total before it is pointed out. */
+const SLACK_MINUTES = 30;
+
+/**
+ * Read the block back. Every line has to read before anything is saved: a
+ * month with one line silently missing looks exactly like a smaller plant.
+ * Figures that read but do not add up are WARNINGS, because the sheet itself
+ * is the authority and it is the person holding it who can say which is right.
+ */
+export function parseHoursBlock(text: string, month: string): ParsedHoursBlock {
+  const rows: ProductionHoursRow[] = [];
+  const bad: string[] = [];
+  const warnings: string[] = [];
+  const monthMinutes = /^\d{4}-\d{2}$/.test(month) ? daysInMonth(month) * 24 * 60 : null;
+
+  for (const raw of String(text || "").split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#") || /^line\s*\|/i.test(line)) continue;
+    const parts = line.split("|").map((p) => p.trim());
+    if (parts.length !== HOURS_KINDS.length + 1) {
+      bad.push(`${line} — needs ${HOURS_KINDS.length + 1} columns: line | ${HOURS_KINDS.map((k) => HOURS_LABEL[k]).join(" | ")}`);
+      continue;
+    }
+    const n = Number(parts[0].replace(/^line\s*/i, ""));
+    if (!Number.isInteger(n) || n < 1 || n > 20) {
+      bad.push(`${line} — the first column is the line number`);
+      continue;
+    }
+    if (rows.some((r) => r.line === n)) {
+      bad.push(`${line} — line ${n} is listed twice`);
+      continue;
+    }
+    const cells = emptyCells();
+    let broken = "";
+    HOURS_KINDS.forEach((k, i) => {
+      const c = parseCell(parts[i + 1]);
+      if (!c) broken ||= `${HOURS_LABEL[k]} "${parts[i + 1]}"`;
+      else cells[k] = c;
+    });
+    if (broken) {
+      bad.push(`${line} — ${broken} is not "h:mm / days"`);
+      continue;
+    }
+    const row: ProductionHoursRow = { line: n, cells };
+    rows.push(row);
+
+    const parts4 = cells.working.minutes + lostMinutes(row);
+    if (cells.total.minutes && Math.abs(parts4 - cells.total.minutes) > SLACK_MINUTES) {
+      warnings.push(`Line ${n}: the parts add up to ${fmtHours(parts4)} h, the total says ${fmtHours(cells.total.minutes)} h`);
+    }
+    if (monthMinutes && cells.total.minutes && Math.abs(cells.total.minutes - monthMinutes) > SLACK_MINUTES) {
+      warnings.push(`Line ${n}: the total is ${fmtHours(cells.total.minutes)} h — the month has ${fmtHours(monthMinutes)} h`);
+    }
+  }
+
+  if (rows.length === 0 && bad.length === 0) bad.push("No line rows — one row per production line is needed.");
+  return { rows: rows.sort((a, b) => a.line - b.line), bad, warnings };
 }

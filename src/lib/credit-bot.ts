@@ -1,5 +1,6 @@
 import sql from "@/lib/sql";
 import { creditFigures } from "@/lib/credit";
+import { withSalesFallback } from "@/lib/sales-sql";
 
 /**
  * The credit sales a collection can be recorded against, for the bot.
@@ -16,6 +17,8 @@ import { creditFigures } from "@/lib/credit";
 export interface OpenInvoice {
   id: string;
   customer: string;
+  /** The buyer's TIN when recorded — the customer's identity. */
+  tin?: string | null;
   /** "YYYY-MM-DD", the sale date. */
   date: string;
   outstanding: number;
@@ -25,16 +28,16 @@ export interface OpenInvoice {
 
 /** Every invoice with money still owed on it, newest first. */
 export async function openCreditInvoices(now = new Date()): Promise<OpenInvoice[]> {
-  const rows = await sql<
-    { id: string; customer: string; date: string; credit: string; paid: string }[]
+  const rows = await withSalesFallback((legacy) => sql<
+    { id: string; customer: string; tin: string | null; date: string; credit: string; paid: string }[]
   >`
-    select i.id, i.customer, i.date, i.invoice_credit as credit,
+    select i.id, i.customer, ${legacy ? sql`null::text` : sql`i.tin`} as tin, i.date, i.invoice_credit as credit,
            coalesce((select sum(p.amount) from sales_credit_payments p where p.invoice_id = i.id), 0) as paid
       from sales_invoices i
      where i.invoice_credit > 0
      order by i.date desc
      limit 300
-  `;
+  `);
 
   return rows
     .map((r) => {
@@ -45,6 +48,7 @@ export async function openCreditInvoices(now = new Date()): Promise<OpenInvoice[
       return {
         id: String(r.id),
         customer: String(r.customer || "").trim(),
+        tin: r.tin ?? null,
         date: new Date(r.date).toISOString().slice(0, 10),
         outstanding: f.outstanding,
         daysLeft: f.daysLeft,
@@ -86,26 +90,55 @@ export function decodeInvoices(draft: Record<string, string | number>): OpenInvo
 
 const money = (n: number) => Math.round(n).toLocaleString("en-US");
 
-/** The customers with something outstanding, each once, most owed first. */
+/**
+ * Who a sale belongs to: the TIN where recorded, else the name with case and
+ * spacing ignored — the same identity the Sales tab groups by.
+ */
+export const customerIdentity = (r: Pick<OpenInvoice, "customer" | "tin">) =>
+  r.tin ? `tin:${r.tin}` : `name:${r.customer.toLowerCase().replace(/\s+/g, " ").trim()}`;
+
+/**
+ * The customers with something outstanding — the NAME only, each once, most
+ * owed first. What they owe is shown after they are picked, on the card, where
+ * it is worked out against the payment; the list itself is just who.
+ *
+ * Two different buyers with the same name are told apart by their TIN's last
+ * digits, since the person picks by the label.
+ */
 export function customerChoices(draft: Record<string, string | number>) {
-  const byCustomer = new Map<string, { total: number; count: number }>();
+  const byCustomer = new Map<string, { name: string; tin: string | null; total: number }>();
   for (const r of decodeInvoices(draft)) {
-    const seen = byCustomer.get(r.customer) ?? { total: 0, count: 0 };
-    byCustomer.set(r.customer, { total: seen.total + r.outstanding, count: seen.count + 1 });
+    const id = customerIdentity(r);
+    const seen = byCustomer.get(id) ?? { name: r.customer, tin: r.tin ?? null, total: 0 };
+    byCustomer.set(id, { ...seen, total: seen.total + r.outstanding });
   }
-  return [...byCustomer.entries()]
-    .sort((a, b) => b[1].total - a[1].total)
-    .map(([customer, v]) => ({
-      label: `${customer} · ${money(v.total)}${v.count > 1 ? ` (${v.count})` : ""}`,
-      value: customer,
-    }));
+  const list = [...byCustomer.entries()].sort((a, b) => b[1].total - a[1].total);
+  const nameCount = new Map<string, number>();
+  for (const [, v] of list) nameCount.set(v.name.toLowerCase(), (nameCount.get(v.name.toLowerCase()) ?? 0) + 1);
+  return list.map(([id, v]) => ({
+    label: nameCount.get(v.name.toLowerCase())! > 1 && v.tin ? `${v.name} (TIN …${v.tin.slice(-4)})` : v.name,
+    value: id,
+  }));
+}
+
+/**
+ * The open sales of the customer picked. A draft from before the change holds
+ * the plain name as `customer`, and still finds its sales.
+ */
+export function invoicesFor(draft: Record<string, string | number>): OpenInvoice[] {
+  const picked = String(draft.customer || "");
+  return decodeInvoices(draft).filter((r) => customerIdentity(r) === picked || r.customer === picked);
+}
+
+/** The customer's name, for the card. */
+export function chosenCustomerName(draft: Record<string, string | number>): string {
+  return invoicesFor(draft)[0]?.customer || String(draft.customer || "").replace(/^(tin|name):/, "");
 }
 
 /** That customer's unpaid invoices, oldest first — the one most overdue leads. */
 export function invoiceChoices(draft: Record<string, string | number>) {
-  const customer = String(draft.customer || "");
-  return decodeInvoices(draft)
-    .filter((r) => r.customer === customer)
+  return invoicesFor(draft)
+    .slice()
     .sort((a, b) => a.date.localeCompare(b.date))
     .map((r) => ({
       label: `${r.date} · ${money(r.outstanding)} ${r.daysLeft < 0 ? `⚠️ ${-r.daysLeft}d late` : `${r.daysLeft}d`}`,
@@ -113,8 +146,13 @@ export function invoiceChoices(draft: Record<string, string | number>) {
     }));
 }
 
-/** The invoice a draft has settled on, or null. */
+/**
+ * The invoice a draft has settled on, or null. When the customer has only ONE
+ * open sale the payment is for it — the "which sale?" question is not asked.
+ */
 export function chosenInvoice(draft: Record<string, string | number>): OpenInvoice | null {
   const id = String(draft.invoiceId || "");
-  return decodeInvoices(draft).find((r) => r.id === id) ?? null;
+  if (id) return decodeInvoices(draft).find((r) => r.id === id) ?? null;
+  const open = invoicesFor(draft);
+  return open.length === 1 ? open[0] : null;
 }

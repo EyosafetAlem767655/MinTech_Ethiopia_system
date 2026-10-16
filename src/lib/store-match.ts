@@ -67,6 +67,9 @@ const SYSTEM =
   "spare-parts store list, and return STRICT JSON only.\n" +
   'Return exactly: { "matches": [ { "line": number, "key": string | null, "group": string, "unit": string } ] } ' +
   "with ONE entry per voucher line.\n" +
+  "Each voucher line is \"name — reference no.\". The REFERENCE NUMBER (a part, model or size code such as " +
+  "6210, C-150, 37-50A, UCF204) is the strongest signal: match it against the codes in the store item names " +
+  "and keys first, and use the name to confirm the kind of part.\n" +
   "key: the store item's key when the line is that SAME part — same type AND same size/rating/code " +
   '(a "6210" bearing is not a "6212"; a 16A breaker is not a 25A one). If no item is that exact part, key is null ' +
   "and the line becomes a NEW item. Never pick a near miss.\n" +

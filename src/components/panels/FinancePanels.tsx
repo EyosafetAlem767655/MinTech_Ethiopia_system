@@ -15,7 +15,7 @@ import {
 /**
  * The whole Finance tab: the four things the department does.
  *
- *   1. Tool purchase batches, with their receipts and the AI cross-check.
+ *   1. Raw material bought on credit — each load, its payments, what is owed.
  *   2. The monthly asset report — production and raw materials.
  *   3. Credit sales: what is owed, when it falls due, and who is over-extended.
  *   4. WHT receipt holders, and the daily SMS chasing them.
@@ -25,20 +25,20 @@ import {
  * nobody scrolls to the bottom of.
  */
 
-type Tab = "purchases" | "monthly" | "credit" | "wht" | "banks";
+type Tab = "rmcredit" | "monthly" | "credit" | "wht" | "banks";
 
 const fmt = (n: number | null | undefined, dp = 2) =>
   n == null ? "—" : (Math.round(n * 10 ** dp) / 10 ** dp).toLocaleString(undefined, { maximumFractionDigits: dp });
 const fmtDate = (d: string) => new Date(d).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
 
 export default function FinancePanels() {
-  const [tab, setTab] = useState<Tab>("purchases");
+  const [tab, setTab] = useState<Tab>("rmcredit");
   return (
     <div className="space-y-4">
       <div className="flex gap-1 rounded-full bg-clay-50 p-0.5">
         {(
           [
-            ["purchases", "🧾 Purchases"],
+            ["rmcredit", "🚚 RM credit"],
             ["monthly", "📊 Monthly"],
             ["credit", "💳 Credit"],
             ["wht", "📄 WHT"],
@@ -57,7 +57,7 @@ export default function FinancePanels() {
         ))}
       </div>
 
-      {tab === "purchases" && <PurchasesTab />}
+      {tab === "rmcredit" && <RmCreditTab />}
       {tab === "monthly" && <MonthlyTab />}
       {tab === "credit" && <CreditTab />}
       {tab === "wht" && <WhtTab />}
@@ -66,190 +66,203 @@ export default function FinancePanels() {
   );
 }
 
-/* ───────────────────────────── 1. Tool purchases ──────────────────────────── */
+/* ──────────────────────── 1. Raw material on credit ───────────────────────── */
 
-interface PurchaseItem {
-  description: string;
-  uom: string | null;
-  quantity: number | null;
+interface RmPayment {
+  id: string;
+  amount: number;
+  paidOn: string;
+  note: string | null;
+  recordedBy: string;
 }
 
-interface ReceiptCheck {
-  checked: boolean;
-  score: number;
-  printedTotal: number | null;
-  mismatches: string[];
-  reasoning: string;
-}
-
-interface Batch {
-  _id: string;
-  srNo: number;
+interface RmLoad {
+  id: string;
   date: string;
-  supplier: string | null;
-  costCenter: string | null;
-  purchaser: string | null;
-  currency: "ETB" | "USD";
-  totalAmount: number | null;
+  supplier: string;
+  truckPlate: string | null;
+  material: string;
+  tonnes: number;
+  pricePerTonne: number;
+  amount: number;
+  paid: number;
+  remaining: number;
+  status: "open" | "settled";
+  note: string | null;
   reportedBy: string;
-  photoFileIds: string[];
-  receiptCheck: ReceiptCheck | null;
-  items: PurchaseItem[];
+  payments: RmPayment[];
 }
 
-function PurchasesTab() {
-  const [rows, setRows] = useState<Batch[] | null>(null);
-  const [usdRate, setUsdRate] = useState<number | null>(null);
+interface RmData {
+  loads: RmLoad[];
+  suppliers: { supplier: string; loads: number; open: number; tonnes: number; amount: number; paid: number; remaining: number }[];
+  totals: { outstanding: number; openLoads: number; tonnesOnCredit: number; paidThisMonth: number };
+}
+
+/**
+ * Raw material bought on credit: each truckload (supplier, plate, material,
+ * tonnes × price per tonne), what has been paid against it, and what is still
+ * owed. Filed from the bot — 🚚 for a load, 💸 for a payment.
+ */
+function RmCreditTab() {
+  const [data, setData] = useState<RmData | null>(null);
+  const [showSettled, setShowSettled] = useState(false);
+  const [openId, setOpenId] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch("/api/finance/purchases")
-      .then((r) => (r.ok ? r.json() : { rows: [] }))
-      .then((d) => {
-        setRows(Array.isArray(d.rows) ? d.rows : []);
-        setUsdRate(d.usdRate ?? null);
-      })
-      .catch(() => setRows([]));
+    fetch("/api/finance/rm-credit")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => setData(d ?? { loads: [], suppliers: [], totals: { outstanding: 0, openLoads: 0, tonnesOnCredit: 0, paidThisMonth: 0 } }))
+      .catch(() => setData({ loads: [], suppliers: [], totals: { outstanding: 0, openLoads: 0, tonnesOnCredit: 0, paidThisMonth: 0 } }));
   }, []);
 
-  if (!rows) return <div className="card h-40 animate-pulse bg-clay-50" />;
-
-  const etbNative = rows.filter((r) => r.currency === "ETB").reduce((a, r) => a + (r.totalAmount || 0), 0);
-  const usdNative = rows.filter((r) => r.currency === "USD").reduce((a, r) => a + (r.totalAmount || 0), 0);
-  // Converted with the current month's published rate, so this screen and the
-  // monthly report cannot quote two different dollar figures.
-  const totalEtb = usdRate ? etbNative + usdNative * usdRate : null;
-  const totalUsd = usdRate ? usdNative + etbNative / usdRate : null;
+  if (!data) return <div className="card h-40 animate-pulse bg-clay-50" />;
+  const loads = data.loads.filter((l) => showSettled || l.status === "open");
 
   return (
     <section className="space-y-3">
       <div className="flex flex-wrap items-baseline justify-between gap-2 px-1">
-        <h2 className="font-display text-lg font-bold">🧾 Tool purchases</h2>
-        <p className="text-[11px] text-stone-400">{rows.length} batches</p>
+        <h2 className="font-display text-lg font-bold">🚚 Raw material on credit</h2>
+        <p className="text-[11px] text-stone-400">filed from the bot · 🚚 load · 💸 payment</p>
       </div>
 
-      {rows.length === 0 ? (
-        <p className="card p-4 text-sm text-stone-400">No purchase reports yet.</p>
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <CreditTile label="Still owed" value={fmt(data.totals.outstanding, 0)} suffix="ETB" tone="text-clay-900" />
+        <CreditTile label="Open loads" value={String(data.totals.openLoads)} tone="text-stone-800" />
+        <CreditTile label="Tonnes on credit" value={fmt(data.totals.tonnesOnCredit, 2)} suffix="t" tone="text-stone-800" />
+        <CreditTile label="Paid this month" value={fmt(data.totals.paidThisMonth, 0)} suffix="ETB" tone="text-green-700" />
+      </div>
+
+      {data.loads.length === 0 ? (
+        <p className="card p-4 text-sm text-stone-400">
+          No raw material bought on credit yet. A load is filed from the bot with 🚚 የጥሬ ዕቃ ብድር ግዢ.
+        </p>
       ) : (
         <>
-          <div className="card max-h-[26rem] overflow-auto p-0">
-            <table className="w-full min-w-[900px] text-right text-xs">
-              <thead className="sticky top-0 z-10 bg-clay-50 text-[10px] uppercase tracking-wide text-stone-500 shadow-[0_1px_0_#f3e3dd]">
+          {/* Per supplier */}
+          <div className="card overflow-x-auto p-0">
+            <table className="w-full min-w-[560px] text-right text-xs">
+              <thead className="bg-clay-50/70 text-[10px] uppercase tracking-wide text-stone-500">
                 <tr>
-                  <th className="p-2 font-bold">Sr.No</th>
-                  <th className="p-2 text-left font-bold">Date</th>
-                  <th className="p-2 text-left font-bold">Description</th>
-                  <th className="p-2 font-bold">UOM</th>
-                  <th className="p-2 font-bold">Qty</th>
                   <th className="p-2 text-left font-bold">Supplier</th>
-                  <th className="p-2 font-bold">Total</th>
-                  <th className="p-2 text-left font-bold">Cost centre</th>
-                  <th className="p-2 text-left font-bold">Purchaser</th>
-                  <th className="p-2 font-bold">Receipt</th>
+                  <th className="p-2 font-bold">Loads</th>
+                  <th className="p-2 font-bold">Tonnes</th>
+                  <th className="p-2 font-bold">Amount</th>
+                  <th className="p-2 font-bold">Paid</th>
+                  <th className="p-2 font-bold">Owed</th>
                 </tr>
               </thead>
               <tbody>
-                {rows.flatMap((b) =>
-                  (b.items.length > 0 ? b.items : [null]).map((it, i) => (
-                    <tr key={`${b._id}-${i}`} className={i === 0 ? "border-t-2 border-clay-100" : "border-t border-clay-50"}>
-                      {/* Batch fields print once and span their items: they
-                          describe the purchase, not the individual tool. */}
-                      {i === 0 ? (
-                        <>
-                          <td rowSpan={Math.max(b.items.length, 1)} className="p-2 font-bold tabular-nums text-clay-900">
-                            {b.srNo}
-                          </td>
-                          <td rowSpan={Math.max(b.items.length, 1)} className="p-2 text-left font-semibold text-stone-800">
-                            {fmtDate(b.date)}
-                          </td>
-                        </>
-                      ) : null}
-                      <td className="p-2 text-left text-stone-700">{it?.description ?? "—"}</td>
-                      <td className="p-2 text-stone-500">{it?.uom ?? ""}</td>
-                      <td className="p-2 tabular-nums text-stone-700">{it ? fmt(it.quantity, 3) : ""}</td>
-                      {i === 0 ? (
-                        <>
-                          <td rowSpan={Math.max(b.items.length, 1)} className="p-2 text-left text-stone-600">
-                            {b.supplier || "—"}
-                          </td>
-                          <td rowSpan={Math.max(b.items.length, 1)} className="p-2 font-bold tabular-nums text-clay-900">
-                            {fmt(b.totalAmount)} <span className="text-[10px] font-normal text-stone-400">{b.currency}</span>
-                          </td>
-                          <td rowSpan={Math.max(b.items.length, 1)} className="p-2 text-left text-stone-600">
-                            {b.costCenter || "—"}
-                          </td>
-                          <td rowSpan={Math.max(b.items.length, 1)} className="p-2 text-left text-stone-600">
-                            {b.purchaser || b.reportedBy}
-                          </td>
-                          <td rowSpan={Math.max(b.items.length, 1)} className="p-2">
-                            <ReceiptCell batch={b} />
-                          </td>
-                        </>
-                      ) : null}
-                    </tr>
-                  ))
-                )}
+                {data.suppliers.map((s) => (
+                  <tr key={s.supplier} className="border-t border-clay-50">
+                    <td className="p-2 text-left font-semibold text-stone-800">{s.supplier}</td>
+                    <td className="p-2 tabular-nums text-stone-600">
+                      {s.loads}
+                      {s.open ? <span className="text-amber-700"> · {s.open} open</span> : null}
+                    </td>
+                    <td className="p-2 tabular-nums text-stone-700">{fmt(s.tonnes, 2)}</td>
+                    <td className="p-2 tabular-nums text-stone-700">{fmt(s.amount, 0)}</td>
+                    <td className="p-2 tabular-nums text-green-700">{fmt(s.paid, 0)}</td>
+                    <td className={`p-2 font-bold tabular-nums ${s.remaining > 1 ? "text-clay-900" : "text-stone-400"}`}>
+                      {fmt(s.remaining, 0)}
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
 
-          <div className="card grid grid-cols-2 gap-3 p-4">
-            <div>
-              <p className="text-[10px] font-bold uppercase tracking-widest text-stone-400">Total in birr</p>
-              <p className="font-display text-xl font-bold text-clay-900">
-                {totalEtb == null ? `${fmt(etbNative)} ETB` : `${fmt(totalEtb)} ETB`}
-              </p>
-            </div>
-            <div>
-              <p className="text-[10px] font-bold uppercase tracking-widest text-stone-400">Total in dollars</p>
-              <p className="font-display text-xl font-bold text-clay-900">
-                {totalUsd == null ? `${fmt(usdNative)} USD` : `${fmt(totalUsd)} USD`}
-              </p>
-            </div>
-            <p className="col-span-2 text-[11px] leading-snug text-stone-400">
-              {usdRate
-                ? `Converted at ${fmt(usdRate)} ETB per USD, from this month's price list.`
-                : "No USD rate on this month's price list yet, so each currency is totalled on its own rather than guessing a rate."}
-            </p>
+          {/* Loads */}
+          <div className="flex items-center justify-between px-1">
+            <p className="text-[11px] font-bold uppercase tracking-widest text-clay-500">Loads</p>
+            <label className="flex items-center gap-1.5 text-[11px] text-stone-500">
+              <input type="checkbox" checked={showSettled} onChange={(e) => setShowSettled(e.target.checked)} />
+              Show paid loads
+            </label>
+          </div>
+          <div className="card overflow-x-auto p-0">
+            <table className="w-full min-w-[900px] text-right text-xs">
+              <thead className="bg-clay-50/70 text-[10px] uppercase tracking-wide text-stone-500">
+                <tr>
+                  <th className="p-2 text-left font-bold">Date</th>
+                  <th className="p-2 text-left font-bold">Supplier</th>
+                  <th className="p-2 text-left font-bold">Truck</th>
+                  <th className="p-2 text-left font-bold">Material</th>
+                  <th className="p-2 font-bold">Tonnes</th>
+                  <th className="p-2 font-bold">Price / t</th>
+                  <th className="p-2 font-bold">Amount</th>
+                  <th className="p-2 font-bold">Paid</th>
+                  <th className="p-2 font-bold">Owed</th>
+                  <th className="p-2 text-left font-bold">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {loads.length === 0 && (
+                  <tr>
+                    <td colSpan={10} className="p-4 text-center text-stone-400">
+                      Every load is paid.
+                    </td>
+                  </tr>
+                )}
+                {loads.map((l) => (
+                  <Fragment key={l.id}>
+                    <tr
+                      className="cursor-pointer border-t border-clay-50 hover:bg-clay-50/40"
+                      onClick={() => setOpenId((o) => (o === l.id ? null : l.id))}
+                      aria-expanded={openId === l.id}
+                    >
+                      <td className="p-2 text-left font-semibold text-stone-800">{fmtDate(l.date)}</td>
+                      <td className="p-2 text-left text-stone-700">{l.supplier}</td>
+                      <td className="p-2 text-left text-stone-500">{l.truckPlate || "—"}</td>
+                      <td className="p-2 text-left text-stone-700">{l.material}</td>
+                      <td className="p-2 tabular-nums text-stone-700">{fmt(l.tonnes, 3)}</td>
+                      <td className="p-2 tabular-nums text-stone-500">{fmt(l.pricePerTonne, 2)}</td>
+                      <td className="p-2 tabular-nums text-stone-800">{fmt(l.amount, 0)}</td>
+                      <td className="p-2 tabular-nums text-green-700">{fmt(l.paid, 0)}</td>
+                      <td className={`p-2 font-bold tabular-nums ${l.status === "open" ? "text-clay-900" : "text-stone-400"}`}>
+                        {fmt(Math.max(0, l.remaining), 0)}
+                      </td>
+                      <td className="p-2 text-left">
+                        <span
+                          className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
+                            l.status === "open" ? "bg-amber-100 text-amber-800" : "bg-green-100 text-green-800"
+                          }`}
+                        >
+                          {l.status === "open" ? (l.paid > 0 ? "Part paid" : "Unpaid") : "Paid"}
+                        </span>
+                        <span className="ml-1 text-[10px] text-stone-400">{openId === l.id ? "▲" : "▼"}</span>
+                      </td>
+                    </tr>
+                    {openId === l.id && (
+                      <tr className="bg-clay-50/30">
+                        <td colSpan={10} className="p-3 text-left">
+                          {l.payments.length === 0 ? (
+                            <p className="text-[11px] text-stone-500">No payment recorded yet.</p>
+                          ) : (
+                            <ul className="space-y-1 text-[11px] text-stone-600">
+                              {l.payments.map((p) => (
+                                <li key={p.id}>
+                                  💸 {fmtDate(p.paidOn)} · <b className="tabular-nums">{fmt(p.amount, 0)} ETB</b> · {p.recordedBy}
+                                  {p.note ? <span className="text-stone-400"> — {p.note}</span> : null}
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                          <p className="mt-1 text-[10px] text-stone-400">
+                            Filed by {l.reportedBy}
+                            {l.note ? ` · ${l.note}` : ""}
+                          </p>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                ))}
+              </tbody>
+            </table>
           </div>
         </>
       )}
     </section>
-  );
-}
-
-/** The receipt thumbnail plus the AI verdict, or an honest blank. */
-function ReceiptCell({ batch }: { batch: Batch }) {
-  const c = batch.receiptCheck;
-  return (
-    <div className="flex flex-col items-end gap-1">
-      <div className="flex gap-1">
-        {batch.photoFileIds.slice(0, 3).map((id) => (
-          <a key={id} href={`/api/files/${id}`} target="_blank" rel="noreferrer">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={`/api/files/${id}`} alt="Receipt" className="h-9 w-9 rounded object-cover ring-1 ring-clay-100" />
-          </a>
-        ))}
-        {batch.photoFileIds.length === 0 && <span className="text-stone-300">—</span>}
-      </div>
-      {c &&
-        (!c.checked ? (
-          // Never red: a check that could not run is not an accusation.
-          <span className="rounded-full bg-stone-100 px-2 py-0.5 text-[10px] font-bold text-stone-600">
-            ⏳ Not checked
-          </span>
-        ) : c.mismatches.length > 0 ? (
-          <span
-            title={c.mismatches.join(" · ")}
-            className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-800"
-          >
-            ⚠️ {fmt(c.printedTotal)} on receipt
-          </span>
-        ) : (
-          <span className="rounded-full bg-green-100 px-2 py-0.5 text-[10px] font-bold text-green-700">
-            ✅ {c.score}%
-          </span>
-        ))}
-    </div>
   );
 }
 

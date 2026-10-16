@@ -48,6 +48,8 @@ export const SUBMISSION_COLLECTIONS = [
   "price_list",
   "material_issue",
   "wht_holder",
+  // Raw material bought on credit, and its payments.
+  "rm_credit",
 ] as const;
 
 export type SubmissionCollection = (typeof SUBMISSION_COLLECTIONS)[number];
@@ -478,22 +480,23 @@ export const SUBMISSIONS: Record<SubmissionCollection, SubmissionSpec> = {
     // 132 quantities in one jsonb map; the same argument as above.
     editableKeys: [],
   },
+  // One row per month filed: the Production Hours Report. Its per-line figures
+  // are in production_hours, replaced together by re-filing the month — so
+  // they are corrected by filing again, not field by field here.
   downtime: {
-    table: "downtime_reports",
-    label: "Downtime",
+    table: "downtime_months",
+    label: "Production hours",
     icon: "⏱",
-    dateColumn: "date",
+    dateColumn: "created_at",
     authorColumn: "reported_by",
-    searchColumns: ["date_label", "reason", "note", "reported_by"],
+    searchColumns: ["month", "reported_by"],
     displayFields: [
-      TEXT("date_label", "Date"),
-      NUM("hours", "Hours"),
-      TEXT("reason", "Reason"),
-      TEXT("maintenance_kind", "Maintenance"),
-      LONG("note", "Note"),
+      TEXT("month", "Month"),
+      NUM("stoppages", "Lines"),
+      NUM("total_hours", "Hours lost"),
       TEXT("reported_by", "By"),
     ],
-    editableKeys: ["hours", "note"],
+    editableKeys: [],
   },
   bank_collection: {
     table: "bank_collections",
@@ -620,6 +623,29 @@ export const SUBMISSIONS: Record<SubmissionCollection, SubmissionSpec> = {
     // claim rows, so a holder restored without it could be texted a second time
     // on a day the customer has already heard from us.
     extraChildren: [{ table: "wht_sms_log", foreignKey: "holder_id" }],
+  },
+  rm_credit: {
+    table: "raw_material_credits",
+    label: "Raw material on credit",
+    icon: "🚚",
+    dateColumn: "date",
+    authorColumn: "reported_by",
+    searchColumns: ["date_label", "supplier", "truck_plate", "material", "reported_by"],
+    displayFields: [
+      TEXT("date_label", "Date"),
+      TEXT("supplier", "Supplier"),
+      TEXT("truck_plate", "Truck"),
+      TEXT("material", "Material"),
+      NUM("tonnes", "Tonnes"),
+      NUM("price_per_tonne", "Price / t"),
+      NUM("amount", "Amount"),
+      TEXT("reported_by", "By"),
+    ],
+    // amount is tonnes × price; editing one without the other would leave a
+    // figure owed that nothing on the row explains.
+    editableKeys: ["supplier", "truck_plate", "note"],
+    // Its payments go with it, as in the database (on delete cascade).
+    extraChildren: [{ table: "raw_material_credit_payments", foreignKey: "credit_id" }],
   },
   invoice: {
     table: "invoices",

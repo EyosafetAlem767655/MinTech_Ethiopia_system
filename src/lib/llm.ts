@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { HOURS_KINDS, emptyRow, parseHours, type ProductionHoursRow } from "@/lib/downtime-sheet";
 import { envValue } from "@/lib/env";
 import { logError, providerErrorKind } from "@/lib/errors";
 import {
@@ -1058,37 +1059,37 @@ export async function extractReceiptGemini(
  * values, and a reason it cannot place is sent back to be corrected.
  */
 
-export interface DowntimeSheetLine {
-  day: number;
-  hours: number;
-  /** As printed — mapped by parseReason in downtime-sheet.ts. */
-  reason: string;
-  note: string;
-}
-
+/**
+ * What the model reads off the Production Hours Report: per production line,
+ * each column's hours (as printed, "538:50") and days. Turned into minutes by
+ * downtime-sheet.ts, which is the one place that reads h:mm.
+ */
 export interface DowntimeSheetRead {
-  lines: DowntimeSheetLine[];
+  rows: ProductionHoursRow[];
   confidence: number;
   notes: string;
-  /** Rows it could not read cleanly, copied as printed. */
+  /** Rows or cells it could not read cleanly, copied as printed. */
   unmatched: string[];
 }
 
 export type DowntimeSheetResult = { ok: true; data: DowntimeSheetRead } | { ok: false; error: string };
 
 const GEMINI_DOWNTIME_SYSTEM =
-  "You read ONE monthly production-downtime sheet for an Ethiopian minerals plant and return STRICT " +
-  "JSON only. Each row is one stoppage: the day of the month, how many hours production was stopped, " +
-  "and why.\n" +
-  'Return: {"lines":[{"day":number 1-31,"hours":number,"reason":"string","note":"string"}],' +
-  '"confidence":0-100,"notes":"","unmatched":["rows you could not read, copied as printed"]}\n' +
-  "Rules: `day` is the day of the month only (a full date like 05/09/2026 gives 5). `hours` is the " +
-  "time stopped in hours — convert minutes (90 min = 1.5) and start/end times into hours. `reason` is " +
-  "one of: power, maintenance-mechanical, maintenance-electrical, maintenance-both, maintenance, " +
-  "raw-material — choose the closest; if the sheet's wording fits none, copy it as printed. Put any " +
-  "other words on the row (what broke, which line) in `note`. Ignore total rows. A row you cannot " +
-  "read goes in `unmatched`, never into `lines` with a guess. If the sheet is unreadable return empty " +
-  "lines with a low confidence and say why in `notes`.";
+  "You read ONE monthly \"Production Hours Report\" from Min-Tech p.l.c, an Ethiopian minerals plant, and " +
+  "return STRICT JSON only.\n" +
+  "The sheet is a table with one row per production LINE (usually 1, 2, 3). Its columns, left to right: " +
+  "Line · Working (Hours, Days) · Power Interruption (Hours, Days) · Maintenance Mechanical (Hours, Days) · " +
+  "Maintenance Electrical (Hours, Days) · Raw material shortage (Hours, Days) · Total (Hours, Days).\n" +
+  "Hours are written h:mm (\"538:50\" is 538 hours 50 minutes) or whole hours (\"744\"). Days are numbers " +
+  "(\"22.5\"). A dash \"-\" or an empty cell means none.\n" +
+  'Return: {"rows":[{"line":1,"working":{"hours":"538:50","days":22.5},"power":{"hours":"125:05","days":5.2},' +
+  '"mech":{"hours":"56:35","days":2.4},"elec":{"hours":"23:30","days":1},"raw":{"hours":"-","days":0},' +
+  '"total":{"hours":"744","days":31}}],"confidence":0-100,"notes":"","unmatched":["anything you could not read"]}\n' +
+  "Copy every hours figure EXACTLY as printed, as a string, keeping the colon. Do not add up, correct or " +
+  "convert anything. Use \"-\" for an empty or dashed hours cell and 0 for an empty days cell. A cell you " +
+  "cannot read goes in `unmatched` (e.g. \"line 2 electrical hours\"), never a guess. Ignore signatures " +
+  "and the Prepared/Approved lines. If the image is not this sheet, return no rows, low confidence, and say " +
+  "why in `notes`.";
 
 export async function extractDowntimeSheet(
   images: { base64: string; contentType: string }[],
@@ -1101,28 +1102,39 @@ export async function extractDowntimeSheet(
   }));
   parts.push({ text: `${GEMINI_DOWNTIME_SYSTEM}\nThe sheet is for ${month}.` });
 
-  const res = await geminiGenerate([{ role: "user", parts }], { json: true });
+  const res = await geminiGenerate([{ role: "user", parts }], { json: true, errorSource: "downtime-sheet" });
   if (!res.ok) return { ok: false, error: res.error || "Gemini call failed" };
   if (!res.text.trim()) return { ok: false, error: "Gemini returned an empty response" };
 
   try {
     const p = extractJson(res.text);
-    const raw = Array.isArray(p.lines) ? p.lines : [];
+    const raw = Array.isArray(p.rows) ? p.rows : [];
+    const unmatched: string[] = Array.isArray(p.unmatched) ? p.unmatched.map((u: unknown) => String(u)).slice(0, 10) : [];
+    const rows: ProductionHoursRow[] = [];
+    for (const r of raw as Record<string, unknown>[]) {
+      const line = Math.round(Number(r?.line) || 0);
+      if (line < 1 || rows.some((x) => x.line === line)) continue;
+      const row = emptyRow(line);
+      for (const k of HOURS_KINDS) {
+        const c = (r?.[k] ?? {}) as { hours?: unknown; days?: unknown };
+        const minutes = parseHours(String(c.hours ?? "-"));
+        const days = Number(c.days) || 0;
+        if (minutes === null) {
+          // Kept visible: the block shows "-", the cell is named as unread.
+          unmatched.push(`line ${line} ${k}: "${String(c.hours)}"`);
+          continue;
+        }
+        row.cells[k] = { minutes, days: Math.round(days * 100) / 100 };
+      }
+      rows.push(row);
+    }
     return {
       ok: true,
       data: {
-        lines: raw
-          .map((l: Record<string, unknown>) => ({
-            day: Math.round(Number(l?.day) || 0),
-            hours: receiptNum(l?.hours),
-            reason: String(l?.reason || "").trim(),
-            note: String(l?.note || "").trim(),
-          }))
-          // A row with no day or no hours is not a reading, it is noise.
-          .filter((l: DowntimeSheetLine) => l.day > 0 && l.hours > 0),
+        rows,
         confidence: Math.max(0, Math.min(100, Math.round(Number(p.confidence) || 50))),
         notes: String(p.notes || ""),
-        unmatched: Array.isArray(p.unmatched) ? p.unmatched.map((u: unknown) => String(u)).slice(0, 10) : [],
+        unmatched: unmatched.slice(0, 10),
       },
     };
   } catch (e) {

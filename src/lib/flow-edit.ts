@@ -170,7 +170,7 @@ export function editableFields(
     if (key === "readRows") continue;
     // The typed GRV's lines (JSON) and its bookkeeping: corrected on the match
     // card ("3 = new"), not typed over here.
-    if (key.startsWith("gl:") || key === "grvAppend" || key === "grvMatch") continue;
+    if (key.startsWith("gl:") || key === "grvAdded" || key === "grvMatch") continue;
     // Numeric where the value is numeric, so a correction is still checked as a
     // number rather than stored as text.
     const numeric = typeof draft[key] === "number" || /^-?\d*\.?\d+$/.test(String(draft[key]));

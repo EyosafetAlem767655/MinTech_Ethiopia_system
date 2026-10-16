@@ -21,12 +21,13 @@ import { itemLabel } from "@/lib/store-voucher";
 export const GRV_LINES_STEP = "grvLines";
 /** "Are these matches right?" */
 export const GRV_MATCH_STEP = "grvMatch";
-/** Set while lines are being ADDED to those already there ("➕ add more"). */
-export const GRV_APPEND_KEY = "grvAppend";
+/** How many rows the last message added — the reply shows just those. */
+export const GRV_ADDED_KEY = "grvAdded";
 
 export const GRV_MATCH_OK = "ok";
 export const GRV_MATCH_MORE = "more";
-export const GRV_MATCH_REDO = "redo";
+/** Remove the last row (a typo is fixed by dropping it and sending it again). */
+export const GRV_MATCH_DROP = "drop";
 
 /** Lines per voucher. A card of more than this would pass Telegram's 4096 characters. */
 export const MAX_GRV_LINES = 40;
@@ -174,7 +175,7 @@ const money = (n: number) => (Math.round(n * 100) / 100).toLocaleString();
 
 /** One line on the card: what was typed, and what it was matched to. */
 export function grvLineSummary(l: GrvLine, n: number): string {
-  const typed = `${esc(l.name)}${l.desc ? ` <i>${esc(l.desc)}</i>` : ""} · ${money(l.qty)}${l.cost ? ` × ${money(l.cost)}` : " × <b>?</b>"}`;
+  const typed = `${esc(l.name)}${l.desc ? ` <i>ref ${esc(l.desc)}</i>` : ""} · ${money(l.qty)}${l.cost ? ` × ${money(l.cost)}` : " × <b>?</b>"}`;
   const item = l.match ? STORE_ITEM_BY_KEY.get(l.match) : undefined;
   const target = item
     ? `→ ${esc(itemLabel(item))} <code>${esc(item.key)}</code>`
@@ -219,8 +220,17 @@ export function grvMatchCards(lines: GrvLine[]): string[] {
 /** The whole card as one string — short vouchers, and tests. */
 export const grvMatchCard = (lines: GrvLine[]) => grvMatchCards(lines).join("\n");
 
-/** The example shown with the fill-in step. */
-export const GRV_LINES_EXAMPLE =
-  "Name | Description | Qty | Unit price\n" +
-  "Ball bearing | 6210 2RS SKF | 4 | 1500\n" +
-  "V-Belt | C-150 | 6 | 850";
+/** The example shown with the fill-in step — one row, as it is sent. */
+export const GRV_LINES_EXAMPLE = "Ball bearing | 6210 | 4 | 1500";
+
+/** The rows the last message added, matched — the reply after each row. */
+export function grvAddedCard(lines: GrvLine[], added: number): string {
+  const from = Math.max(0, lines.length - Math.max(1, added));
+  const shown = lines.slice(from).map((l, i) => grvLineSummary(l, from + i + 1));
+  const total = lines.reduce((a, l) => a + (l.cost ? l.cost * l.qty : 0), 0);
+  return (
+    `✅ ${shown.join("\n")}\n\n` +
+    `📦 እስካሁን <b>${lines.length}</b> ዕቃ · ${money(total)} ብር` +
+    "\n<i>ለማስተካከል፦ <code>2 = new</code> ወይም <code>2 = brg:6210</code> ይላኩ።</i>"
+  );
+}

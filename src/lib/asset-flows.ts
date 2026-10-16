@@ -7,6 +7,7 @@ import {
   BAG_STOCK,
   DELIVERY_PRODUCTS,
   FINANCE_RAW_MATERIALS,
+  RAW_MATERIALS,
   PRODUCT_ORDER,
   PRODUCTION_PRODUCTS,
   bagLabel,
@@ -45,7 +46,7 @@ import {
   GRV_LINES_STEP,
   GRV_MATCH_MORE,
   GRV_MATCH_OK,
-  GRV_MATCH_REDO,
+  GRV_MATCH_DROP,
   GRV_MATCH_STEP,
   grvLines,
   hasGrvLines,
@@ -53,15 +54,16 @@ import {
 } from "@/lib/grv-lines";
 import { createCustomItems } from "@/lib/store-custom";
 import { eatDateLabel } from "@/lib/dates";
-import { chosenInvoice, customerChoices, invoiceChoices } from "@/lib/credit-bot";
+import { chosenCustomerName, chosenInvoice, customerChoices, invoiceChoices, invoicesFor } from "@/lib/credit-bot";
+import { chosenLoad, chosenSupplierName, loadChoices, loadRemaining, loadsFor, supplierChoices } from "@/lib/rm-credit";
 import { SETTLED_TOLERANCE_ETB } from "@/lib/credit";
-import { HOURS_PER_DAY } from "@/lib/downtime";
 import {
-  daysInMonth,
-  downtimeBlock,
-  parseDowntimeSheet,
-  reasonLabel,
-  totalHours,
+  HOURS_KINDS,
+  HOURS_LABEL,
+  fmtHours,
+  hoursBlock,
+  lostMinutes,
+  parseHoursBlock,
 } from "@/lib/downtime-sheet";
 import {
   bagKey as ppBagKey,
@@ -937,22 +939,24 @@ const GRV_STEPS: AssetStep[] = [
   {
     id: GRV_LINES_STEP,
     label: "Items",
+    // ONE row per message: every item carries its reference number, and a row
+    // at a time is how the clerk reads them off the supplier's invoice.
     prompt:
-      "📦 የገቡትን ዕቃዎች ይፃፉ — በአንድ መስመር አንድ ዕቃ፦\n" +
-      "<b>ስም | መግለጫ | ብዛት | የነጠላ ዋጋ</b>\n\n" +
-      `<pre>${GRV_LINES_EXAMPLE}</pre>\n` +
-      "<i>ብዙ ዕቃ በአንድ መልዕክት መላክ ይቻላል። ከመጋዘን ዝርዝሩ ጋር በራሱ ይገናኛል፤ የሌለ ዕቃ አዲስ ሆኖ ይገባል።</i>",
+      "📦 ዕቃውን ይፃፉ — በአንድ መልዕክት <b>አንድ ዕቃ</b>፦\n" +
+      "<b>ስም | Reference no. | ብዛት | የነጠላ ዋጋ</b>\n" +
+      `<i>ለምሳሌ፦</i> <code>${GRV_LINES_EXAMPLE}</code>\n\n` +
+      "<i>ከመጋዘን ዝርዝሩ ጋር በራሱ ይገናኛል፤ የሌለ ዕቃ አዲስ ሆኖ ይገባል። ከዚያ ቀጣዩን ዕቃ ይጠየቃሉ።</i>",
     type: "paste",
   },
   {
     id: GRV_MATCH_STEP,
     label: "Item matches",
-    prompt: "✅ ከላይ ያሉት ግንኙነቶች ትክክል ናቸው?",
+    prompt: "ሌላ ዕቃ አለ?",
     type: "choice",
     choices: [
-      { label: "✅ ትክክል ነው", value: GRV_MATCH_OK },
-      { label: "➕ ተጨማሪ ዕቃ", value: GRV_MATCH_MORE },
-      { label: "✏️ ሁሉንም እንደገና", value: GRV_MATCH_REDO },
+      { label: "➕ ቀጣይ ዕቃ", value: GRV_MATCH_MORE },
+      { label: "✅ ጨርሻለሁ", value: GRV_MATCH_OK },
+      { label: "🗑 የመጨረሻውን አጥፋ", value: GRV_MATCH_DROP },
     ],
     // Only once the lines exist; a draft from before the change keeps its own items.
     when: (d) => hasGrvLines(d),
@@ -1225,9 +1229,11 @@ const CREDIT_PAYMENT_STEPS: AssetStep[] = [
   {
     id: "invoiceId",
     label: "Invoice",
-    prompt: "🧾 የትኛውን ሽያጭ ነው የከፈሉት? <i>(ቀን · ቀሪ ብር)</i>",
+    prompt: "🧾 ደንበኛው ከአንድ በላይ ያልተከፈለ ሽያጭ አለው። የትኛውን ነው የከፈሉት? <i>(ቀን · ቀሪ ብር)</i>",
     type: "choice",
     choicesFrom: invoiceChoices,
+    // Asked only when there is a choice to make: one open sale IS the answer.
+    when: (d) => invoicesFor(d).length > 1,
   },
   {
     id: "photos",
@@ -1247,18 +1253,62 @@ const CREDIT_PAYMENT_STEPS: AssetStep[] = [
   { id: "note", label: "Note", prompt: "🗒 ማስታወሻ ካለ ይፃፉ።", type: "text", skippable: true },
 ];
 
+/* ─────────────────── Raw material on credit (finance) ────────────────────── */
+
+/**
+ * A load of raw material bought on credit: who from, which truck, what, how
+ * much and at what price. What is owed is tonnes × price per tonne, worked out
+ * here and shown on the card before anything is saved.
+ */
+const RM_CREDIT_PURCHASE_STEPS: AssetStep[] = [
+  { id: "date", prompt: "📅 ጭነቱ የገባበትን ቀን ይምረጡ።", type: "date" },
+  { id: "supplier", label: "Supplier", prompt: "🏢 አቅራቢውን (Supplier) ይፃፉ።", type: "text" },
+  { id: "truckPlate", label: "Truck plate", prompt: "🚚 የመኪናውን ታርጋ ቁጥር ይፃፉ።", type: "text", skippable: true },
+  {
+    id: "material",
+    label: "Material",
+    prompt: "🧱 የትኛው ጥሬ ዕቃ ነው?",
+    type: "choice",
+    choices: RAW_MATERIALS.map((m) => ({ label: m, value: m })),
+  },
+  { id: "tonnes", label: "Tonnes", prompt: "⚖️ ስንት ቶን ተጭኗል?", type: "number" },
+  { id: "pricePerTonne", label: "Price per tonne", prompt: "💲 የአንድ ቶን ዋጋ ስንት ብር ነው?", type: "number" },
+  { id: "note", label: "Note", prompt: "🗒 ማስታወሻ ካለ ይፃፉ።", type: "text", skippable: true },
+];
+
+/**
+ * Money paid against a load. The supplier is picked by name; when they have
+ * more than one load still owed, which one — otherwise the only one is it.
+ */
+const RM_CREDIT_PAYMENT_STEPS: AssetStep[] = [
+  { id: "date", prompt: "📅 የተከፈለበትን ቀን ይምረጡ።", type: "date" },
+  { id: "supplier", label: "Supplier", prompt: "🏢 ለየትኛው አቅራቢ ነው የተከፈለው?", type: "choice", choicesFrom: supplierChoices },
+  {
+    id: "loadId",
+    label: "Load",
+    prompt: "🚚 አቅራቢው ከአንድ በላይ ያልተከፈለ ጭነት አለው። የትኛው ነው የተከፈለው? <i>(ቀን · ታርጋ · ዓይነት · ቀሪ ብር)</i>",
+    type: "choice",
+    choicesFrom: loadChoices,
+    when: (d) => loadsFor(d).length > 1,
+  },
+  { id: "amount", label: "Amount", prompt: "💰 የተከፈለውን መጠን በብር ይፃፉ።", type: "number" },
+  { id: "note", label: "Note", prompt: "🗒 ማስታወሻ ካለ ይፃፉ።", type: "text", skippable: true },
+];
+
 /* ───────────────────── Downtime, monthly (production) ────────────────────── */
 
 /**
- * The month's stoppages, off the floor's own sheet — photographed once a month.
+ * The month's Production Hours Report, off the plant's own sheet —
+ * photographed once a month.
  *
- * It was a typed form filed every day. The plant keeps the sheet anyway, so the
- * bot takes a photo of it, the model reads it into a block (one line per
- * stoppage, see downtime-sheet.ts), and the person checks the block and sends
- * it back. What is saved is the block as sent back, never the read.
+ * One row per production line: working, power interruption, mechanical and
+ * electrical maintenance, raw-material shortage and the total, each in hours
+ * and days (see downtime-sheet.ts). The model reads the photo into a block,
+ * the person checks it and sends it back, and what is saved is the block as
+ * sent back, never the read.
  *
- * Re-filing a month replaces that month's stoppages, so a correction is a
- * second filing rather than a hunt for the wrong row.
+ * Re-filing a month replaces that month's rows, so a correction is a second
+ * filing rather than a hunt for the wrong row.
  */
 export const DOWNTIME_ROWS_STEP = "rows";
 
@@ -1267,20 +1317,19 @@ const DOWNTIME_STEPS: AssetStep[] = [
   {
     id: "photos",
     prompt:
-      `📷 የወሩን የምርት መቋረጥ ሉህ ፎቶ ይላኩ — እስከ ${MAX_FLOW_PHOTOS} ፎቶ። ከጨረሱ "✅ ጨርሻለሁ" ይጫኑ።\n` +
+      `📷 የወሩን Production Hours Report ፎቶ ይላኩ — እስከ ${MAX_FLOW_PHOTOS} ፎቶ። ከጨረሱ "✅ ጨርሻለሁ" ይጫኑ።\n` +
       "<i>ሉሁ ተነብቦ ይሞላል — እርስዎ አርመው ይመልሱታል።</i>",
     type: "photos",
     required: true,
   },
   {
     id: DOWNTIME_ROWS_STEP,
-    label: "Stoppages",
+    label: "Production hours",
     prompt:
       "📋 ከሉሁ የተነበበው ይህ ነው። ያረጋግጡ፣ ስህተት ካለ ያርሙ፣ ከዚያ ቅጂውን መልሰው ይላኩ።\n\n" +
-      "<i>በአንድ መስመር አንድ መቋረጥ፦ ቀን | ሰዓት | ምክንያት | ማስታወሻ</i>\n" +
-      "<code>05 | 2.5 | maintenance-mechanical | belt</code>\n" +
-      "<i>ምክንያት፦ power · maintenance-mechanical · maintenance-electrical · maintenance-both · raw-material</i>\n" +
-      '<i>በወሩ ምንም መቋረጥ ካልነበረ "-" ይላኩ።</i>',
+      "<i>በአንድ መስመር አንድ የምርት መስመር፦ ሰዓት (ሰ:ደ) / ቀን</i>\n" +
+      "<code>1 | 538:50 / 22.5 | 125:05 / 5.2 | 56:35 / 2.4 | 23:30 / 1 | - | 744 / 31</code>\n" +
+      "<i>ዓምዶቹ፦ Line | Working | Power | Mechanical | Electrical | Raw material | Total። ባዶ ከሆነ \"-\"።</i>",
     type: "paste",
   },
 ];
@@ -1536,6 +1585,8 @@ const STEPS: Record<AssetFlowKind, AssetStep[]> = {
   whiteness_check: WHITENESS_STEPS,
   price_list: PRICE_LIST_STEPS,
   pp_bag_price: PP_BAG_PRICE_STEPS,
+  rm_credit_purchase: RM_CREDIT_PURCHASE_STEPS,
+  rm_credit_payment: RM_CREDIT_PAYMENT_STEPS,
   wht_holder: WHT_HOLDER_STEPS,
   sales_invoice: SALES_INVOICE_STEPS,
 };
@@ -1570,13 +1621,13 @@ export function pasteTemplate(
   if (kind === "downtime") {
     // What the sheet read, ready to be checked — or just the header to type under.
     const read = String(draft.readRows || draft[DOWNTIME_ROWS_STEP] || "");
-    return read || downtimeBlock([]);
+    return read || hoursBlock([]);
   }
   // The store count is the one flow with several paste steps, so its template
   // depends on WHICH block is being asked for, not just the flow.
   // The typed GRV: a header to write under; the examples are in the prompt, so
   // nothing copied back by accident becomes an item.
-  if (kind === "grv" && step === GRV_LINES_STEP) return "Name | Description | Qty | Unit price";
+  if (kind === "grv" && step === GRV_LINES_STEP) return "Name | Reference no. | Qty | Unit price";
   if ((kind === "grv" || kind === "store_issue") && step === STORE_QTY_STEP) {
     return storeVoucherTemplate(draft, kind === "grv");
   }
@@ -1835,8 +1886,8 @@ export function assetPreview(state: AssetFlowState): string {
     return (
       head +
       `📅 Date: ${esc(d.date)}\n` +
-      `👤 ደንበኛ: <b>${esc(d.customer)}</b>\n` +
-      (inv ? `🧾 ሽያጭ: ${esc(inv.date)} · ቀሪ ${money(inv.outstanding)}\n` : "") +
+      `👤 ደንበኛ: <b>${esc(chosenCustomerName(d))}</b>\n` +
+      (inv ? `🧾 ሽያጭ: ${esc(inv.date)} · ዕዳ <b>${money(inv.outstanding)}</b>\n` : "") +
       `💰 የተከፈለ: <b>${money(paid)}</b>${read.has("amount") ? " 🤖" : ""}\n` +
       (inv
         ? left <= 0
@@ -1851,27 +1902,28 @@ export function assetPreview(state: AssetFlowState): string {
 
   if (state.kind === "downtime") {
     const month = String(d.month || "");
-    const sheet = parseDowntimeSheet(String(d[DOWNTIME_ROWS_STEP] || ""), month);
-    const total = totalHours(sheet.rows);
-    // Against the month's working hours, so "30 h" reads as the share it is.
-    const monthHours = (/^\d{4}-\d{2}$/.test(month) ? daysInMonth(month) : 30) * HOURS_PER_DAY;
+    const sheet = parseHoursBlock(String(d[DOWNTIME_ROWS_STEP] || ""), month);
+    // One short block per line: phones cannot show the sheet's 13 columns.
     const lines = sheet.rows
-      .slice()
-      .sort((a, b) => a.day - b.day)
-      .map(
-        (r) =>
-          `  • ${String(r.day).padStart(2, "0")} — <b>${qty(r.hours)} h</b> · ${esc(reasonLabel(r))}` +
-          (r.note ? ` <i>(${esc(r.note)})</i>` : "")
-      )
-      .join("\n");
+      .map((r) => {
+        const total = r.cells.total.minutes;
+        const pct = (m: number) => (total ? ` (${Math.round((m / total) * 1000) / 10}%)` : "");
+        return (
+          `🏭 <b>Line ${r.line}</b>\n` +
+          HOURS_KINDS.filter((k) => k !== "total")
+            .map((k) => `  ${HOURS_LABEL[k]}: <b>${fmtHours(r.cells[k].minutes)}</b> h · ${r.cells[k].days} d${pct(r.cells[k].minutes)}`)
+            .join("\n") +
+          `\n  ⏹ Lost: <b>${fmtHours(lostMinutes(r))}</b> h · Total: ${fmtHours(total)} h / ${r.cells.total.days} d`
+        );
+      })
+      .join("\n\n");
     const ex = state.extraction;
     return (
       head +
       `📅 ወር: <b>${esc(month)}</b>\n\n` +
-      (sheet.rows.length ? `⏱ <b>መቋረጦች (${sheet.rows.length})</b>\n${lines}\n` : "✅ በዚህ ወር ምንም መቋረጥ የለም።\n") +
-      (sheet.rows.length
-        ? `  ─────────\n  <b>ጠቅላላ: ${qty(total)} h</b> · ${Math.round((total / monthHours) * 1000) / 10}% of ${monthHours} h\n`
-        : "") +
+      (lines || "—") +
+      "\n\n" +
+      (sheet.warnings.length ? `⚠️ <i>${sheet.warnings.map(esc).join("\n")}</i>\n` : "") +
       `📷 ፎቶ: <b>${state.photoFileIds?.length || 0}</b>\n` +
       (ex?.checked ? `<i>🤖 ከሉሁ የተነበበ (እርግጠኝነት ${ex.confidence}%)። ስህተት ካለ ቅጂውን አርመው ይላኩ።</i>\n` : "")
     );
@@ -2183,6 +2235,37 @@ export function assetPreview(state: AssetFlowState): string {
       .join("\n");
   }
 
+  if (state.kind === "rm_credit_purchase") {
+    const t = Number(d.tonnes) || 0;
+    const price = Number(d.pricePerTonne) || 0;
+    return (
+      head +
+      `📅 Date: ${esc(d.date)}\n` +
+      `🏢 አቅራቢ: <b>${esc(d.supplier)}</b>\n` +
+      `🚚 ታርጋ: ${esc(d.truckPlate) || "—"}\n` +
+      `🧱 ${esc(d.material)}: <b>${qty(t)} t</b> × ${money(price)} ብር\n` +
+      `💳 በብድር የሚከፈል: <b>${money(Math.round(t * price * 100) / 100)} ብር</b>\n` +
+      `🗒 ማስታወሻ: ${esc(d.note) || "—"}\n`
+    );
+  }
+
+  if (state.kind === "rm_credit_payment") {
+    const load = chosenLoad(d);
+    const paid = Number(d.amount) || 0;
+    const left = load ? Math.round((load.remaining - paid) * 100) / 100 : 0;
+    return (
+      head +
+      `📅 Date: ${esc(d.date)}\n` +
+      `🏢 አቅራቢ: <b>${esc(chosenSupplierName(d))}</b>\n` +
+      (load
+        ? `🚚 ጭነት: ${esc(load.date)} · ${esc(load.truckPlate || "—")} · ${esc(load.material)} ${qty(load.tonnes)} t · ዕዳ <b>${money(load.remaining)}</b>\n`
+        : "") +
+      `💰 የተከፈለ: <b>${money(paid)}</b>\n` +
+      (load ? (left <= 1 ? "✅ ይህ ጭነት ሙሉ በሙሉ ይከፈላል።\n" : `⏳ ከክፍያ በኋላ የሚቀር: <b>${money(left)}</b>\n`) : "") +
+      `🗒 ማስታወሻ: ${esc(d.note) || "—"}\n`
+    );
+  }
+
   if (state.kind === "pp_bag_price") {
     const rows = BAG_KINDS.map(({ size, colour }) => {
       const kind = `${size}:${colour}`;
@@ -2410,8 +2493,46 @@ export async function saveAssetReport(
     return { id: row.id, table: "raw_material_daily" };
   }
 
+  if (state.kind === "rm_credit_purchase") {
+    const date = reportDate(d.date);
+    const tonnes = Number(d.tonnes) || 0;
+    const price = Number(d.pricePerTonne) || 0;
+    if (!(tonnes > 0)) throw new Error("A load has to be more than zero tonnes.");
+    const material = String(d.material || "");
+    if (!(RAW_MATERIALS as readonly string[]).includes(material)) throw new Error("Pick the raw material from the list.");
+    const [row] = await sql<{ id: string }[]>`
+      insert into raw_material_credits
+        (date, date_label, supplier, truck_plate, material, tonnes, price_per_tonne, amount, note, reported_by, source)
+      values (${date}, ${eatDateLabel(date)}, ${String(d.supplier || "").trim()}, ${String(d.truckPlate || "").trim() || null},
+              ${material}, ${tonnes}, ${price}, ${Math.round(tonnes * price * 100) / 100},
+              ${String(d.note || "") || null}, ${reportedBy}, 'telegram')
+      returning id`;
+    return { id: row.id, table: "raw_material_credits" };
+  }
+
+  if (state.kind === "rm_credit_payment") {
+    const load = chosenLoad(d);
+    const amount = Math.round((Number(d.amount) || 0) * 100) / 100;
+    if (!load) throw new Error("No load was chosen for this payment.");
+    if (!(amount > 0)) throw new Error("A payment has to be more than zero.");
+    // Read again HERE: somebody may have recorded a payment on the same load
+    // while this one was being filled in.
+    const outstanding = await loadRemaining(load.id);
+    if (outstanding === null) throw new Error("That load no longer exists.");
+    if (amount > outstanding + 1) {
+      throw new Error(`That is more than is owed on this load — ${money(outstanding)} ETB is outstanding.`);
+    }
+    const [row] = await sql<{ id: string }[]>`
+      insert into raw_material_credit_payments (credit_id, amount, paid_on, note, recorded_by)
+      values (${load.id}::uuid, ${amount}, ${eatDateLabel(reportDate(d.date))}::date,
+              ${String(d.note || "") || null}, ${reportedBy})
+      returning id`;
+    return { id: row.id, table: "raw_material_credit_payments" };
+  }
+
   if (state.kind === "credit_payment") {
-    const invoiceId = String(d.invoiceId || "");
+    // The chosen sale, or the customer's only open one.
+    const invoiceId = chosenInvoice(d)?.id || "";
     const amount = Math.round((Number(d.amount) || 0) * 100) / 100;
     if (!invoiceId) throw new Error("No sale was chosen for this payment.");
     if (!(amount > 0)) throw new Error("A payment has to be more than zero.");
@@ -2445,28 +2566,34 @@ export async function saveAssetReport(
 
   if (state.kind === "downtime") {
     const month = String(d.month || "") || monthLabel();
-    const sheet = parseDowntimeSheet(String(d[DOWNTIME_ROWS_STEP] || ""), month);
+    const sheet = parseHoursBlock(String(d[DOWNTIME_ROWS_STEP] || ""), month);
     if (sheet.bad.length > 0) throw new Error(`The sheet still has lines that do not read: ${sheet.bad[0]}`);
-    const [y, m] = month.split("-").map(Number);
-    const start = new Date(Date.UTC(y, m - 1, 1));
-    const end = new Date(Date.UTC(y, m, 1));
+    const lostHours = Math.round((sheet.rows.reduce((a, r) => a + lostMinutes(r), 0) / 60) * 100) / 100;
 
-    // One transaction: the month's stoppages are replaced and the filing is
+    // One transaction: the month's lines are replaced and the filing is
     // recorded together, or not at all. A month is the unit — re-filing it is
     // how a mistake is corrected, so its old rows must not survive beside the
-    // new ones.
+    // new ones. `downtime_months` stays the "filed" marker the reminder reads;
+    // its stoppages column now counts the lines, total_hours the hours lost.
     const id = await sql.begin(async (tx) => {
-      await tx`delete from downtime_reports where date >= ${start} and date < ${end}`;
+      await tx`delete from production_hours where month = ${month}`;
       for (const r of sheet.rows) {
-        const date = new Date(Date.UTC(y, m - 1, r.day));
+        const c = r.cells;
         await tx`
-          insert into downtime_reports (date, date_label, hours, reason, maintenance_kind, note, reported_by, source)
-          values (${date}, ${eatDateLabel(date)}, ${r.hours}, ${r.reason}, ${r.maintenanceKind},
-                  ${r.note || null}, ${reportedBy}, 'telegram')`;
+          insert into production_hours (
+            month, line,
+            working_minutes, working_days, power_minutes, power_days, mech_minutes, mech_days,
+            elec_minutes, elec_days, raw_minutes, raw_days, total_minutes, total_days,
+            reported_by, source)
+          values (
+            ${month}, ${r.line},
+            ${c.working.minutes}, ${c.working.days}, ${c.power.minutes}, ${c.power.days}, ${c.mech.minutes}, ${c.mech.days},
+            ${c.elec.minutes}, ${c.elec.days}, ${c.raw.minutes}, ${c.raw.days}, ${c.total.minutes}, ${c.total.days},
+            ${reportedBy}, 'telegram')`;
       }
       const [row] = await tx<{ id: string }[]>`
         insert into downtime_months (month, stoppages, total_hours, extraction, tg_file_ids, reported_by, source)
-        values (${month}, ${sheet.rows.length}, ${totalHours(sheet.rows)},
+        values (${month}, ${sheet.rows.length}, ${lostHours},
                 ${state.extraction ? tx.json({ ...state.extraction }) : null},
                 ${state.photoFileIds || []}, ${reportedBy}, 'telegram')
         on conflict (month) do update set

@@ -51,14 +51,15 @@ import { parseFinancePaste } from "@/lib/finance-paste";
 import { logError, resolveErrors } from "@/lib/errors";
 import { readWithBusyRetry } from "@/lib/llm-retry";
 import {
-  GRV_APPEND_KEY,
+  GRV_ADDED_KEY,
   GRV_LINES_EXAMPLE,
   GRV_LINES_STEP,
   GRV_MATCH_MORE,
-  GRV_MATCH_REDO,
+  GRV_MATCH_DROP,
   GRV_MATCH_STEP,
   MAX_GRV_LINES,
   grvLines,
+  grvAddedCard,
   grvMatchCards,
   parseGrvLines,
   parseGrvOverrides,
@@ -73,8 +74,9 @@ import { runAfter } from "@/lib/after";
 import { whitenessAlert } from "@/lib/whiteness-alert";
 import { parseRawMaterialPaste } from "@/lib/raw-material-paste";
 import { parsePpBagPaste } from "@/lib/pp-bag-paste";
-import { downtimeBlock, parseDowntimeSheet, parseReason, type DowntimeRow } from "@/lib/downtime-sheet";
-import { INVOICES_KEY, encodeInvoices, openCreditInvoices } from "@/lib/credit-bot";
+import { hoursBlock, parseHoursBlock } from "@/lib/downtime-sheet";
+import { INVOICES_KEY, chosenInvoice, encodeInvoices, openCreditInvoices } from "@/lib/credit-bot";
+import { LOADS_KEY, chosenLoad, encodeLoads, loadRemaining, openRmLoads } from "@/lib/rm-credit";
 import { SETTLED_TOLERANCE_ETB } from "@/lib/credit";
 import { reconcileBags } from "@/lib/stock-reconciliation";
 import { parseStoreGroupPaste } from "@/lib/store-count-paste";
@@ -916,6 +918,8 @@ const ASSET_FLOW_BY_CAP: Record<string, AssetFlowKind | undefined> = {
   grv: "grv",
   price_list: "price_list",
   pp_bag_price: "pp_bag_price",
+  rm_credit_purchase: "rm_credit_purchase",
+  rm_credit_payment: "rm_credit_payment",
   wht_holder: "wht_holder",
   sales_report: "sales_invoice",
 };
@@ -1425,10 +1429,14 @@ async function matchGrvIntoDraft(
 
   setGrvLines(state.draft, result.data);
   delete state.draft[GRV_MATCH_STEP];
+  const added = Number(state.draft[GRV_ADDED_KEY]) || 1;
+  delete state.draft[GRV_ADDED_KEY];
   state.step = GRV_MATCH_STEP;
   session.assetFlow = { ...state };
   await persist(session);
-  for (const part of grvMatchCards(result.data)) await sendMessage(chatId, part);
+  // Just the row(s) this message added, and the running count — not the whole
+  // list again after every item. The review card shows them all.
+  await sendMessage(chatId, grvAddedCard(result.data, added));
   await askAssetStep(chatId, state);
 }
 
@@ -1565,17 +1573,10 @@ async function extractDowntimeIntoDraft(
     return;
   }
 
-  const rows: DowntimeRow[] = [];
-  const asPrinted: string[] = [];
-  if (read?.ok) {
-    for (const line of read.data.lines) {
-      const reason = parseReason(line.reason);
-      if (reason) rows.push({ day: line.day, hours: line.hours, ...reason, note: line.note });
-      // Kept in the block exactly as read, so the parser flags it when it comes back.
-      else asPrinted.push([String(line.day).padStart(2, "0"), line.hours, line.reason, line.note].filter(Boolean).join(" | "));
-    }
-  }
-  state.draft.readRows = [downtimeBlock(rows), ...asPrinted].join("\n");
+  // The read becomes the block to check; an unread sheet gives the empty
+  // three-line block to type into.
+  const rows = read?.ok ? read.data.rows : [];
+  state.draft.readRows = hoursBlock(rows);
 
   state.extraction = read?.ok
     ? {
@@ -1583,7 +1584,7 @@ async function extractDowntimeIntoDraft(
         confidence: read.data.confidence,
         notes: read.data.notes,
         unmatched: read.data.unmatched.slice(0, 10),
-        filled: rows.length + asPrinted.length > 0 ? ["rows"] : [],
+        filled: rows.length > 0 ? ["rows"] : [],
       }
     : {
         checked: false,
@@ -1598,11 +1599,13 @@ async function extractDowntimeIntoDraft(
   session.assetFlow = { ...state };
   await persist(session);
 
-  const found = rows.length + asPrinted.length;
+  // The read's own arithmetic, pointed out before the block is sent back.
+  const check = rows.length ? parseHoursBlock(hoursBlock(rows), String(state.draft.month || "")) : null;
   await sendMessage(
     chatId,
     read?.ok
-      ? `✅ ${found} መቋረጥ ከሉሁ ተነብቧል (እርግጠኝነት ${read.data.confidence}%)።` +
+      ? `✅ ${rows.length} የምርት መስመር ከሉሁ ተነብቧል (እርግጠኝነት ${read.data.confidence}%)።` +
+          (check?.warnings.length ? `\n⚠️ ${check.warnings.map((w) => escapeHtml(w)).join("\n⚠️ ")}` : "") +
           (read.data.unmatched.length
             ? `\n⚠️ ያልተነበቡ መስመሮች፦\n${read.data.unmatched.map((u) => `• ${escapeHtml(u)}`).join("\n")}`
             : "")
@@ -1721,6 +1724,16 @@ async function startAssetFlow(
   }
   // The bag price block opens with this month's prices already in it, so the
   // person corrects what moved instead of retyping six figures.
+  // Raw-material credit payments choose from the loads still owed RIGHT NOW,
+  // read once here like the sales credit list above.
+  if (kind === "rm_credit_payment") {
+    const open = await openRmLoads().catch(() => []);
+    if (open.length === 0) {
+      await sendReportMenu(chatId, menuButtons, "✅ አሁን ያልተከፈለ የጥሬ ዕቃ ብድር የለም።");
+      return false;
+    }
+    draft[LOADS_KEY] = encodeLoads(open);
+  }
   if (kind === "pp_bag_price") {
     const [row] = await sql<{ prices: Record<string, number> }[]>`
       select prices from monthly_price_lists where month = ${monthLabel()}
@@ -2325,8 +2338,29 @@ export async function POST(req: NextRequest) {
           // What this collection leaves owing, so the person at the counter
           // knows before they put the phone down.
           if (state.kind === "credit_payment") {
-            const invoiceId = String(state.draft.invoiceId || "");
+            const invoiceId = chosenInvoice(state.draft)?.id || "";
             runAfter(sendCreditBalanceNote(chatId, invoiceId));
+          }
+
+          // The same for a raw-material load: what is still owed on it now.
+          if (state.kind === "rm_credit_payment") {
+            const load = chosenLoad(state.draft);
+            if (load) {
+              runAfter(
+                loadRemaining(load.id)
+                  .then((left) =>
+                    left === null
+                      ? undefined
+                      : sendMessage(
+                          chatId,
+                          left <= 1
+                            ? `✅ <b>${escapeHtml(load.supplier)}</b> — ይህ ጭነት (${escapeHtml(load.truckPlate || load.date)}) ሙሉ በሙሉ ተከፍሏል።`
+                            : `🚚 <b>${escapeHtml(load.supplier)}</b> — ከዚህ ጭነት የሚቀር: <b>${Math.round(left).toLocaleString("en-US")}</b> ብር።`
+                        )
+                  )
+                  .catch((e) => console.warn("rm credit balance note skipped:", e))
+              );
+            }
           }
 
           // Answer first, analyse after — see backgroundPpDamageCheck.
@@ -2544,9 +2578,21 @@ export async function POST(req: NextRequest) {
           await askAssetStep(chatId, state);
           return NextResponse.json({ ok: true });
         }
-        if (pick.value === GRV_MATCH_MORE || pick.value === GRV_MATCH_REDO) {
-          if (pick.value === GRV_MATCH_MORE) state.draft[GRV_APPEND_KEY] = 1;
-          else setGrvLines(state.draft, []);
+        if (pick.value === GRV_MATCH_DROP) {
+          const dropped = lines.pop();
+          setGrvLines(state.draft, lines);
+          // Nothing left: back to typing the first row.
+          if (lines.length === 0) state.step = GRV_LINES_STEP;
+          session.assetFlow = { ...state };
+          await persist(session);
+          await sendMessage(
+            chatId,
+            `🗑 ${escapeHtml(dropped?.name || "")} ተሰርዟል።` + (lines.length ? ` እስካሁን <b>${lines.length}</b> ዕቃ።` : "")
+          );
+          await askAssetStep(chatId, state);
+          return NextResponse.json({ ok: true });
+        }
+        if (pick.value === GRV_MATCH_MORE) {
           state.step = GRV_LINES_STEP;
           session.assetFlow = { ...state };
           await persist(session);
@@ -2591,8 +2637,9 @@ export async function POST(req: NextRequest) {
             );
             return NextResponse.json({ ok: true });
           }
-          const keep = state.draft[GRV_APPEND_KEY] ? grvLines(state.draft) : [];
-          delete state.draft[GRV_APPEND_KEY];
+          // Rows accumulate: each message adds to what is already there.
+          const keep = grvLines(state.draft);
+          state.draft[GRV_ADDED_KEY] = parsed.lines.length;
           const typed = parsed.lines.map((l) => ({ ...l, match: null, group: "added", unit: "pcs" as const, how: "pending" as const }));
           const all = [...keep, ...typed];
           if (all.length > MAX_GRV_LINES) {
@@ -2699,7 +2746,7 @@ export async function POST(req: NextRequest) {
            fewer stoppage. A bad block is answered with what is wrong and the
            block itself, to correct and resend. */
         if (state.kind === "downtime" && step.id === DOWNTIME_ROWS_STEP) {
-          const sheet = parseDowntimeSheet(val, String(state.draft.month || ""));
+          const sheet = parseHoursBlock(val, String(state.draft.month || ""));
           if (sheet.bad.length > 0) {
             await sendMessage(
               chatId,
@@ -2713,7 +2760,7 @@ export async function POST(req: NextRequest) {
             await sendMessage(chatId, `<pre>${escapeHtml(val)}</pre>`);
             return NextResponse.json({ ok: true });
           }
-          state.draft[DOWNTIME_ROWS_STEP] = sheet.none ? "-" : downtimeBlock(sheet.rows);
+          state.draft[DOWNTIME_ROWS_STEP] = hoursBlock(sheet.rows);
           await advanceAsset(session, chatId, state);
           return NextResponse.json({ ok: true });
         }
