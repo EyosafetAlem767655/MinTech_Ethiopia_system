@@ -169,15 +169,22 @@ const round3 = (n: number) => Math.round(n * 1000) / 1000;
 /**
  * Did this voucher move the item AFTER the count?
  *
- * A later day, plainly. The SAME day is decided by when each was filed: a
- * count taken in the morning and an issue made in the afternoon are both dated
- * today, and only the order they reached the system says the issue is not
- * already inside the counted figure.
+ * Yes if EITHER:
+ *  - it is dated a later day than the count, or
+ *  - it was SUBMITTED after the count was recorded — whatever date is written
+ *    on the paper. A voucher keyed in from an older pad after the count was
+ *    taken used to be read as "already inside the counted figure" because of
+ *    its earlier date, so filing it moved nothing; the store issue simply
+ *    vanished from the balance. What reaches the system after the count is
+ *    what the count could not have included.
+ *
+ * Only a voucher both dated on or before the count day AND filed before the
+ * count was recorded is taken to be inside it.
  */
 export function movedAfter(m: Movement, countDate: string, countCreatedAt: string): boolean {
   const md = new Date(m.date).toISOString().slice(0, 10);
   const cd = new Date(countDate).toISOString().slice(0, 10);
-  if (md !== cd) return md > cd;
+  if (md > cd) return true;
   return new Date(m.createdAt).getTime() > new Date(countCreatedAt).getTime();
 }
 
