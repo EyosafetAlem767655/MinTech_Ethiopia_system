@@ -137,11 +137,11 @@ async function departmentKpis(
             (select count(*) from pp_bag_damage_reports where date >= ${start} and date < ${end})       as damage,
             (select count(*) from purchase_requests     where created_at >= ${start} and created_at < ${end}) as pr_count
         `,
-        // By when they were filed — see the Brief card below for why.
-        Promise.all([
-          countRows("goods_receiving_vouchers", "created_at", start, end),
-          countRows("store_issue_vouchers", "created_at", start, end),
-        ]).then(([grv, siv]) => [{ grv: String(grv), siv: String(siv) }]),
+        sql<{ grv: string; siv: string }[]>`
+          select
+            (select count(*) from goods_receiving_vouchers where created_at >= ${start} and created_at < ${end}) as grv,
+            (select count(*) from store_issue_vouchers     where created_at >= ${start} and created_at < ${end}) as siv
+        `.catch(() => [{ grv: "0", siv: "0" }]),
       ]);
       const v = vouchers[0] ?? { grv: "0", siv: "0" };
       return [
@@ -367,24 +367,6 @@ export async function getDepartmentSummary(
 }
 
 /**
- * Rows of one table in the window, on one column. A table or column a migration
- * has not added yet counts 0 — for this figure only, never the whole card.
- */
-async function countRows(table: string, column: "date" | "created_at", start: Date, end: Date): Promise<number> {
-  try {
-    const [r] = await sql<{ n: string }[]>`
-      select count(*) as n from ${sql(table)} where ${sql(column)} >= ${start} and ${sql(column)} < ${end}
-    `;
-    return Number(r?.n) || 0;
-  } catch (e) {
-    const code = (e as { code?: string })?.code;
-    if (code !== "42P01" && code !== "42703") throw e;
-    console.warn(`countRows(${table}): not migrated yet; counting 0`);
-    return 0;
-  }
-}
-
-/**
  * Cheap COUNT-only activity tallies for a department's Brief summary.
  *
  * ONE RULE GOVERNS THIS FUNCTION: every figure it produces must be findable on
@@ -455,30 +437,51 @@ async function departmentActivityCounts(
       // Split in two queries on purpose: the second group of tables arrives in
       // 0014, 0019, 0022 and 0033, and a database a migration behind must still
       // show the counts it does have rather than an empty card.
-      //
-      // Each figure is its OWN count. They used to share one statement whose
-      // failure — any one table — zeroed every tile on the card at once.
-      //
-      // The vouchers are counted by when they were FILED. A store issue keyed in
-      // today from last month's paper pad carries last month's date; counted by
-      // that date it fell outside the window and the card said 0 store issues
-      // on a day several were submitted. The tab's voucher list is not windowed,
-      // so this is also what agrees with it.
-      const [purchases, claims, raw, grv, bags, siv, usage, damage, stock] = await Promise.all([
-        countRows("purchase_requests", "created_at", start, end),
-        countRows("damage_claims", "created_at", start, end),
-        countRows("raw_material_daily", "date", start, end),
-        countRows("goods_receiving_vouchers", "created_at", start, end),
-        countRows("pp_bag_purchases", "date", start, end),
-        countRows("store_issue_vouchers", "created_at", start, end),
-        countRows("pp_bag_usage", "date", start, end),
-        countRows("pp_bag_damage_reports", "date", start, end),
-        countRows("daily_ops_reports", "date", start, end),
+      const [[a], [b]] = await Promise.all([
+        sql<{ purchases: string; claims: string }[]>`
+          select
+            (select count(*) from purchase_requests where created_at >= ${start} and created_at < ${end}) as purchases,
+            (select count(*) from damage_claims     where created_at >= ${start} and created_at < ${end}) as claims`.catch(
+          (e) => {
+            missing(e);
+            return [{ purchases: "0", claims: "0" }];
+          }
+        ),
+        sql<{
+          raw: string;
+          grv: string;
+          bags: string;
+          siv: string;
+          usage: string;
+          damage: string;
+          stock: string;
+        }[]>`
+          select
+            (select count(*) from raw_material_daily      where date >= ${start} and date < ${end}) as raw,
+            (select count(*) from goods_receiving_vouchers where created_at >= ${start} and created_at < ${end}) as grv,
+            (select count(*) from pp_bag_purchases        where date >= ${start} and date < ${end}) as bags,
+            (select count(*) from store_issue_vouchers     where created_at >= ${start} and created_at < ${end}) as siv,
+            (select count(*) from pp_bag_usage             where date >= ${start} and date < ${end}) as usage,
+            (select count(*) from pp_bag_damage_reports    where date >= ${start} and date < ${end}) as damage,
+            (select count(*) from daily_ops_reports        where date >= ${start} and date < ${end}) as stock`.catch(
+          () => [{ raw: "0", grv: "0", bags: "0", siv: "0", usage: "0", damage: "0", stock: "0" }]
+        ),
       ]);
+      const purchases = Number(a.purchases) || 0;
+      const raw = Number(b.raw) || 0;
+      const siv = Number(b.siv) || 0;
       // Goods received is both ways they arrive: the voucher, and the PP bag
       // receiving form that took the bags off it.
-      const received = grv + bags;
-      const total = raw + purchases + received + siv + claims + usage + damage + stock;
+      const received = (Number(b.grv) || 0) + (Number(b.bags) || 0);
+      const total =
+        raw +
+        purchases +
+        received +
+        siv +
+        (Number(a.claims) || 0) +
+        (Number(b.usage) || 0) +
+        (Number(b.damage) || 0) +
+        (Number(b.stock) || 0);
       return {
         total,
         headline: [

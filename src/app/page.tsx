@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import CountUp from "@/components/CountUp";
 import RangeSelector from "@/components/RangeSelector";
+import DailyReportsPanel from "@/components/panels/DailyReportsPanel";
 import { enablePushNotifications } from "@/components/PwaSetup";
 import { DEPARTMENTS } from "@/lib/departments";
 import { type RangeKey } from "@/lib/ranges";
@@ -193,11 +194,21 @@ export default function OwnerDashboard() {
           )}
         </section>
 
+        {/* Two feeds, side by side on a desktop: both are lists nobody
+            scrolls to the bottom of, and a wide screen can hold both. */}
+        <div className="space-y-5 lg:grid lg:grid-cols-2 lg:gap-5 lg:space-y-0">
         {/* ───────── Who submitted what (all types) ───────── */}
         <section className="animate-fade-up">
           <h2 className="mb-3 px-1 font-display text-lg font-bold">Recent submissions</h2>
           <RecentSubmissions />
         </section>
+
+        {/* ───────── Daily reports & who submitted / missed ───────── */}
+        <section className="animate-fade-up">
+          <h2 className="mb-3 px-1 font-display text-lg font-bold">Daily reports</h2>
+          <DailyReportsPanel />
+        </section>
+        </div>
       </div>
     </main>
   );
