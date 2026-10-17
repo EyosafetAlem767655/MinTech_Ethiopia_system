@@ -45,6 +45,11 @@ export interface StoreItem {
    */
   custom?: boolean;
   description?: string;
+  /**
+   * Litres in one drum, for an item KEPT in litres but often counted or issued
+   * by the drum. Only gas oil, by the owner's word: 1 drum = 200 litres.
+   */
+  perDrum?: number;
 }
 
 export interface StoreGroup {
@@ -266,7 +271,7 @@ export const STORE_ITEMS: StoreItem[] = [
   // Oils — counted in litres, except the two the October 2026 list counts by
   // the drum (industrial 320, engine 15W40), which switched with it.
   it("oil:engine-15w40", "oil", "Engine OIL 15W40", "drum"),
-  it("oil:gas", "oil", "Gas OIL", "l"),
+  { ...it("oil:gas", "oil", "Gas OIL", "l"), perDrum: 200 },
   it("oil:industrial-320", "oil", "INDUSTRIAL OIL 320", "drum"),
   it("oil:compressor-46", "oil", "Compress OIL No 46", "l"),
 
@@ -538,7 +543,7 @@ export const STORE_ITEMS: StoreItem[] = [
   it("oil:sigma-fluid", "oil", "Sigma fluid", "l"),
   it("oil:grease-ncg3", "oil", "Greas NCG-3", "kg"),
   it("oil:hipersyn-46", "oil", "Hipersyn oil 46/208L"),
-  it("oil:engine-20w50", "oil", "Engin oil 20w50", "l"),
+  it("oil:engine-20w50", "oil", "Engin oil 20w50", "drum"),
   it("oil:transmission", "oil", "Transmition oil AFT", "l"),
   it("oil:dacsin-46", "oil", "Dacsin oil 46 (Compressor)"),
   it("oil:coolant", "oil", "Coolant (Anti corrosive)"),
@@ -675,6 +680,18 @@ export function itemsOfGroup(group: string): StoreItem[] {
 export function itemsOfBlock(block: StoreBlockKey): StoreItem[] {
   const groups = new Set(groupsOfBlock(block).map((g) => g.key));
   return allStoreItems().filter((i) => groups.has(i.group));
+}
+
+/** "(14 drum)" for an item kept in litres but counted by the drum; "" otherwise. */
+export function drumNote(item: Pick<StoreItem, "perDrum">, qty: number): string {
+  if (!item.perDrum || !qty) return "";
+  const drums = Math.round((qty / item.perDrum) * 100) / 100;
+  return `(${drums.toLocaleString()} drum)`;
+}
+
+/** A quantity written in drums ("14 drum", "2 drums"), in the item's own unit. */
+export function fromDrums(item: Pick<StoreItem, "perDrum">, drums: number): number {
+  return item.perDrum ? Math.round(drums * item.perDrum * 1000) / 1000 : drums;
 }
 
 /** "4 pcs", "12 l" — the figure with the unit it was counted in. */

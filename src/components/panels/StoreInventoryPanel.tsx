@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { STORE_BLOCKS, STORE_GROUPS, type StoreItem } from "@/lib/store-items";
+import { STORE_BLOCKS, STORE_GROUPS, drumNote, type StoreItem } from "@/lib/store-items";
 
 /**
  * The spare-parts store: what each shelf should hold, what it is worth, and
@@ -220,7 +220,11 @@ function ItemTable({ rows, showGroup = false }: { rows: ItemStatus[]; showGroup?
                   </>
                 )}
               </td>
-              <td className="p-2 text-[10px] text-stone-400">{s.item.unit}</td>
+              <td className="p-2 text-[10px] text-stone-400">
+                {s.item.unit}
+                {/* Gas oil is kept in litres but bought and counted by the drum. */}
+                {drumNote(s.item, s.balance) && <span className="ml-1 text-stone-500">{drumNote(s.item, s.balance)}</span>}
+              </td>
               <td className="p-2 tabular-nums text-stone-500">
                 {s.qty === null ? <span className="text-stone-300">—</span> : s.qty.toLocaleString()}
               </td>

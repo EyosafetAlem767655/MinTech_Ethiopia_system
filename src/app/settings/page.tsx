@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   CAPABILITIES,
@@ -327,6 +327,221 @@ function PurgeCard({
   );
 }
 
+/* ──────────────────────── One submission, in full ─────────────────────────── */
+
+/** "reported_by" → "Reported by". */
+const humanise = (col: string) => col.replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase());
+
+/** Columns that are plumbing, not information, on any table. */
+const PLUMBING = new Set(["id", "_collection", "photo_ids"]);
+
+function DetailValue({ value }: { value: unknown }) {
+  if (value == null || value === "") return <span className="text-stone-300">—</span>;
+  if (typeof value === "object") {
+    if (Array.isArray(value) && value.length === 0) return <span className="text-stone-300">—</span>;
+    return (
+      <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-clay-50/60 p-2 text-[10px] text-stone-600">
+        {JSON.stringify(value, null, 2)}
+      </pre>
+    );
+  }
+  const text = String(value);
+  // Timestamps read as dates, not as ISO strings.
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(text)) return <span>{fmtTime(text)}</span>;
+  return <span className="whitespace-pre-wrap break-words">{text}</span>;
+}
+
+/**
+ * Everything about one submission, in a pop-up: every column of its row (the
+ * registry's labelled fields first, then the rest), its line items and payments,
+ * its photos — and, below them, the buttons to edit or delete it.
+ */
+function SubmissionDetail(props: {
+  collection: SubmissionCollection;
+  row: SubmissionRow;
+  spec: SubmissionSpecLite;
+  photoIds: string[];
+  editing: boolean;
+  draft: Record<string, string>;
+  busy: boolean;
+  error: string;
+  onDraft: (d: Record<string, string>) => void;
+  onEdit: () => void;
+  onCancelEdit: () => void;
+  onSave: () => void;
+  onDelete: () => void;
+  onClose: () => void;
+}) {
+  const { collection, row, spec, editing, draft, busy, error, onClose } = props;
+  const [data, setData] = useState<{ row: Record<string, unknown>; children: { table: string; rows: Record<string, unknown>[] }[] } | null>(null);
+  const [loadError, setLoadError] = useState("");
+
+  useEffect(() => {
+    let alive = true;
+    fetch(`/api/submissions/${collection}/${String(row.id)}`)
+      .then(async (r) => (r.ok ? r.json() : Promise.reject(new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`))))
+      .then((d) => alive && setData(d))
+      .catch((e) => alive && setLoadError(String(e instanceof Error ? e.message : e)));
+    return () => {
+      alive = false;
+    };
+  }, [collection, row.id]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const full = data?.row ?? row;
+  const labelled = spec.displayFields.map((f) => f.column);
+  const labelOf = (col: string) => spec.displayFields.find((f) => f.column === col)?.label ?? humanise(col);
+  const columns = [
+    ...labelled.filter((c) => c in full),
+    ...Object.keys(full).filter((c) => !labelled.includes(c) && !PLUMBING.has(c)),
+  ];
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 p-0 sm:items-center sm:p-4"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-label={`${spec.label} details`}
+    >
+      <div
+        className="flex max-h-[92vh] w-full max-w-2xl flex-col rounded-t-2xl bg-white shadow-xl sm:rounded-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between gap-2 border-b border-clay-50 p-4">
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-wide text-clay-600">
+              {spec.icon} {spec.label}
+            </p>
+            <p className="text-[11px] text-stone-400">{fmtTime(String(row.created_at))}</p>
+          </div>
+          <button onClick={onClose} className="rounded-full px-2 py-1 text-lg text-stone-400 hover:bg-clay-50" aria-label="Close">
+            ✕
+          </button>
+        </div>
+
+        <div className="flex-1 space-y-4 overflow-y-auto p-4">
+          {loadError && <p className="text-xs font-bold text-red-700">Could not load every detail: {loadError}</p>}
+          {!data && !loadError && <div className="h-24 animate-pulse rounded-xl bg-clay-50" />}
+
+          {editing ? (
+            <div className="space-y-2">
+              {spec.editableKeys.map((key) => {
+                const f = spec.displayFields.find((x) => x.key === key);
+                if (!f) return null;
+                return (
+                  <label key={key} className="block text-[11px] font-bold text-stone-500">
+                    {f.label}
+                    {f.type === "longtext" ? (
+                      <textarea
+                        value={draft[key] ?? ""}
+                        onChange={(e) => props.onDraft({ ...draft, [key]: e.target.value })}
+                        rows={4}
+                        className="mt-1 w-full rounded-lg border border-clay-100 p-2 text-sm font-normal"
+                      />
+                    ) : (
+                      <input
+                        type={f.type === "number" ? "number" : "text"}
+                        value={draft[key] ?? ""}
+                        onChange={(e) => props.onDraft({ ...draft, [key]: e.target.value })}
+                        className="mt-1 w-full rounded-lg border border-clay-100 px-2 py-1.5 text-sm font-normal"
+                      />
+                    )}
+                  </label>
+                );
+              })}
+            </div>
+          ) : (
+            data && (
+              <dl className="grid grid-cols-1 gap-x-4 gap-y-2 text-xs sm:grid-cols-[160px_1fr]">
+                {columns.map((c) => (
+                  <Fragment key={c}>
+                    <dt className="font-bold text-stone-500">{labelOf(c)}</dt>
+                    <dd className="text-stone-800">
+                      <DetailValue value={full[c]} />
+                    </dd>
+                  </Fragment>
+                ))}
+              </dl>
+            )
+          )}
+
+          {!editing &&
+            data?.children
+              .filter((c) => c.rows.length > 0)
+              .map((c) => {
+                const cols = Object.keys(c.rows[0]).filter((k) => !PLUMBING.has(k) && !/_id$/.test(k) && k !== "created_at");
+                return (
+                  <div key={c.table} className="space-y-1">
+                    <p className="text-[11px] font-bold uppercase tracking-widest text-clay-500">
+                      {humanise(c.table)} ({c.rows.length})
+                    </p>
+                    <div className="overflow-x-auto rounded-xl border border-clay-50">
+                      <table className="w-full min-w-[480px] text-left text-[11px]">
+                        <thead className="bg-clay-50/70 text-[10px] uppercase text-stone-500">
+                          <tr>
+                            {cols.map((k) => (
+                              <th key={k} className="p-2 font-bold">
+                                {humanise(k)}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {c.rows.map((r, i) => (
+                            <tr key={String(r.id ?? i)} className="border-t border-clay-50 align-top">
+                              {cols.map((k) => (
+                                <td key={k} className="p-2 text-stone-700">
+                                  {r[k] == null || r[k] === "" ? "—" : typeof r[k] === "object" ? JSON.stringify(r[k]) : String(r[k])}
+                                </td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                );
+              })}
+
+          {props.photoIds.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {props.photoIds.map((pid) => (
+                <a key={pid} href={`/api/files/${pid}`} target="_blank" rel="noreferrer">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={`/api/files/${pid}`} alt="" className="h-20 w-20 rounded-lg object-cover" />
+                </a>
+              ))}
+            </div>
+          )}
+
+          {error && <p className="text-xs font-bold text-red-700">{error}</p>}
+        </div>
+
+        <div className="flex flex-wrap gap-1.5 border-t border-clay-50 p-4">
+          {editing ? (
+            <>
+              <SmallBtn label={busy ? "Saving…" : "💾 Save"} tone="green" disabled={busy} onClick={props.onSave} />
+              <SmallBtn label="Cancel" onClick={props.onCancelEdit} />
+            </>
+          ) : (
+            <>
+              {spec.editableKeys.length > 0 && <SmallBtn label="✏️ Edit" disabled={busy} onClick={props.onEdit} />}
+              <SmallBtn label="🗑 Delete" tone="red" disabled={busy} onClick={props.onDelete} />
+              <SmallBtn label="Close" onClick={onClose} />
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ──────────────────────────────── Submissions ─────────────────────────────── */
 
 /** "all" plus every registered report type. */
@@ -391,6 +606,10 @@ function SubmissionsTab() {
   const [bin, setBin] = useState<BinRow[] | null>(null);
   const [showBin, setShowBin] = useState(false);
   const [loading, setLoading] = useState(false);
+  // The submission open in the detail pop-up, and a counter that makes it
+  // re-read itself after an edit.
+  const [open, setOpen] = useState<SubmissionRow | null>(null);
+  const [openVersion, setOpenVersion] = useState(0);
 
   /**
    * The registry entry for one row.
@@ -500,6 +719,7 @@ function SubmissionsTab() {
       return;
     }
     setEditing(null);
+    setOpenVersion((v) => v + 1);
     await load();
   };
 
@@ -534,6 +754,7 @@ function SubmissionsTab() {
     // when a reload of every other collection finishes. The reload still runs,
     // to pick up anything else that changed.
     setRows((prev) => (prev ?? []).filter((r) => String(r.id) !== String(row.id)));
+    setOpen(null);
     await Promise.all([load(), loadBin()]);
   };
 
@@ -711,84 +932,61 @@ function SubmissionsTab() {
           {rows.map((row) => {
             const spec = specOf(row);
             const id = String(row.id);
-            const isEditing = editing === id;
+            // The first few summary fields; everything else is in the pop-up.
+            const shown = spec.displayFields.filter((f) => row[f.column] != null && row[f.column] !== "").slice(0, 3);
             return (
-              <div key={`${collectionOf(row)}-${id}`} className="card space-y-2 p-3">
+              <button
+                key={`${collectionOf(row)}-${id}`}
+                type="button"
+                onClick={() => {
+                  setEditing(null);
+                  setOpen(row);
+                }}
+                className="card block w-full space-y-1 p-3 text-left transition hover:border-clay-300 hover:shadow-md"
+              >
                 <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0 flex-1 space-y-1">
-                    <p className="text-[10px] font-bold uppercase tracking-wide text-clay-600">
-                      {spec.icon} {spec.label}
-                    </p>
-                    {spec.displayFields.map((f) => {
-                      const value = row[f.column];
-                      if (value == null || value === "") return null;
-                      return (
-                        <p key={f.key} className="text-xs">
-                          <span className="font-bold text-stone-500">{f.label}: </span>
-                          <span className={f.type === "longtext" ? "whitespace-pre-wrap text-stone-700" : "text-stone-700"}>
-                            {String(value)}
-                          </span>
-                        </p>
-                      );
-                    })}
-                    <p className="text-[10px] text-stone-400">{fmtTime(String(row.created_at))}</p>
-                  </div>
+                  <p className="text-[10px] font-bold uppercase tracking-wide text-clay-600">
+                    {spec.icon} {spec.label}
+                  </p>
+                  <span className="text-[10px] font-bold text-clay-500">Details ›</span>
                 </div>
-
-                {photoIds(row).length > 0 && (
-                  <div className="flex flex-wrap gap-1.5">
-                    {photoIds(row).map((pid) => (
-                      <a key={pid} href={`/api/files/${pid}`} target="_blank" rel="noreferrer">
-                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img src={`/api/files/${pid}`} alt="" className="h-16 w-16 rounded-lg object-cover" />
-                      </a>
-                    ))}
-                  </div>
-                )}
-
-                {isEditing ? (
-                  <div className="space-y-2 border-t border-clay-50 pt-2">
-                    {spec.editableKeys.map((key) => {
-                      const f = spec.displayFields.find((x) => x.key === key);
-                      if (!f) return null;
-                      return (
-                        <label key={key} className="block text-[11px] font-bold text-stone-500">
-                          {f.label}
-                          {f.type === "longtext" ? (
-                            <textarea
-                              value={draft[key] ?? ""}
-                              onChange={(e) => setDraft({ ...draft, [key]: e.target.value })}
-                              rows={4}
-                              className="mt-1 w-full rounded-lg border border-clay-100 p-2 text-sm font-normal"
-                            />
-                          ) : (
-                            <input
-                              type={f.type === "number" ? "number" : "text"}
-                              value={draft[key] ?? ""}
-                              onChange={(e) => setDraft({ ...draft, [key]: e.target.value })}
-                              className="mt-1 w-full rounded-lg border border-clay-100 px-2 py-1.5 text-sm font-normal"
-                            />
-                          )}
-                        </label>
-                      );
-                    })}
-                    <div className="flex gap-1.5">
-                      <SmallBtn label={busy ? "Saving…" : "Save"} tone="green" disabled={busy} onClick={() => save(row)} />
-                      <SmallBtn label="Cancel" onClick={() => setEditing(null)} />
-                    </div>
-                  </div>
-                ) : (
-                  <div className="flex gap-1.5 border-t border-clay-50 pt-2">
-                    {spec.editableKeys.length > 0 && (
-                      <SmallBtn label="✏️ Edit" disabled={busy} onClick={() => startEdit(row)} />
-                    )}
-                    <SmallBtn label="🗑 Delete" tone="red" disabled={busy} onClick={() => remove(row)} />
-                  </div>
-                )}
-              </div>
+                {shown.map((f) => (
+                  <p key={f.key} className="truncate text-xs">
+                    <span className="font-bold text-stone-500">{f.label}: </span>
+                    <span className="text-stone-700">{String(row[f.column])}</span>
+                  </p>
+                ))}
+                <p className="text-[10px] text-stone-400">
+                  {fmtTime(String(row.created_at))}
+                  {photoIds(row).length > 0 ? ` · 📷 ${photoIds(row).length}` : ""}
+                </p>
+              </button>
             );
           })}
         </div>
+      )}
+
+      {open && (
+        <SubmissionDetail
+          key={`${collectionOf(open)}-${String(open.id)}-${openVersion}`}
+          collection={collectionOf(open)}
+          row={open}
+          spec={specOf(open)}
+          photoIds={photoIds(open)}
+          editing={editing === String(open.id)}
+          draft={draft}
+          busy={busy}
+          error={error}
+          onDraft={setDraft}
+          onEdit={() => startEdit(open)}
+          onCancelEdit={() => setEditing(null)}
+          onSave={() => save(open)}
+          onDelete={() => remove(open)}
+          onClose={() => {
+            setEditing(null);
+            setOpen(null);
+          }}
+        />
       )}
 
       {/* ───────────────────────────── Recycle bin ──────────────────────────── */}

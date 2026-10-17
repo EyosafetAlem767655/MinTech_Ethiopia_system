@@ -4,7 +4,7 @@ import { ADDED_GROUP, GROUP_BY_KEY, STORE_GROUPS, allStoreItems, type StoreItem 
 import { itemLabel } from "@/lib/store-voucher";
 import { templateName } from "@/lib/store-count-paste";
 import { storeUnit } from "@/lib/store-custom";
-import type { GrvLine, TypedGrvLine } from "@/lib/grv-lines";
+import { applyDrums, type GrvLine, type TypedGrvLine } from "@/lib/grv-lines";
 import type { Retryable } from "@/lib/llm-retry";
 
 /**
@@ -117,6 +117,7 @@ export async function matchGrvLines(
       desc: l.desc,
       qty: l.qty,
       cost: l.cost,
+      ...(l.inDrums ? { inDrums: true } : {}),
       match: hit?.key ?? null,
       group: hit?.group ?? ADDED_GROUP,
       unit: hit?.unit ?? "pcs",
@@ -125,7 +126,7 @@ export async function matchGrvLines(
   });
 
   const open = out.map((l, i) => ({ l, i })).filter(({ l }) => l.how === "pending");
-  if (open.length === 0) return { ok: true, data: out };
+  if (open.length === 0) return { ok: true, data: out.map(applyDrums) };
 
   const catalogue = items.map((it) => `${it.key} | ${GROUP_BY_KEY.get(it.group)?.label ?? it.group} | ${it.name} | ${it.unit}`).join("\n");
   const groups = STORE_GROUPS.map((g) => `${g.key} = ${g.label}`).join("\n");
@@ -194,5 +195,6 @@ export async function matchGrvLines(
         : { match: null, group: ADDED_GROUP, unit: "pcs", how: "fuzzy" }
     );
   }
-  return { ok: true, data: out };
+  // A quantity typed in drums becomes litres for an item kept in litres.
+  return { ok: true, data: out.map(applyDrums) };
 }

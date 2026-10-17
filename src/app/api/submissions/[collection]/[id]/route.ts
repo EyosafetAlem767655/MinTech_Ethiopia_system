@@ -3,6 +3,7 @@ import sql, { first, isUuid } from "@/lib/sql";
 import { logActivity } from "@/lib/bot-auth";
 import { binSubmission } from "@/lib/recycle-bin";
 import {
+  childTablesOf,
   isSubmissionCollection,
   SUBMISSIONS,
   type SubmissionCollection,
@@ -32,6 +33,45 @@ async function loadRow(spec: SubmissionSpec, id: string) {
   return first(await sql<Record<string, unknown>[]>`
     select ${sql(Array.from(new Set(cols)))} from ${sql(spec.table)} where id = ${id}
   `);
+}
+
+/**
+ * Columns never sent to the browser, whatever table they are on: session and
+ * credential material has no business in a detail view.
+ */
+const HIDDEN_COLUMNS = new Set(["password_hash", "session_token", "token", "secret"]);
+
+const visible = (row: Record<string, unknown>) =>
+  Object.fromEntries(Object.entries(row).filter(([k]) => !HIDDEN_COLUMNS.has(k)));
+
+/**
+ * GET — EVERYTHING about one submission: every column of its row, and the rows
+ * of its child tables (voucher lines, payments, bag lines, photos), for the
+ * detail pop-up on Settings → Submissions. The list only carries the summary
+ * columns; this is where the rest lives.
+ */
+export async function GET(_req: NextRequest, { params }: { params: { collection: string; id: string } }) {
+  const spec = resolve(params.collection, params.id);
+  if (!spec) return NextResponse.json({ error: "Not found" }, { status: 404 });
+
+  const row = first(await sql<Record<string, unknown>[]>`select * from ${sql(spec.table)} where id = ${params.id}`);
+  if (!row) return NextResponse.json({ error: "Not found" }, { status: 404 });
+
+  const children: { table: string; rows: Record<string, unknown>[] }[] = [];
+  for (const child of childTablesOf(spec)) {
+    try {
+      const rows = await sql<Record<string, unknown>[]>`
+        select * from ${sql(child.table)} where ${sql(child.foreignKey)} = ${params.id}
+      `;
+      // Line order where the table has one, else as stored.
+      rows.sort((a, b) => Number(a.position ?? 0) - Number(b.position ?? 0));
+      children.push({ table: child.table, rows: rows.map(visible) });
+    } catch (e) {
+      // A child table from a later migration: the row still shows.
+      if ((e as { code?: string })?.code !== "42P01") throw e;
+    }
+  }
+  return NextResponse.json({ row: visible(row), children });
 }
 
 export async function PATCH(req: NextRequest, { params }: { params: { collection: string; id: string } }) {

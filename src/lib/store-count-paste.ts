@@ -1,6 +1,7 @@
 import {
   GROUP_BY_KEY,
   STORE_ITEM_BY_KEY,
+  fromDrums,
   groupsOfBlock,
   itemsOfGroup,
   type StoreBlockKey,
@@ -150,12 +151,24 @@ function splitPair(line: string): [string, string] | null {
   return [m[1].trim(), m[2].trim()];
 }
 
+/**
+ * A counted figure for one item. "14 drum" against an item kept in litres but
+ * counted by the drum (gas oil: 1 drum = 200 l) is converted to litres; any
+ * other unit typed beside the figure is just tolerated.
+ */
+function countQty(raw: string, itemKey: string): number | null {
+  const n = parseNumber(raw);
+  const item = STORE_ITEM_BY_KEY.get(itemKey);
+  if (n === null || !item?.perDrum || !/\bdrums?\b|ድራም|በርሜል/i.test(raw)) return n;
+  return fromDrums(item, n);
+}
+
 function parseNumber(raw: string): number | null {
   // A unit typed alongside the figure is tolerated ("200 l", "4 pcs"): the
   // template does not put one there any more, but people write them.
   const cleaned = raw
     .replace(/\((?:pcs|l|m|roll|pak|kg|set|bottle|drum|tin|berga)\)/gi, "")
-    .replace(/\b(pcs|ltr|lt|l|m|roll|pak|kg|set|bottle|drum|tin|berga)\b/gi, "")
+    .replace(/\b(pcs|ltr|lt|l|m|roll|pak|kg|set|bottle|drums?|tin|berga)\b|ድራም|በርሜል/gi, "")
     .replace(/,/g, "")
     .trim();
   if (!cleaned) return null;
@@ -214,7 +227,7 @@ export function parseStoreGroupPaste(group: string, text: string): ParsedStoreCo
       continue;
     }
     if (!value.trim()) continue;
-    const qty = parseNumber(value);
+    const qty = countQty(value, key);
     if (qty === null) invalid.push(line);
     else values[itemKey(key)] = qty;
   }
@@ -262,7 +275,7 @@ export function parseStoreCountPaste(block: StoreBlockKey, text: string): Parsed
     // Not counted. Recorded nowhere, reported as nothing.
     if (!value.trim()) continue;
 
-    const qty = parseNumber(value);
+    const qty = countQty(value, key);
     if (qty === null) invalid.push(line);
     else values[itemKey(key)] = qty;
   }

@@ -50,6 +50,7 @@ import { parseProductionPaste } from "@/lib/production-paste";
 import { parseFinancePaste } from "@/lib/finance-paste";
 import { logError, resolveErrors } from "@/lib/errors";
 import { readWithBusyRetry } from "@/lib/llm-retry";
+import { saveFailureMessage } from "@/lib/save-failure";
 import {
   GRV_ADDED_KEY,
   GRV_LINES_EXAMPLE,
@@ -66,6 +67,7 @@ import {
   parseGrvLines,
   parseGrvOverrides,
   setGrvLines,
+  applyDrums,
 } from "@/lib/grv-lines";
 import { matchGrvLines } from "@/lib/store-match";
 import { loadCustomStoreItems } from "@/lib/store-custom";
@@ -1302,6 +1304,11 @@ async function sendBagBalanceNote(chatId: string): Promise<void> {
   }
 }
 
+/* ──────────────────────── When a save fails ─────────────────────────────── */
+
+/** How long a "saving…" mark holds before it is assumed dead. */
+const SAVING_TTL_MS = 2 * 60_000;
+
 /* ───────────── Background reads: busy retries, then hand back ───────────── */
 
 /**
@@ -2288,10 +2295,26 @@ export async function POST(req: NextRequest) {
         }
 
         if (normText === NORM_RECEIPT.approve) {
+          // A save already running for this flow: a double tap must not file
+          // the report twice. Expires, so a save killed mid-way cannot lock
+          // the flow for good.
+          if (state.savingSince && Date.now() - Date.parse(state.savingSince) < SAVING_TTL_MS) {
+            await sendMessage(chatId, "⏳ እየተመዘገበ ነው — እባክዎ ይጠብቁ።\n<i>Saving, please wait.</i>");
+            return NextResponse.json({ ok: true });
+          }
+          state.savingSince = new Date().toISOString();
+          session.assetFlow = { ...state };
+          await persist(session);
+
           let saved;
           try {
             saved = await saveAssetReport(state, submitterName);
           } catch (e) {
+            // Nothing was saved (the vouchers save in one transaction), so the
+            // person can correct the card and press ✅ again.
+            delete state.savingSince;
+            session.assetFlow = { ...state };
+            await persist(session).catch(() => {});
             // Recorded, not just console.error'd. A submission that will not
             // save is the worst failure this system has — the reporter is stood
             // in front of it with the data in their hand — and until now it left
@@ -2306,7 +2329,10 @@ export async function POST(req: NextRequest) {
               actor: submitterName,
               chatId: String(chatId),
             });
-            await sendMessage(chatId, MSG.genericError, { reply_markup: CHANGE_CANCEL_KEYBOARD });
+            // Say WHY, when it is something the person can fix — and always
+            // what to do next. A bare "something went wrong" left people
+            // pressing ✅ on a report that could never save.
+            await sendMessage(chatId, saveFailureMessage(e, MSG.genericError), { reply_markup: assetReviewKeyboard });
             return NextResponse.json({ ok: true });
           }
           const title = FLOW_TITLE[state.kind];
@@ -2569,6 +2595,7 @@ export async function POST(req: NextRequest) {
             const l = lines[c.n - 1];
             const item = c.match ? STORE_ITEM_BY_KEY.get(c.match) : undefined;
             Object.assign(l, item ? { match: item.key, group: item.group, unit: item.unit } : { match: null }, { how: "manual" });
+            Object.assign(l, applyDrums(l));
           }
           setGrvLines(state.draft, lines);
           session.assetFlow = { ...state };

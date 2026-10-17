@@ -175,6 +175,12 @@ export interface AssetFlowState {
    * cancelled meanwhile).
    */
   readingSince?: string;
+  /**
+   * When ✅ started saving this flow. A second tap while it is set (a double
+   * tap, or a tap while a slow save is still running) is answered "saving…"
+   * instead of saving the report twice. Cleared when a save fails.
+   */
+  savingSince?: string;
 }
 
 /**
@@ -2666,56 +2672,78 @@ export async function saveAssetReport(
   if (state.kind === "grv" || state.kind === "store_issue") {
     const isGrv = state.kind === "grv";
     const date = reportDate(d.date);
-    // The typed voucher's new lines become store items FIRST, so every saved
-    // line points at a key and moves a balance from this voucher on. Written
-    // back into the draft, so a retried save does not add them twice. On an
-    // SIV such an item starts below zero — issued before it was ever counted or
-    // received — which the inventory shows rather than hides.
-    if (hasGrvLines(d)) {
-      const lines = grvLines(d);
-      const fresh = lines.filter((l) => !l.match);
-      if (fresh.length > 0) {
-        const keys = await createCustomItems(
-          fresh.map((l) => ({ name: l.name, description: l.desc, unit: l.unit, group: l.group })),
-          String((isGrv ? d.grvNo : d.sivNo) || "").trim() || null,
-          reportedBy
-        );
-        fresh.forEach((l, i) => {
-          l.match = keys[i];
-        });
-        setGrvLines(d, lines);
-      }
-    }
-    let items = voucherItems(d);
-    // An issue is valued at what each item cost ON the voucher's date, read
-    // fresh here rather than trusted from the draft: the date can be corrected
-    // on the review card after the costs were looked up.
-    if (!isGrv) {
-      const storeKeys = items.filter((it) => it.ledgerKind === "store").map((it) => it.ledgerKey!);
-      const costs = await costsAt(date, storeKeys).catch(() => new Map<string, ItemCost>());
-      items = items.map((it) => {
-        if (it.ledgerKind !== "store") return it;
-        const unitCost = costs.get(it.ledgerKey!)?.unitCost || it.unitCost || null;
-        return { ...it, unitCost, totalAmount: unitCost ? Math.round(unitCost * it.quantity * 100) / 100 : null };
-      });
-    }
-    const total = Math.round(items.reduce((a, it) => a + (it.totalAmount ?? 0), 0) * 100) / 100;
+    // Blank is NULL, never "": a number is only a reference (0041 — numbers
+    // may repeat), and "" would read as a number that was given.
+    const voucherNo = String((isGrv ? d.grvNo : d.sivNo) || "").trim() || null;
     // Both vouchers are typed now, so neither carries a photo or an extraction.
     // The columns stay and are still written: every voucher filed before the
     // change has them, the dashboard reads them, and a NULL here is the honest
     // record that this one was typed.
     const extraction = state.extraction ? sql.json({ ...state.extraction }) : null;
     const photos = state.photoFileIds || [];
-    // A blank voucher number must be stored as NULL, not "". The unique index is
-    // partial on `not null`, so an empty string would make the SECOND unnumbered
-    // voucher collide with the first and be refused as a duplicate.
-    const voucherNo = String((isGrv ? d.grvNo : d.sivNo) || "").trim() || null;
 
-    // Both go through insertRow so that `tg_file_ids` (migration 0023) missing
-    // costs the photo references rather than the whole voucher — a GRV is
-    // twenty typed fields and up to eight line items, and losing that to a
-    // column is not a trade worth making.
-    const header = isGrv
+    /*
+     * ONE TRANSACTION: the new store items, the voucher and its lines are saved
+     * together, or none of them is. It used to be three separate writes, and a
+     * failure after the first left a voucher header behind — so every ✅ that
+     * followed collided with its own leftover row, and the submission sat stuck
+     * on the review card, never reaching the dashboard.
+     *
+     * The work is done on a COPY of the draft: if the transaction rolls back,
+     * the keys of the items it was about to create must not survive in the
+     * draft and be mistaken for real ones on the retry.
+     */
+    const work: Record<string, string | number> = { ...d };
+    // An issue is valued at what each item cost ON the voucher's date, read
+    // fresh here rather than trusted from the draft: the date can be corrected
+    // on the review card after the costs were looked up. Read BEFORE the
+    // transaction: a query on the shared pool from inside one waits for a
+    // connection the transaction itself may be holding. Items created by this
+    // voucher have no cost yet, so nothing is missed.
+    const costs = isGrv
+      ? new Map<string, ItemCost>()
+      : await costsAt(
+          date,
+          voucherItems(work)
+            .filter((it) => it.ledgerKind === "store" && it.ledgerKey)
+            .map((it) => it.ledgerKey!)
+        ).catch(() => new Map<string, ItemCost>());
+    let registerNew = () => {};
+    const header = await sql.begin(async (tx) => {
+      // The typed voucher's new lines become store items FIRST, so every saved
+      // line points at a key and moves a balance from this voucher on. On an
+      // SIV such an item starts below zero — issued before it was ever counted
+      // or received — which the inventory shows rather than hides.
+      if (hasGrvLines(work)) {
+        const lines = grvLines(work);
+        const fresh = lines.filter((l) => !l.match);
+        if (fresh.length > 0) {
+          const created = await createCustomItems(
+            fresh.map((l) => ({ name: l.name, description: l.desc, unit: l.unit, group: l.group })),
+            voucherNo,
+            reportedBy,
+            tx
+          );
+          fresh.forEach((l, i) => {
+            l.match = created.keys[i];
+          });
+          setGrvLines(work, lines);
+          registerNew = created.register;
+        }
+      }
+      let items = voucherItems(work);
+      if (!isGrv) {
+        items = items.map((it) => {
+          if (it.ledgerKind !== "store") return it;
+          const unitCost = costs.get(it.ledgerKey!)?.unitCost || it.unitCost || null;
+          return { ...it, unitCost, totalAmount: unitCost ? Math.round(unitCost * it.quantity * 100) / 100 : null };
+        });
+      }
+      const total = Math.round(items.reduce((a, it) => a + (it.totalAmount ?? 0), 0) * 100) / 100;
+
+      // Both go through insertRow so that `tg_file_ids` (migration 0023)
+      // missing costs the photo references rather than the whole voucher.
+      const head = isGrv
       ? await insertRow(
           "goods_receiving_vouchers",
           {
@@ -2728,7 +2756,7 @@ export async function saveAssetReport(
             currency: d.currency === "USD" ? "USD" : "ETB",
             // The sum of the lines. A draft from before the total stopped being
             // asked still carries the typed figure, and keeps it.
-            total_amount: total || Number(d.totalAmount) || null,
+            total_amount: total || Number(work.totalAmount) || null,
             remarks: String(d.remarks || "") || null,
             prepared_by: String(d.preparedBy || "") || null,
             received_by: String(d.receivedBy || "") || null,
@@ -2738,7 +2766,7 @@ export async function saveAssetReport(
             extraction,
             source: "telegram",
           },
-          { optional: ["tg_file_ids"], source: "asset-flows" }
+          { optional: ["tg_file_ids"], source: "asset-flows", client: tx }
         )
       : await insertRow(
           "store_issue_vouchers",
@@ -2758,12 +2786,12 @@ export async function saveAssetReport(
             extraction,
             source: "telegram",
           },
-          { optional: ["tg_file_ids"], source: "asset-flows" }
+          { optional: ["tg_file_ids"], source: "asset-flows", client: tx }
         );
 
     if (items.length > 0) {
       const rows = items.map((it, i) => ({
-        [isGrv ? "grv_id" : "siv_id"]: header.id,
+        [isGrv ? "grv_id" : "siv_id"]: head.id,
         position: i,
         stock_code: it.stockCode,
         description: it.description,
@@ -2775,8 +2803,14 @@ export async function saveAssetReport(
         ledger_key: it.ledgerKey,
         ledger_qty: it.ledgerKey ? it.ledgerQty : null,
       }));
-      await sql`insert into ${sql(isGrv ? "goods_receiving_items" : "store_issue_items")} ${sql(rows)}`;
+      await tx`insert into ${tx(isGrv ? "goods_receiving_items" : "store_issue_items")} ${tx(rows)}`;
     }
+      return head;
+    });
+    // Committed: the new items exist, so this instance may now show them, and
+    // the draft may learn their keys.
+    registerNew();
+    setGrvLines(d, grvLines(work));
 
     // What the GRV paid becomes each item's cost from the voucher's date. Only
     // a price somebody TYPED: a pre-filled one is already on record, and

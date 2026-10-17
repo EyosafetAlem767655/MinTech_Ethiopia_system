@@ -73,11 +73,21 @@ export interface NewStoreItem {
 }
 
 /**
- * Add items to the store list. Returns their new keys, in order, and registers
- * them on this instance at once so the voucher being saved can point at them.
+ * Add items to the store list. Returns their new keys, in order, and a
+ * `register` to call once they are committed — so an instance never shows an
+ * item whose voucher rolled back.
+ *
+ * `client` is the transaction the voucher is saved in: the items, the voucher
+ * and its lines are created together or not at all.
  */
-export async function createCustomItems(items: NewStoreItem[], ref: string | null, by: string): Promise<string[]> {
-  if (items.length === 0) return [];
+export async function createCustomItems(
+  items: NewStoreItem[],
+  ref: string | null,
+  by: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  client: any = sql
+): Promise<{ keys: string[]; register: () => void }> {
+  if (items.length === 0) return { keys: [], register: () => {} };
   const rows = items.map((it) => ({
     key: newKey(it.name),
     group_key: GROUP_BY_KEY.has(it.group) ? it.group : ADDED_GROUP,
@@ -87,16 +97,17 @@ export async function createCustomItems(items: NewStoreItem[], ref: string | nul
     created_from: ref,
     created_by: by,
   }));
-  await sql`insert into store_custom_items ${sql(rows)}`;
-  registerCustomItems(
-    rows.map((r) => ({
-      key: r.key,
-      group: r.group_key,
-      name: r.description ? `${r.name} — ${r.description}` : r.name,
-      unit: r.unit,
-      custom: true,
-      description: r.description ?? undefined,
-    }))
-  );
-  return rows.map((r) => r.key);
+  await client`insert into store_custom_items ${client(rows)}`;
+  const register = () =>
+    registerCustomItems(
+      rows.map((r) => ({
+        key: r.key,
+        group: r.group_key,
+        name: r.description ? `${r.name} — ${r.description}` : r.name,
+        unit: r.unit,
+        custom: true,
+        description: r.description ?? undefined,
+      }))
+    );
+  return { keys: rows.map((r) => r.key), register };
 }

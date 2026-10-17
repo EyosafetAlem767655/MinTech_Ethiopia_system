@@ -1,4 +1,4 @@
-import { GROUP_BY_KEY, STORE_ITEM_BY_KEY, type StoreUnit } from "@/lib/store-items";
+import { GROUP_BY_KEY, STORE_ITEM_BY_KEY, drumNote, fromDrums, type StoreUnit } from "@/lib/store-items";
 import { itemLabel } from "@/lib/store-voucher";
 
 /**
@@ -60,6 +60,12 @@ export interface GrvLine {
   unit: StoreUnit;
   /** How the match was decided — "pending" until the matcher has run. */
   how: GrvHow;
+  /**
+   * The quantity was written in DRUMS ("2 drum"). Converted to the item's own
+   * unit once the item is known to be kept in litres (gas oil: 200 l a drum),
+   * then cleared so it is never converted twice.
+   */
+  inDrums?: boolean;
 }
 
 export const grvLineKey = (n: number) => `gl:${n}`;
@@ -101,7 +107,19 @@ function toNumber(raw: string): number | null {
 }
 
 /** What one typed line says before matching. */
-export type TypedGrvLine = Pick<GrvLine, "name" | "desc" | "qty" | "cost">;
+export type TypedGrvLine = Pick<GrvLine, "name" | "desc" | "qty" | "cost" | "inDrums">;
+
+/**
+ * Turn a quantity written in drums into the matched item's unit, when that
+ * item is kept in litres but counted by the drum. Any other item keeps the
+ * figure as typed.
+ */
+export function applyDrums(line: GrvLine): GrvLine {
+  if (!line.inDrums) return line;
+  const item = line.match ? STORE_ITEM_BY_KEY.get(line.match) : undefined;
+  if (!item?.perDrum) return line;
+  return { ...line, qty: fromDrums(item, line.qty), inDrums: false };
+}
 
 /**
  * Read typed lines.
@@ -154,7 +172,17 @@ export function parseGrvLines(
       bad.push(raw.trim());
       continue;
     }
-    lines.push({ name, desc: text.slice(1).join(" ").trim(), qty, cost: cost && cost > 0 ? cost : null });
+    // Drums are remembered, not converted here: only the matched item knows
+    // how many litres a drum of it holds.
+    const qtyField = withCost && prev !== null && last !== null ? parts[parts.length - 2] : parts[parts.length - 1];
+    const inDrums = /\bdrums?\b|ድራም|በርሜል/i.test(qtyField);
+    lines.push({
+      name,
+      desc: text.slice(1).join(" ").trim(),
+      qty,
+      cost: cost && cost > 0 ? cost : null,
+      ...(inDrums ? { inDrums: true } : {}),
+    });
   }
   return { lines, bad };
 }
@@ -196,7 +224,11 @@ const money = (n: number) => (Math.round(n * 100) / 100).toLocaleString();
 /** One line on the card: what was typed, and what it was matched to. */
 export function grvLineSummary(l: GrvLine, n: number, withCost = true): string {
   const price = !withCost ? "" : l.cost ? ` × ${money(l.cost)}` : " × <b>?</b>";
-  const typed = `${esc(l.name)}${l.desc ? ` <i>${withCost ? "ref " : ""}${esc(l.desc)}</i>` : ""} · ${money(l.qty)}${price}`;
+  // "400 l (2 drum)" for gas oil, so the litres are recognisable as what was typed.
+  const matched = l.match ? STORE_ITEM_BY_KEY.get(l.match) : undefined;
+  const drums = matched ? drumNote(matched, l.qty) : "";
+  const amount = drums ? `${money(l.qty)} ${matched!.unit} ${drums}` : money(l.qty);
+  const typed = `${esc(l.name)}${l.desc ? ` <i>${withCost ? "ref " : ""}${esc(l.desc)}</i>` : ""} · ${amount}${price}`;
   const item = l.match ? STORE_ITEM_BY_KEY.get(l.match) : undefined;
   const target = item
     ? `→ ${esc(itemLabel(item))} <code>${esc(item.key)}</code>`

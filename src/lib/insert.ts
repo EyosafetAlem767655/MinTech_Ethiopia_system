@@ -76,6 +76,13 @@ export interface InsertOptions {
   optional?: string[];
   /** For the error log, so a drift shows up attributed to a flow. */
   source?: string;
+  /**
+   * Run inside this transaction (from `sql.begin`) instead of on its own. Each
+   * attempt then runs in a savepoint: a missing optional column must cost that
+   * one statement, not abort the whole transaction around it.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  client?: any;
 }
 
 /**
@@ -99,7 +106,12 @@ export async function insertRow(
   for (let attempt = 0; attempt <= optional.size; attempt++) {
     const { text, values } = buildInsert(table, payload);
     try {
-      const [out] = await sql.unsafe<{ id: string }[]>(text, values as never[]);
+      const [out] = (
+        opts.client
+          ? // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            await opts.client.savepoint((sp: any) => sp.unsafe(text, values as never[]))
+          : await sql.unsafe<{ id: string }[]>(text, values as never[])
+      ) as { id: string }[];
       if (dropped.length) {
         // Loud, because the row just written is INCOMPLETE and the deployment is
         // running ahead of its schema. Silence here would let the drift persist
