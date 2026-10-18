@@ -45,6 +45,8 @@ interface Check {
   countedOn: string | null;
   rows: CheckRow[];
   discrepancies: CheckRow[];
+  openingSource?: "submitted" | "carried" | "none";
+  openingFrom?: string | null;
 }
 
 const fmtDate = (d: string) => new Date(d).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
@@ -207,6 +209,16 @@ function StockCheck({ check }: { check: Check }) {
           {counted ? `Counted ${fmtDate(check.countedOn!)}` : "No stock counted this month"}
         </p>
       </div>
+      {check.openingSource && (
+        <p className="text-[11px] text-stone-500">
+          Opening:{" "}
+          {check.openingSource === "submitted"
+            ? `beginning balance submitted for ${check.month}`
+            : check.openingSource === "carried"
+              ? `carried from last month's closing${check.openingFrom ? ` (from the ${check.openingFrom} beginning balance + daily reports since)` : " (daily reports)"}`
+              : "no beginning balance submitted yet"}
+        </p>
+      )}
 
       <div className="-mx-1 overflow-x-auto">
         <table className="w-full min-w-[460px] text-right text-xs">

@@ -1,4 +1,5 @@
 import sql from "@/lib/sql";
+import { rawMaterialOpening } from "@/lib/raw-material-opening";
 import {
   BAG_KINDS,
   BAG_KIND_KEYS,
@@ -162,6 +163,8 @@ export interface FinanceReport {
    * has to be able to see which one each was built from.
    */
   rawMaterialSource: "daily" | "vouchers";
+  /** Raw material opening: filed for this month, or carried from last month's closing. */
+  rawOpeningSource: "submitted" | "carried" | "none";
   totals: {
     baseBalance: number;
     received: number;
@@ -206,6 +209,7 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
     issuedFromSiv,
     dailyRaw,
     bagsUsed,
+    rawOpening,
   ] =
     await Promise.all([
     sql<{ products: Record<string, number>; raw_materials: Record<string, number>; bags: Record<string, number> }[]>`
@@ -282,6 +286,9 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
        where u.date >= ${start} and u.date < ${end}
        group by i.ledger_key
     `.catch(() => []),
+    // Raw material opening: the balance filed for the month, or last month's
+    // closing carried in (raw-material-opening.ts).
+    rawMaterialOpening(month).catch(() => null),
   ]);
 
   const baseRow = base[0];
@@ -409,7 +416,7 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
 
   /* ── Raw materials, then the two bag sizes ── */
   const rawMaterials: RawMaterialFinanceRow[] = FINANCE_RAW_MATERIALS.map((code) => {
-    const baseBalance = round3(n(baseRow?.raw_materials?.[code]));
+    const baseBalance = round3(n((rawOpening?.values ?? baseRow?.raw_materials)?.[code]));
     const rec = round3(n(receivedMap[code]));
     const total = round3(baseBalance + rec);
     const issue = round3(n(issuedMaterials[code]));
@@ -484,6 +491,7 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
     production,
     rawMaterials,
     rawMaterialSource: usesDailyRaw ? "daily" : "vouchers",
+    rawOpeningSource: rawOpening?.source ?? (baseRow ? "submitted" : "none"),
     totals: {
       baseBalance: round3(production.reduce((a, r) => a + r.baseBalance, 0)),
       received: round3(totalProduced),

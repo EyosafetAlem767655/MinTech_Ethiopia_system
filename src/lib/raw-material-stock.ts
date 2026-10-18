@@ -1,6 +1,7 @@
 import sql from "@/lib/sql";
 import { FINANCE_RAW_MATERIALS } from "@/lib/products";
 import { monthBounds, monthLabel } from "@/lib/finance-report";
+import { rawMaterialOpening, type RawMaterialOpening } from "@/lib/raw-material-opening";
 
 /**
  * Does the raw material counted on the ground agree with the paperwork?
@@ -32,6 +33,9 @@ export interface RawMaterialCheck {
   countedOn: string | null;
   rows: MaterialCheckRow[];
   discrepancies: MaterialCheckRow[];
+  /** Where the opening came from: filed for this month, or last month's closing. */
+  openingSource: RawMaterialOpening["source"];
+  openingFrom: string | null;
 }
 
 const n = (v: unknown) => Number(v) || 0;
@@ -44,9 +48,8 @@ export async function rawMaterialCheck(month = monthLabel()): Promise<RawMateria
   const { start, end } = monthBounds(month);
 
   const [base, daily] = await Promise.all([
-    sql<{ raw_materials: Record<string, number> }[]>`
-      select raw_materials from monthly_base_balances where month = ${month}
-    `.catch(() => []),
+    // A month with no balance filed opens with last month's closing.
+    rawMaterialOpening(month).catch((): RawMaterialOpening => ({ values: {}, source: "none", fromMonth: null })),
     sql<{ date: string; received: Record<string, number>; issued: Record<string, number>; stock: Record<string, number> }[]>`
       select date, received, issued, stock
         from raw_material_daily
@@ -55,7 +58,7 @@ export async function rawMaterialCheck(month = monthLabel()): Promise<RawMateria
     `.catch(() => []),
   ]);
 
-  const opening = base[0]?.raw_materials ?? {};
+  const opening = base.values;
 
   // The LAST report of the month that actually carried a stock figure. A day
   // filed with the stock block left blank is not a count of zero, and taking
@@ -84,5 +87,7 @@ export async function rawMaterialCheck(month = monthLabel()): Promise<RawMateria
     countedOn: counted ? new Date(counted.date).toISOString() : null,
     rows,
     discrepancies: rows.filter((r) => r.gap !== null && Math.abs(r.gap) > TOLERANCE_T),
+    openingSource: base.source,
+    openingFrom: base.fromMonth,
   };
 }

@@ -151,16 +151,6 @@ export default function OwnerDashboard() {
           </section>
         )}
 
-        {/* AI morning brief */}
-        {brief?.brief?.narrative && (
-          <section className="card p-4 animate-fade-up border-l-4 border-l-clay-600">
-            <p className="text-[11px] font-bold tracking-widest uppercase text-clay-500 mb-1.5">
-              ✦ AI morning brief · {brief.brief.date}
-            </p>
-            <p className="text-sm leading-relaxed text-stone-700 italic">{brief.brief.narrative}</p>
-          </section>
-        )}
-
         {/* ───────── Per-department summaries ───────── */}
         <section className="animate-fade-up">
           <div className="mb-3 flex items-center justify-between gap-2 px-1">
