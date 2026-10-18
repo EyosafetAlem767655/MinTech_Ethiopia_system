@@ -164,7 +164,7 @@ export interface FinanceReport {
    */
   rawMaterialSource: "daily" | "vouchers";
   /** Raw material opening: filed for this month, or carried from last month's closing. */
-  rawOpeningSource: "submitted" | "carried" | "none";
+  rawOpeningSource: "counted" | "submitted" | "carried" | "none";
   totals: {
     baseBalance: number;
     received: number;

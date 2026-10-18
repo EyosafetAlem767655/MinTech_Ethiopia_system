@@ -88,6 +88,6 @@ export async function rawMaterialCheck(month = monthLabel()): Promise<RawMateria
     rows,
     discrepancies: rows.filter((r) => r.gap !== null && Math.abs(r.gap) > TOLERANCE_T),
     openingSource: base.source,
-    openingFrom: base.fromMonth,
+    openingFrom: base.countedOn ?? base.fromMonth,
   };
 }

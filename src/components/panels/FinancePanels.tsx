@@ -308,7 +308,7 @@ interface Report {
   production: ProductionRow[];
   rawMaterials: RawRow[];
   rawMaterialSource?: "daily" | "vouchers";
-  rawOpeningSource?: "submitted" | "carried" | "none";
+  rawOpeningSource?: "counted" | "submitted" | "carried" | "none";
   totals: Record<string, number>;
   availableMonths: string[];
   error?: string;
@@ -360,9 +360,11 @@ function MonthlyTab() {
         <p className="card border-l-4 border-l-amber-500 p-3 text-xs font-bold text-amber-800">
           No opening balance filed for {data.month}. Every &ldquo;Total&rdquo; below is the month&rsquo;s movement
           only, with nothing carried in
-          {data.rawOpeningSource === "carried"
-            ? " — except raw materials, which open with last month's closing (opening + received − issued)."
-            : "."}
+          {data.rawOpeningSource === "counted"
+            ? " — except raw materials, which open with last month's final stock count from the daily report."
+            : data.rawOpeningSource === "carried"
+              ? " — except raw materials, which open with last month's closing (opening + received − issued)."
+              : "."}
         </p>
       )}
       {!data.hasPrices && (

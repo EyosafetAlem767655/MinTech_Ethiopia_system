@@ -45,7 +45,7 @@ interface Check {
   countedOn: string | null;
   rows: CheckRow[];
   discrepancies: CheckRow[];
-  openingSource?: "submitted" | "carried" | "none";
+  openingSource?: "counted" | "submitted" | "carried" | "none";
   openingFrom?: string | null;
 }
 
@@ -212,7 +212,9 @@ function StockCheck({ check }: { check: Check }) {
       {check.openingSource && (
         <p className="text-[11px] text-stone-500">
           Opening:{" "}
-          {check.openingSource === "submitted"
+          {check.openingSource === "counted"
+            ? `last stock count in the daily report (${check.openingFrom ? fmtDate(check.openingFrom) : "before the 1st"}), plus anything received or issued after it`
+            : check.openingSource === "submitted"
             ? `beginning balance submitted for ${check.month}`
             : check.openingSource === "carried"
               ? `carried from last month's closing${check.openingFrom ? ` (from the ${check.openingFrom} beginning balance + daily reports since)` : " (daily reports)"}`
