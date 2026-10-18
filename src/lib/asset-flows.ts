@@ -115,6 +115,9 @@ import {
   wantsOtherItems,
 } from "@/lib/store-voucher";
 import type { ToolPhotoCheck } from "@/lib/llm";
+import { savePurchase, suggestStoreItems } from "@/lib/item-purchases";
+import { priceBasisFor, purchaseAmounts } from "@/lib/purchase-price";
+import type { StoreItem } from "@/lib/store-items";
 // Names and the kind union live in a client-safe module — see flow-titles.ts.
 import { FLOW_TITLE, type AssetFlowKind } from "@/lib/flow-titles";
 export { FLOW_TITLE };
@@ -1115,6 +1118,96 @@ const RM_CREDIT_PAYMENT_STEPS: AssetStep[] = [
   { id: "note", label: "Note", prompt: "🗒 ማስታወሻ ካለ ይፃፉ።", type: "text", skippable: true },
 ];
 
+/* ──────────────────────── An item bought (finance) ───────────────────────── */
+
+/**
+ * One item finance bought. The name is matched to the store list as soon as it
+ * is typed: an item that IS on the list is linked without a question; one that
+ * is not gets the nearest names as buttons, and 🆕 for a new item. Then how
+ * many, in pcs or pak (or the item's own unit), and the price — the price of
+ * one when bought by the piece, the total paid otherwise (purchase-price.ts).
+ *
+ * A record only: the GRV moves the store balance when the goods arrive.
+ */
+export const PURCHASE_ITEM_STEP = "item";
+export const PURCHASE_MATCH_STEP = "itemMatch";
+export const PURCHASE_NEW = "new";
+const PURCHASE_CAND_MAX = 5;
+const purchaseCandKey = (n: number) => `cand:${n}`;
+
+/** The store item the purchase is linked to, or null for a new one. */
+export function purchaseItemKey(d: Record<string, string | number>): string | null {
+  const picked = String(d[PURCHASE_MATCH_STEP] || "");
+  const key = String(d.itemKey || "") || (picked && picked !== PURCHASE_NEW ? picked : "");
+  return key && STORE_ITEM_BY_KEY.has(key) ? key : null;
+}
+
+/**
+ * Match the typed name to the store list, into the draft. Returns the item when
+ * it is an exact match (no question needed); otherwise leaves the nearest names
+ * for the match step to offer. Re-run whenever the name is typed again.
+ */
+export function applyPurchaseItemMatch(d: Record<string, string | number>): StoreItem | null {
+  delete d.itemKey;
+  delete d[PURCHASE_MATCH_STEP];
+  for (let n = 1; n <= PURCHASE_CAND_MAX; n++) delete d[purchaseCandKey(n)];
+  const { exact, similar } = suggestStoreItems(String(d[PURCHASE_ITEM_STEP] || ""), PURCHASE_CAND_MAX);
+  if (exact) {
+    d.itemKey = exact.key;
+    return exact;
+  }
+  similar.forEach((it, i) => (d[purchaseCandKey(i + 1)] = it.key));
+  return null;
+}
+
+function purchaseMatchChoices(d: Record<string, string | number>): { label: string; value: string }[] {
+  const out: { label: string; value: string }[] = [];
+  for (let n = 1; n <= PURCHASE_CAND_MAX; n++) {
+    const item = STORE_ITEM_BY_KEY.get(String(d[purchaseCandKey(n)] || ""));
+    if (item) out.push({ label: `${n}. ${itemLabel(item)}`.slice(0, 60), value: item.key });
+  }
+  out.push({ label: "🆕 አዲስ ዕቃ (new)", value: PURCHASE_NEW });
+  return out;
+}
+
+/** pcs and pak, with the linked item's own unit first when it is something else. */
+function purchaseUnitChoices(d: Record<string, string | number>): { label: string; value: string }[] {
+  const key = purchaseItemKey(d);
+  const own = key ? STORE_ITEM_BY_KEY.get(key)?.unit : undefined;
+  const units = own ? [own, ...["pcs", "pak"].filter((u) => u !== own)] : ["pcs", "pak"];
+  return units.map((u) => ({ label: u, value: u }));
+}
+
+const ITEM_PURCHASE_STEPS: AssetStep[] = [
+  { id: "date", prompt: "📅 ዕቃው የተገዛበትን ቀን ይምረጡ።", type: "date" },
+  { id: PURCHASE_ITEM_STEP, label: "Item", prompt: "🛍 የተገዛውን ዕቃ ስም ይፃፉ።", type: "text" },
+  {
+    id: PURCHASE_MATCH_STEP,
+    label: "Store item",
+    prompt: "🔎 ይህ ዕቃ በመጋዘን ዝርዝር ውስጥ በትክክል አልተገኘም። ከእነዚህ አንዱ ነው ወይስ አዲስ ዕቃ?",
+    type: "choice",
+    choicesFrom: purchaseMatchChoices,
+    when: (d) => !d.itemKey,
+  },
+  { id: "qty", label: "Quantity", prompt: "🔢 ስንት ተገዛ? (ብዛቱን ብቻ ይፃፉ)", type: "number" },
+  { id: "unit", label: "Unit", prompt: "📦 በምን ተገዛ — pcs ወይስ pak?", type: "choice", choicesFrom: purchaseUnitChoices },
+  {
+    id: "unitPrice",
+    label: "Unit price",
+    prompt: "💲 የአንዱ ዋጋ ስንት ብር ነው?",
+    type: "number",
+    when: (d) => priceBasisFor(d.unit) === "unit",
+  },
+  {
+    id: "total",
+    label: "Total",
+    prompt: "💰 በአጠቃላይ ስንት ብር ተከፈለ?",
+    type: "number",
+    when: (d) => priceBasisFor(d.unit) === "total",
+  },
+  { id: "note", label: "Note", prompt: "🗒 ማስታወሻ ካለ ይፃፉ (አቅራቢ፣ ደረሰኝ ቁጥር…)።", type: "text", skippable: true },
+];
+
 /* ───────────────────── Downtime, monthly (production) ────────────────────── */
 
 /**
@@ -1411,6 +1504,7 @@ const STEPS: Record<AssetFlowKind, AssetStep[]> = {
   pp_bag_price: PP_BAG_PRICE_STEPS,
   rm_credit_purchase: RM_CREDIT_PURCHASE_STEPS,
   rm_credit_payment: RM_CREDIT_PAYMENT_STEPS,
+  item_purchase: ITEM_PURCHASE_STEPS,
   wht_holder: WHT_HOLDER_STEPS,
   sales_invoice: SALES_INVOICE_STEPS,
 };
@@ -2085,6 +2179,24 @@ export function assetPreview(state: AssetFlowState): string {
     );
   }
 
+  if (state.kind === "item_purchase") {
+    const key = purchaseItemKey(d);
+    const item = key ? STORE_ITEM_BY_KEY.get(key) : undefined;
+    const q = Number(d.qty) || 0;
+    const basis = priceBasisFor(d.unit);
+    const { unitPrice, total } = purchaseAmounts(q, basis, Number(basis === "unit" ? d.unitPrice : d.total) || 0);
+    return (
+      head +
+      `📅 Date: ${esc(d.date)}\n` +
+      `🛍 ዕቃ: <b>${esc(d[PURCHASE_ITEM_STEP])}</b>\n` +
+      `🔗 መጋዘን: ${item ? esc(itemLabel(item)) : "🆕 አዲስ ዕቃ (new)"}\n` +
+      `🔢 ብዛት: <b>${qty(q)} ${esc(d.unit)}</b>\n` +
+      `💲 የአንዱ ዋጋ: ${money(unitPrice)} ብር${basis === "total" ? " <i>(ከድምሩ የተሰላ)</i>" : ""}\n` +
+      `💰 ድምር: <b>${money(total)} ብር</b>${basis === "unit" ? " <i>(ብዛት × ዋጋ)</i>" : ""}\n` +
+      `🗒 ማስታወሻ: ${esc(d.note) || "—"}\n`
+    );
+  }
+
   if (state.kind === "rm_credit_payment") {
     const load = chosenLoad(d);
     const paid = Number(d.amount) || 0;
@@ -2344,6 +2456,27 @@ export async function saveAssetReport(
               ${String(d.note || "") || null}, ${reportedBy}, 'telegram')
       returning id`;
     return { id: row.id, table: "raw_material_credits" };
+  }
+
+  if (state.kind === "item_purchase") {
+    const key = purchaseItemKey(d);
+    const basis = priceBasisFor(d.unit);
+    const { id } = await savePurchase(
+      {
+        date: reportDate(d.date),
+        itemName: String(d[PURCHASE_ITEM_STEP] || ""),
+        itemKey: key,
+        isNew: !key && d[PURCHASE_MATCH_STEP] === PURCHASE_NEW,
+        qty: Number(d.qty) || 0,
+        unit: String(d.unit || "pcs"),
+        basis,
+        figure: Number(basis === "unit" ? d.unitPrice : d.total) || 0,
+        note: String(d.note || ""),
+        source: "telegram",
+      },
+      reportedBy
+    );
+    return { id, table: "item_purchases" };
   }
 
   if (state.kind === "rm_credit_payment") {

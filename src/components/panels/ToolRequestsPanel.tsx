@@ -8,6 +8,7 @@ import {
   purchaseDeptLabel,
 } from "@/lib/purchase-departments";
 import { agoLabel, priorRequests } from "@/lib/purchase-history";
+import PurchaseForm from "@/components/panels/PurchaseForm";
 
 /**
  * Purchase requests filed from the bot — the one panel for them.
@@ -226,6 +227,8 @@ export default function ToolRequestsPanel() {
   const [error, setError] = useState("");
   const [openId, setOpenId] = useState<string | null>(null);
   const [dept, setDept] = useState<string | null>(null);
+  // ✓ Bought opens the purchase form; the request is marked bought when it saves.
+  const [buying, setBuying] = useState<Row | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -452,8 +455,11 @@ export default function ToolRequestsPanel() {
           busy={!!busy[selected._id]}
           onClose={() => setOpenId(null)}
           onDecide={decide}
+          onBought={(row) => setBuying(row)}
         />
       )}
+
+      {buying && <PurchaseForm request={buying} onClose={() => setBuying(null)} onSaved={load} />}
     </section>
   );
 }
@@ -465,12 +471,14 @@ function RequestModal({
   busy,
   onClose,
   onDecide,
+  onBought,
 }: {
   row: Row;
   prior: Row[];
   busy: boolean;
   onClose: () => void;
   onDecide: (id: string, action: string) => Promise<void>;
+  onBought: (row: Row) => void;
 }) {
   const field = (label: string, value: React.ReactNode) =>
     value === null || value === undefined || value === "" ? null : (
@@ -581,7 +589,7 @@ function RequestModal({
         {OPEN_STATUSES.has(row.status) && (
           <div className="mt-4 flex flex-wrap gap-1.5">
             <DecideBtn label="✓ Approve" tone="blue" busy={busy} onClick={() => onDecide(row._id, "approve")} />
-            <DecideBtn label="✓ Bought" tone="green" busy={busy} onClick={() => onDecide(row._id, "bought")} />
+            <DecideBtn label="✓ Bought" tone="green" busy={busy} onClick={() => onBought(row)} />
             <DecideBtn label="⏸ Defer" tone="purple" busy={busy} onClick={() => onDecide(row._id, "deferred")} />
             <DecideBtn label="✗ Reject" tone="red" busy={busy} onClick={() => onDecide(row._id, "reject")} />
             <DecideBtn label="Disregard" tone="grey" busy={busy} onClick={() => onDecide(row._id, "disregarded")} />

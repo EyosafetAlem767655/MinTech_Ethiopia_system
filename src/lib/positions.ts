@@ -43,7 +43,9 @@ export type CapabilityKey =
   | "wht_holder"
   // Raw material bought on credit, and paying it off.
   | "rm_credit_purchase"
-  | "rm_credit_payment";
+  | "rm_credit_payment"
+  // An item bought: matched to the store list, priced by the unit or the total.
+  | "item_purchase";
 
 /** How the bot collects a capability's payload. */
 export type CaptureMode =
@@ -232,6 +234,13 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
     captureMode: "asset_entry",
     input: "any",
     question: "💸 ለጥሬ ዕቃ አቅራቢ የተከፈለውን የብድር ክፍያ እንመዘግባለን።",
+  },
+  item_purchase: {
+    key: "item_purchase",
+    button: "🛍 የዕቃ ግዢ",
+    captureMode: "asset_entry",
+    input: "any",
+    question: "🛍 የተገዛውን ዕቃ እንመዘግባለን — ቀን፣ ዕቃ፣ ብዛት እና ዋጋ።",
   },
   pp_bag_price: {
     key: "pp_bag_price",
@@ -449,11 +458,11 @@ export const POSITIONS: Record<PositionKey, Position> = {
     // The GRV replaced the tool purchase report and the PP bag receipt: one
     // voucher covers every kind of purchase, PP bags included as line items.
     // No bank sheet any more: per-bank cash is read off the sales report itself.
-    capabilities: ["grv", "price_list", "pp_bag_price", "wht_holder", "credit_payment", "rm_credit_purchase", "rm_credit_payment"],
+    capabilities: ["grv", "price_list", "pp_bag_price", "wht_holder", "credit_payment", "rm_credit_purchase", "rm_credit_payment", "item_purchase"],
     // Purchases are on-demand and the price list is monthly, so there is no
     // daily obligation to chase. The WHT chase is its own cron, not a reminder.
     dailyRequired: false,
-    submissionTables: ["goods_receiving_vouchers", "finance_purchase_batches", "wht_holders", "raw_material_credits"],
+    submissionTables: ["goods_receiving_vouchers", "finance_purchase_batches", "wht_holders", "raw_material_credits", "item_purchases"],
   },
   hr: {
     key: "hr",

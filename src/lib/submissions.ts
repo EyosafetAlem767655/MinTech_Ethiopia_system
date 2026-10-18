@@ -50,6 +50,8 @@ export const SUBMISSION_COLLECTIONS = [
   "wht_holder",
   // Raw material bought on credit, and its payments.
   "rm_credit",
+  // An item finance bought (🛍).
+  "item_purchase",
 ] as const;
 
 export type SubmissionCollection = (typeof SUBMISSION_COLLECTIONS)[number];
@@ -646,6 +648,27 @@ export const SUBMISSIONS: Record<SubmissionCollection, SubmissionSpec> = {
     editableKeys: ["supplier", "truck_plate", "note"],
     // Its payments go with it, as in the database (on delete cascade).
     extraChildren: [{ table: "raw_material_credit_payments", foreignKey: "credit_id" }],
+  },
+  item_purchase: {
+    table: "item_purchases",
+    label: "Item purchase",
+    icon: "🛍",
+    dateColumn: "date",
+    authorColumn: "reported_by",
+    searchColumns: ["date_label", "item_name", "item_key", "unit", "reported_by"],
+    displayFields: [
+      TEXT("date_label", "Date"),
+      TEXT("item_name", "Item"),
+      TEXT("item_key", "Store item"),
+      NUM("qty", "Qty"),
+      TEXT("unit", "Unit"),
+      NUM("unit_price", "Unit price"),
+      NUM("total", "Total"),
+      TEXT("reported_by", "By"),
+    ],
+    // The unit price and the total are worked out from each other; editing
+    // one alone would leave a pair that disagrees.
+    editableKeys: ["item_name", "note"],
   },
   invoice: {
     table: "invoices",

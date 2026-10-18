@@ -3,6 +3,8 @@
 import { Fragment, useCallback, useEffect, useState } from "react";
 import DecideBtn from "@/components/DecideButton";
 import { PriceListEditor, StoreCostEditor } from "@/components/panels/UnitCostEditors";
+import PurchaseForm, { type PurchaseRequestRef } from "@/components/panels/PurchaseForm";
+import { purchaseDeptLabel } from "@/lib/purchase-departments";
 import {
   ALARM_TONNES,
   STATUS_LABEL,
@@ -24,7 +26,7 @@ import {
  * nobody scrolls to the bottom of.
  */
 
-type Tab = "rmcredit" | "monthly" | "credit" | "wht" | "banks";
+type Tab = "rmcredit" | "monthly" | "credit" | "wht" | "banks" | "purchases";
 
 const fmt = (n: number | null | undefined, dp = 2) =>
   n == null ? "—" : (Math.round(n * 10 ** dp) / 10 ** dp).toLocaleString(undefined, { maximumFractionDigits: dp });
@@ -43,6 +45,7 @@ export default function FinancePanels() {
             ["credit", "💳 Credit"],
             ["wht", "📄 WHT"],
             ["banks", "🏦 Banks"],
+            ["purchases", "🛍 Purchase status"],
           ] as const
         ).map(([k, label]) => (
           <button
@@ -62,6 +65,7 @@ export default function FinancePanels() {
       {tab === "credit" && <CreditTab />}
       {tab === "wht" && <WhtTab />}
       {tab === "banks" && <BankCollectionsTab />}
+      {tab === "purchases" && <PurchaseStatusTab />}
     </div>
   );
 }
@@ -1355,6 +1359,236 @@ function BankCollectionsTab() {
           </table>
         </div>
       )}
+    </section>
+  );
+}
+
+/* ───────────────────────────── 6. Purchase status ─────────────────────────── */
+
+interface ItemPurchase {
+  id: string;
+  date: string;
+  itemName: string;
+  itemKey: string | null;
+  itemLabel: string | null;
+  isNew: boolean;
+  qty: number;
+  unit: string;
+  unitPrice: number | null;
+  total: number | null;
+  basis: "unit" | "total" | null;
+  requestId: string | null;
+  requestTitle: string | null;
+  note: string | null;
+  reportedBy: string;
+}
+
+interface RequestRow extends PurchaseRequestRef {
+  department?: string | null;
+  status: string;
+  requestedBy: string;
+  createdAt: string;
+}
+
+const REQUEST_TONE: Record<string, string> = {
+  pending: "bg-amber-100 text-amber-800",
+  approved: "bg-blue-100 text-blue-800",
+  bought: "bg-green-100 text-green-700",
+  rejected: "bg-red-100 text-red-800",
+  disregarded: "bg-stone-100 text-stone-600",
+  deferred: "bg-purple-100 text-purple-700",
+};
+
+/** A request that can still be bought. */
+const BUYABLE = new Set(["pending", "approved", "deferred"]);
+
+/**
+ * What was bought, and where every purchase request stands.
+ *
+ * Purchases come from the bot (🛍 የዕቃ ግዢ) or from the form behind ✓ Bought on
+ * a request — here or in Asset Management — which records the purchase and
+ * marks the request bought together. A record only: the store balance moves
+ * when the GRV is filed.
+ */
+function PurchaseStatusTab() {
+  const [purchases, setPurchases] = useState<ItemPurchase[] | null>(null);
+  const [unavailable, setUnavailable] = useState(false);
+  const [requests, setRequests] = useState<RequestRow[]>([]);
+  const [buying, setBuying] = useState<RequestRow | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [showClosed, setShowClosed] = useState(false);
+
+  const load = useCallback(async () => {
+    const [p, r] = await Promise.all([
+      fetch("/api/finance/purchases")
+        .then((res) => (res.ok ? res.json() : null))
+        .catch(() => null),
+      fetch("/api/tool-requests")
+        .then((res) => (res.ok ? res.json() : []))
+        .catch(() => []),
+    ]);
+    setPurchases(Array.isArray(p?.rows) ? p.rows : []);
+    setUnavailable(!!p?.unavailable);
+    setRequests(Array.isArray(r) ? r : []);
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  if (!purchases) return <div className="card h-40 animate-pulse bg-clay-50" />;
+
+  const thisMonth = new Date(Date.now() + 3 * 3_600_000).toISOString().slice(0, 7);
+  const monthRows = purchases.filter((p) => p.date.slice(0, 7) === thisMonth);
+  const spent = monthRows.reduce((a, p) => a + (p.total ?? 0), 0);
+  const byRequest = new Map<string, ItemPurchase>();
+  for (const p of purchases) if (p.requestId && !byRequest.has(p.requestId)) byRequest.set(p.requestId, p);
+  const open = requests.filter((r) => BUYABLE.has(r.status));
+  const shownRequests = showClosed ? requests : open;
+
+  return (
+    <section className="space-y-3">
+      <div className="flex flex-wrap items-baseline justify-between gap-2 px-1">
+        <h2 className="font-display text-lg font-bold">🛍 Purchase status</h2>
+        <p className="text-[11px] text-stone-400">filed from the bot · 🛍 የዕቃ ግዢ · or ✓ Bought on a request</p>
+      </div>
+
+      {unavailable && (
+        <p className="card border-l-4 border-l-amber-500 p-3 text-xs font-bold text-amber-800">
+          Run migration 0042_item_purchases.sql in the Supabase editor — the purchases table is not there yet.
+        </p>
+      )}
+
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <CreditTile label="Spent this month" value={fmt(spent, 0)} suffix="ETB" tone="text-clay-900" />
+        <CreditTile label="Purchases this month" value={String(monthRows.length)} tone="text-stone-800" />
+        <CreditTile label="Requests open" value={String(open.length)} tone={open.length ? "text-amber-700" : "text-stone-500"} />
+        <CreditTile
+          label="Requests bought"
+          value={String(requests.filter((r) => r.status === "bought").length)}
+          tone="text-green-700"
+        />
+      </div>
+
+      {/* Purchases */}
+      <div className="flex items-center justify-between px-1">
+        <p className="text-[11px] font-bold uppercase tracking-widest text-clay-500">Purchases</p>
+        <DecideBtn label="➕ Record a purchase" tone="green" onClick={() => setAdding(true)} />
+      </div>
+      {purchases.length === 0 ? (
+        <p className="card p-4 text-sm text-stone-400">No purchases recorded yet.</p>
+      ) : (
+        <div className="card overflow-x-auto p-0">
+          <table className="w-full min-w-[820px] text-right text-xs">
+            <thead className="bg-clay-50/70 text-[10px] uppercase tracking-wide text-stone-500">
+              <tr>
+                <th className="p-2 text-left font-bold">Date</th>
+                <th className="p-2 text-left font-bold">Item</th>
+                <th className="p-2 font-bold">Qty</th>
+                <th className="p-2 font-bold">Unit price</th>
+                <th className="p-2 font-bold">Total</th>
+                <th className="p-2 text-left font-bold">Request</th>
+                <th className="p-2 text-left font-bold">By</th>
+              </tr>
+            </thead>
+            <tbody>
+              {purchases.map((p) => (
+                <tr key={p.id} className="border-t border-clay-50">
+                  <td className="p-2 text-left font-semibold text-stone-800">{fmtDate(p.date)}</td>
+                  <td className="max-w-[260px] p-2 text-left">
+                    <p className="truncate font-semibold text-stone-800">{p.itemName}</p>
+                    <p className="truncate text-[10px] text-stone-400">
+                      {p.itemLabel ? `🔗 ${p.itemLabel}` : p.isNew ? "🆕 new item" : "not on the store list"}
+                      {p.note ? ` · ${p.note}` : ""}
+                    </p>
+                  </td>
+                  <td className="p-2 tabular-nums text-stone-700">
+                    {fmt(p.qty, 3)} <span className="text-[10px] text-stone-400">{p.unit}</span>
+                  </td>
+                  <td className={`p-2 tabular-nums ${p.basis === "unit" ? "text-stone-800" : "text-stone-500"}`}>
+                    {fmt(p.unitPrice)}
+                  </td>
+                  <td className={`p-2 tabular-nums ${p.basis === "total" ? "font-bold text-clay-900" : "text-stone-700"}`}>
+                    {fmt(p.total)}
+                  </td>
+                  <td className="max-w-[180px] truncate p-2 text-left text-stone-500">{p.requestTitle || "—"}</td>
+                  <td className="p-2 text-left text-stone-500">{p.reportedBy}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Purchase requests, from Asset Management */}
+      <div className="flex items-center justify-between px-1 pt-2">
+        <p className="text-[11px] font-bold uppercase tracking-widest text-clay-500">Purchase requests</p>
+        <label className="flex items-center gap-1.5 text-[11px] text-stone-500">
+          <input type="checkbox" checked={showClosed} onChange={(e) => setShowClosed(e.target.checked)} />
+          Show bought / closed
+        </label>
+      </div>
+      {shownRequests.length === 0 ? (
+        <p className="card p-4 text-sm text-stone-400">
+          {requests.length === 0 ? "No purchase requests yet." : "No request is waiting to be bought."}
+        </p>
+      ) : (
+        <div className="card overflow-x-auto p-0">
+          <table className="w-full min-w-[820px] text-right text-xs">
+            <thead className="bg-clay-50/70 text-[10px] uppercase tracking-wide text-stone-500">
+              <tr>
+                <th className="p-2 text-left font-bold">Asked</th>
+                <th className="p-2 text-left font-bold">Item</th>
+                <th className="p-2 text-left font-bold">Department</th>
+                <th className="p-2 font-bold">Qty</th>
+                <th className="p-2 text-left font-bold">By</th>
+                <th className="p-2 text-left font-bold">Status</th>
+                <th className="p-2 font-bold">Bought</th>
+              </tr>
+            </thead>
+            <tbody>
+              {shownRequests.map((r) => {
+                const bought = byRequest.get(r._id);
+                return (
+                  <tr key={r._id} className="border-t border-clay-50">
+                    <td className="p-2 text-left font-semibold text-stone-800">{fmtDate(r.createdAt)}</td>
+                    <td className="max-w-[220px] truncate p-2 text-left font-semibold text-stone-700">{r.title}</td>
+                    <td className="p-2 text-left text-stone-500">{purchaseDeptLabel(r.department)}</td>
+                    <td className="p-2 tabular-nums text-stone-700">
+                      {r.quantity ?? ""}
+                      {r.unit && <span className="ml-1 text-[10px] text-stone-400">{r.unit}</span>}
+                    </td>
+                    <td className="p-2 text-left text-stone-500">{r.requestedBy}</td>
+                    <td className="p-2 text-left">
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
+                          REQUEST_TONE[r.status] || "bg-stone-100 text-stone-600"
+                        }`}
+                      >
+                        {r.status}
+                      </span>
+                    </td>
+                    <td className="p-2">
+                      {bought ? (
+                        <span className="text-[11px] text-stone-600">
+                          {fmtDate(bought.date)} · <b className="tabular-nums">{fmt(bought.total, 0)} ETB</b>
+                        </span>
+                      ) : BUYABLE.has(r.status) ? (
+                        <DecideBtn label="✓ Bought" tone="green" onClick={() => setBuying(r)} />
+                      ) : (
+                        <span className="text-stone-300">—</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {buying && <PurchaseForm request={buying} onClose={() => setBuying(null)} onSaved={load} />}
+      {adding && <PurchaseForm onClose={() => setAdding(false)} onSaved={load} />}
     </section>
   );
 }

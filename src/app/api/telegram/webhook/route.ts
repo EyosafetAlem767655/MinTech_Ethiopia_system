@@ -38,6 +38,8 @@ import {
   DOWNTIME_ROWS_STEP,
   oldBagPriceKey,
   saveAssetReport,
+  applyPurchaseItemMatch,
+  PURCHASE_ITEM_STEP,
   storeGroupOfStep,
   ticked,
   toggleTick,
@@ -86,6 +88,7 @@ import { reconcileBags } from "@/lib/stock-reconciliation";
 import { parseStoreGroupPaste } from "@/lib/store-count-paste";
 import {
   STORE_QTY_STEP,
+  itemLabel,
   itemsAwaiting,
   parseStoreVoucherPaste,
   storeCostHintKey,
@@ -924,6 +927,7 @@ const ASSET_FLOW_BY_CAP: Record<string, AssetFlowKind | undefined> = {
   pp_bag_price: "pp_bag_price",
   rm_credit_purchase: "rm_credit_purchase",
   rm_credit_payment: "rm_credit_payment",
+  item_purchase: "item_purchase",
   wht_holder: "wht_holder",
   sales_report: "sales_invoice",
 };
@@ -2934,6 +2938,15 @@ export async function POST(req: NextRequest) {
         } else {
           state.draft[step.id] = isAssetSkip(val) ? "" : val;
         }
+      }
+
+      // The item bought: matched to the store list the moment it is typed. An
+      // exact match is linked without a question; otherwise the next step
+      // offers the nearest names, or 🆕 new. No AI — this answers at once.
+      if (state.kind === "item_purchase" && step.id === PURCHASE_ITEM_STEP) {
+        await loadCustomStoreItems().catch(() => []);
+        const exact = applyPurchaseItemMatch(state.draft);
+        if (exact) await sendMessage(chatId, `✅ ከመጋዘን ዝርዝር ጋር ተገናኝቷል፦ <b>${escapeHtml(itemLabel(exact))}</b>`);
       }
 
       await advanceAsset(session, chatId, state);

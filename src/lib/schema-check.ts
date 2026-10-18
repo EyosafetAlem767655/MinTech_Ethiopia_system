@@ -64,6 +64,7 @@ export const EXPECTED_TABLES: { table: string; migration: string }[] = [
   { table: "production_hours", migration: "0040_production_hours_rm_credit.sql" },
   { table: "raw_material_credits", migration: "0040_production_hours_rm_credit.sql" },
   { table: "raw_material_credit_payments", migration: "0040_production_hours_rm_credit.sql" },
+  { table: "item_purchases", migration: "0042_item_purchases.sql" },
 ];
 
 /** The file to run to fix everything at once, whatever is missing. */
