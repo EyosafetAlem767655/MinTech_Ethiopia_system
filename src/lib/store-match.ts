@@ -118,6 +118,7 @@ export async function matchGrvLines(
       qty: l.qty,
       cost: l.cost,
       ...(l.inDrums ? { inDrums: true } : {}),
+      ...(l.machine ? { machine: l.machine } : {}),
       match: hit?.key ?? null,
       group: hit?.group ?? ADDED_GROUP,
       unit: hit?.unit ?? "pcs",

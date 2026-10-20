@@ -73,6 +73,7 @@ import {
 } from "@/lib/grv-lines";
 import { matchGrvLines } from "@/lib/store-match";
 import { loadCustomStoreItems } from "@/lib/store-custom";
+import { MACHINES_KEY, decodeMachines, normaliseMachine, recentMachines } from "@/lib/machines";
 import { STORE_ITEM_BY_KEY } from "@/lib/store-items";
 import { archiveView, databaseView, errorsView, jobsView, overviewView, systemKeyboard } from "@/lib/system-status";
 import { insertRow } from "@/lib/insert";
@@ -82,7 +83,7 @@ import { parseRawMaterialPaste } from "@/lib/raw-material-paste";
 import { parsePpBagPaste } from "@/lib/pp-bag-paste";
 import { parseHoursBlock, setHoursCells } from "@/lib/downtime-sheet";
 import { INVOICES_KEY, chosenInvoice, encodeInvoices, openCreditInvoices } from "@/lib/credit-bot";
-import { LOADS_KEY, chosenLoad, encodeLoads, loadRemaining, openRmLoads } from "@/lib/rm-credit";
+import { LOADS_KEY, PART_LABEL, chosenOwed, encodeLoads, loadRemaining, openRmLoads } from "@/lib/rm-credit";
 import { SETTLED_TOLERANCE_ETB } from "@/lib/credit";
 import { reconcileBags } from "@/lib/stock-reconciliation";
 import { parseStoreGroupPaste } from "@/lib/store-count-paste";
@@ -191,9 +192,11 @@ function escapeHtml(s: string): string {
 }
 
 /** Buttons are matched by their normalised label, so labels stay editable in one place. */
-const CAP_BY_LABEL = new Map<string, Capability>(
-  Object.values(CAPABILITIES).map((c) => [normaliseChoice(c.button), c])
-);
+const CAP_BY_LABEL = new Map<string, Capability>([
+  ...Object.values(CAPABILITIES).map((c) => [normaliseChoice(c.button), c] as const),
+  // The button's old name, so a keyboard sent before the rename still works.
+  [normaliseChoice("💸 የጥሬ ዕቃ ብድር ክፍያ"), CAPABILITIES.rm_credit_payment] as const,
+]);
 const HR_KIND_BY_LABEL = new Map<string, HrKind>(
   (Object.keys(HR_KINDS) as HrKind[]).map((k) => [normaliseChoice(HR_KINDS[k].button), k])
 );
@@ -1221,6 +1224,12 @@ async function askAssetStep(chatId: string, state: AssetFlowState): Promise<void
   }
   if (step.type === "choice") {
     const choices = choicesOf(step, state.draft);
+    // A step that takes a typed answer has nothing to choose from the first
+    // time anyone answers it — that is a question, not "nothing to choose".
+    if (choices.length === 0 && step.freeText) {
+      await sendMessage(chatId, step.prompt, { reply_markup: CHANGE_CANCEL_KEYBOARD });
+      return;
+    }
     if (choices.length === 0) {
       // Nothing to choose from is a real answer, not a broken screen: no unpaid
       // sale means there is nothing to collect against.
@@ -1755,6 +1764,11 @@ async function startAssetFlow(
       return false;
     }
     draft[LOADS_KEY] = encodeLoads(open);
+  }
+  // The machine names already used, offered as buttons wherever a machine or
+  // car is asked for.
+  if (kind === "store_issue" || kind === "tool_request") {
+    draft[MACHINES_KEY] = JSON.stringify(await recentMachines().catch(() => []));
   }
   if (kind === "pp_bag_price") {
     const [row] = await sql<{ prices: Record<string, number> }[]>`
@@ -2385,18 +2399,20 @@ export async function POST(req: NextRequest) {
 
           // The same for a raw-material load: what is still owed on it now.
           if (state.kind === "rm_credit_payment") {
-            const load = chosenLoad(state.draft);
-            if (load) {
+            const owed = chosenOwed(state.draft);
+            if (owed) {
+              const { load, part } = owed;
+              const who = part === "driver" ? load.driverName || "ሹፌር" : load.owner || load.supplier;
               runAfter(
-                loadRemaining(load.id)
+                loadRemaining(load.id, part)
                   .then((left) =>
                     left === null
                       ? undefined
                       : sendMessage(
                           chatId,
                           left <= 1
-                            ? `✅ <b>${escapeHtml(load.supplier)}</b> — ይህ ጭነት (${escapeHtml(load.truckPlate || load.date)}) ሙሉ በሙሉ ተከፍሏል።`
-                            : `🚚 <b>${escapeHtml(load.supplier)}</b> — ከዚህ ጭነት የሚቀር: <b>${Math.round(left).toLocaleString("en-US")}</b> ብር።`
+                            ? `✅ <b>${escapeHtml(who)}</b> — የዚህ ጭነት (${escapeHtml(load.truckPlate || load.date)}) ${PART_LABEL[part]} ክፍያ ሙሉ በሙሉ ተከፍሏል።`
+                            : `🚚 <b>${escapeHtml(who)}</b> — ከዚህ ጭነት ${PART_LABEL[part]} የሚቀር: <b>${Math.round(left).toLocaleString("en-US")}</b> ብር።`
                         )
                   )
                   .catch((e) => console.warn("rm credit balance note skipped:", e))
@@ -2654,11 +2670,16 @@ export async function POST(req: NextRequest) {
       } else if (step.type === "choice") {
         const choices = choicesOf(step, state.draft);
         const match = choices.find((c) => normaliseChoice(c.label) === normText);
-        if (!match) {
+        if (!match && step.freeText) {
+          // Not one of the buttons: a new name, typed. Kept in the spelling of
+          // a known one when it differs only in case.
+          state.draft[step.id] = normaliseMachine(val, decodeMachines(state.draft));
+        } else if (!match) {
           await sendMessage(chatId, step.prompt, { reply_markup: choiceKeyboard({ choices }) });
           return NextResponse.json({ ok: true });
+        } else {
+          state.draft[step.id] = match.value;
         }
-        state.draft[step.id] = match.value;
       } else if (step.type === "number") {
         const n = parseQty(val);
         // Re-ask rather than defaulting to 0: a silent zero where 40 tonnes

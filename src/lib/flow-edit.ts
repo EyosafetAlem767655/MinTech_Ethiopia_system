@@ -373,6 +373,8 @@ export function validateForStep(
     const match = step.choices?.find(
       (c) => normChoice(c.label) === normChoice(val) || norm(c.value) === norm(val)
     );
+    // A machine or car is typed as often as it is picked.
+    if (!match && step.freeText) return { ok: true, value: val.replace(/\s+/g, " ") };
     if (!match) {
       const options = (step.choices || []).map((c) => c.label).slice(0, 8).join(" / ");
       return { ok: false, reason: `ከእነዚህ አንዱ መሆን አለበት፦ ${options}` };

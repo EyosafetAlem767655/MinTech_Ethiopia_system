@@ -73,9 +73,12 @@ export default function ProductionPanels() {
   const prodRows = useMemo(() => {
     const from = win.start.getTime();
     const to = win.end.getTime();
+    // A report counts when it is FOR a day in the window or was SUBMITTED in
+    // it: one filed this morning for yesterday is on today's board.
     return (production ?? []).filter((r) => {
       const t = new Date(r.date).getTime();
-      return t >= from && t < to;
+      const filed = r.createdAt ? new Date(r.createdAt).getTime() : NaN;
+      return (t >= from && t < to) || (filed >= from && filed < to);
     });
   }, [production, win]);
 

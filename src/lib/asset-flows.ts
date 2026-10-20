@@ -53,11 +53,13 @@ import {
   grvLines,
   hasGrvLines,
   setGrvLines,
+  MAX_GRV_LINES,
 } from "@/lib/grv-lines";
+import { NO_MACHINE, decodeMachines } from "@/lib/machines";
 import { createCustomItems } from "@/lib/store-custom";
 import { eatDateLabel } from "@/lib/dates";
 import { chosenCustomerName, chosenInvoice, customerChoices, invoiceChoices, invoicesFor } from "@/lib/credit-bot";
-import { chosenLoad, chosenSupplierName, loadChoices, loadRemaining, loadsFor, supplierChoices } from "@/lib/rm-credit";
+import { PART_LABEL, chosenOwed, loadRemaining, owedChoices } from "@/lib/rm-credit";
 import { SETTLED_TOLERANCE_ETB } from "@/lib/credit";
 import {
   HOURS_KINDS,
@@ -261,6 +263,11 @@ export interface AssetStep {
    * number.
    */
   validate?: (raw: string) => StepValidation;
+  /**
+   * A choice step that also takes a typed answer: the buttons are suggestions
+   * (the machine names already used), and a new name is simply typed.
+   */
+  freeText?: boolean;
 }
 
 /* ─────────────────────────────── Step tables ──────────────────────────────── */
@@ -475,6 +482,19 @@ const TOOL_REQUEST_STEPS: AssetStep[] = [
     prompt: "🏷 የትኛው ክፍል ነው የሚጠይቀው?",
     type: "choice",
     choices: PURCHASE_DEPARTMENTS,
+  },
+  // Which machine or car it is for — every request, unless it is PP bags or
+  // oil, which no machine is named for (the button says so).
+  {
+    id: "machine",
+    label: "Machine",
+    prompt: "🚜 ለየትኛው ማሽን ወይም መኪና ነው? ከታች ይምረጡ ወይም ስሙን ይፃፉ።",
+    type: "choice",
+    choicesFrom: (d) => [
+      ...decodeMachines(d).map((m) => ({ label: m, value: m })),
+      { label: "🧺 PP bag / 🛢 Oil — ማሽን የለም", value: NO_MACHINE },
+    ],
+    freeText: true,
   },
   { id: "notes", label: "Notes", prompt: "🗒 ተጨማሪ ማስታወሻ ካለ ይፃፉ።", type: "text", skippable: true },
 ];
@@ -790,6 +810,11 @@ const GRV_STEPS: AssetStep[] = [
  * daily PP bag usage report, which is where the monthly report and the bag
  * stock check now take the issued side from.
  */
+/** Draft key of the machine asked for SIV line `n`, when its paste did not name one. */
+export function sivMachineKey(n: number): string {
+  return `mach:${n}`;
+}
+
 const STORE_ISSUE_STEPS: AssetStep[] = [
   { id: "date", prompt: "📅 ዕቃው የወጣበትን ቀን ይምረጡ።", type: "date" },
   { id: "sivNo", prompt: "🔢 የቫውቸሩን ቁጥር (No.) ይፃፉ — ለምሳሌ 8610።", type: "text", skippable: true },
@@ -814,8 +839,9 @@ const STORE_ISSUE_STEPS: AssetStep[] = [
     label: "Items",
     prompt:
       "📦 የሚወጡትን ዕቃዎች ይፃፉ — በአንድ መስመር አንድ ዕቃ፦\n" +
-      "<b>ስም | መግለጫ | ብዛት</b>\n" +
-      "<i>ለምሳሌ፦</i> <code>Ball bearing | 6210 | 2</code>\n\n" +
+      "<b>ስም | መግለጫ | ብዛት | ማሽን/መኪና</b>\n" +
+      "<i>ለምሳሌ፦</i> <code>Ball bearing | 6210 | 2 | Crusher 1</code>\n" +
+      "<i>ማሽኑን ካልፃፉ ለእያንዳንዱ ዕቃ ይጠየቃሉ።</i>\n\n" +
       "<i>ከታች ያለውን ቅጂ ሞልተው ይላኩ። ከመጋዘን ዝርዝሩ ጋር በራሱ ይገናኛል።</i>",
     type: "paste",
   },
@@ -830,6 +856,22 @@ const STORE_ISSUE_STEPS: AssetStep[] = [
     ],
     when: (d) => hasGrvLines(d),
   },
+  // Which machine or car each item was taken for — asked only for a line that
+  // did not say so in its fourth column.
+  ...Array.from({ length: MAX_GRV_LINES }, (_, i): AssetStep => ({
+    id: sivMachineKey(i + 1),
+    label: `Item ${i + 1} machine`,
+    get prompt() {
+      return `🚜 ዕቃ ${i + 1} — ለየትኛው ማሽን ወይም መኪና ነው የወጣው? ከታች ይምረጡ ወይም ስሙን ይፃፉ።`;
+    },
+    type: "choice",
+    choicesFrom: (d) => decodeMachines(d).map((m) => ({ label: m, value: m })),
+    freeText: true,
+    when: (d) => {
+      const line = grvLines(d)[i];
+      return !!line && !line.machine;
+    },
+  })),
   { id: "approvedBy", prompt: "🧑 ያፀደቀው (Approved by) ማን ነው?", type: "text", skippable: true },
   { id: "receivedBy", prompt: "🧑 የተረከበው (Received by) ማን ነው?", type: "text", skippable: true },
   // No photo step, and none of the fields the pad has that nobody fills in.
@@ -1079,14 +1121,26 @@ const CREDIT_PAYMENT_STEPS: AssetStep[] = [
 /* ─────────────────── Raw material on credit (finance) ────────────────────── */
 
 /**
- * A load of raw material bought on credit: who from, which truck, what, how
- * much and at what price. What is owed is tonnes × price per tonne, worked out
- * here and shown on the card before anything is saved.
+ * A load of raw material bought on credit, and the three people behind it.
+ *
+ * The quarry owner sells it, the sales agent brokers it, the driver brings it
+ * (on the plate given). Two amounts are owed and paid separately: the raw
+ * material's total price and the driver's fee. Whatever was paid on the spot
+ * is asked here — a tick for each part, then how much — and what is left
+ * stays on credit for the 💸 payment form.
  */
+export const RM_PAID_NOW_STEP = "paidNow";
+const paidNow = (d: Record<string, string | number>, part: "material" | "driver") => {
+  const t = ticked(d, RM_PAID_NOW_STEP);
+  return t.includes(part) && !t.includes("none");
+};
+
 const RM_CREDIT_PURCHASE_STEPS: AssetStep[] = [
   { id: "date", prompt: "📅 ጭነቱ የገባበትን ቀን ይምረጡ።", type: "date" },
-  { id: "supplier", label: "Supplier", prompt: "🏢 አቅራቢውን (Supplier) ይፃፉ።", type: "text" },
-  { id: "truckPlate", label: "Truck plate", prompt: "🚚 የመኪናውን ታርጋ ቁጥር ይፃፉ።", type: "text", skippable: true },
+  { id: "quarryOwner", label: "Quarry owner", prompt: "⛰ የቋራው ባለቤት (Quarry owner) ማን ነው?", type: "text" },
+  { id: "salesAgent", label: "Sales agent", prompt: "🤝 የሽያጭ ወኪሉ (Sales agent) ማን ነው?", type: "text", skippable: true },
+  { id: "driverName", label: "Driver", prompt: "🧑‍✈️ ሹፌሩ ማን ነው?", type: "text" },
+  { id: "truckPlate", label: "Truck plate", prompt: "🚚 የመኪናውን ታርጋ ቁጥር ይፃፉ።", type: "text" },
   {
     id: "material",
     label: "Material",
@@ -1094,27 +1148,52 @@ const RM_CREDIT_PURCHASE_STEPS: AssetStep[] = [
     type: "choice",
     choices: RAW_MATERIALS.map((m) => ({ label: m, value: m })),
   },
-  { id: "tonnes", label: "Tonnes", prompt: "⚖️ ስንት ቶን ተጭኗል?", type: "number" },
-  { id: "pricePerTonne", label: "Price per tonne", prompt: "💲 የአንድ ቶን ዋጋ ስንት ብር ነው?", type: "number" },
+  { id: "tonnes", label: "Tonnes", prompt: "⚖️ ስንት ቶን ገባ?", type: "number" },
+  { id: "materialTotal", label: "Raw material total", prompt: "💰 የጥሬ ዕቃው ጠቅላላ ዋጋ ስንት ብር ነው?", type: "number" },
+  { id: "driverFee", label: "Driver's fee", prompt: "🧑‍✈️ የሹፌሩ ክፍያ ስንት ብር ነው? (የለም ከሆነ 0)", type: "number" },
+  {
+    id: RM_PAID_NOW_STEP,
+    label: "Paid now",
+    prompt: "💵 አሁን የተከፈለው የትኛው ነው? ይንኩ፣ ከዚያ ✅ ጨርሻለሁ ይጫኑ።",
+    type: "multichoice",
+    choices: [
+      { label: "🧱 ጥሬ ዕቃ (Raw material)", value: "material" },
+      { label: "🧑‍✈️ የሹፌር ክፍያ (Driver's fee)", value: "driver" },
+      { label: "⏳ ምንም አልተከፈለም (Nothing yet)", value: "none" },
+    ],
+  },
+  {
+    id: "paidMaterial",
+    label: "Paid on raw material",
+    prompt: "🧱 ለጥሬ ዕቃው ስንት ብር ተከፈለ?",
+    type: "number",
+    when: (d) => paidNow(d, "material"),
+  },
+  {
+    id: "paidDriver",
+    label: "Paid to driver",
+    prompt: "🧑‍✈️ ለሹፌሩ ስንት ብር ተከፈለ?",
+    type: "number",
+    when: (d) => paidNow(d, "driver"),
+  },
   { id: "note", label: "Note", prompt: "🗒 ማስታወሻ ካለ ይፃፉ።", type: "text", skippable: true },
 ];
 
 /**
- * Money paid against a load. The supplier is picked by name; when they have
- * more than one load still owed, which one — otherwise the only one is it.
+ * Money paid later. Everything still unpaid pops up as one list — each load's
+ * raw material and its driver's fee as separate buttons — and the amount may
+ * be part of what is left.
  */
 const RM_CREDIT_PAYMENT_STEPS: AssetStep[] = [
   { id: "date", prompt: "📅 የተከፈለበትን ቀን ይምረጡ።", type: "date" },
-  { id: "supplier", label: "Supplier", prompt: "🏢 ለየትኛው አቅራቢ ነው የተከፈለው?", type: "choice", choicesFrom: supplierChoices },
   {
-    id: "loadId",
-    label: "Load",
-    prompt: "🚚 አቅራቢው ከአንድ በላይ ያልተከፈለ ጭነት አለው። የትኛው ነው የተከፈለው? <i>(ቀን · ታርጋ · ዓይነት · ቀሪ ብር)</i>",
+    id: "owed",
+    label: "Unpaid",
+    prompt: "📋 ያልተከፈሉ — የትኛው ነው የተከፈለው? <i>(ቀን · ለማን · ታርጋ · ዓይነት · ቀሪ ብር)</i>",
     type: "choice",
-    choicesFrom: loadChoices,
-    when: (d) => loadsFor(d).length > 1,
+    choicesFrom: owedChoices,
   },
-  { id: "amount", label: "Amount", prompt: "💰 የተከፈለውን መጠን በብር ይፃፉ።", type: "number" },
+  { id: "amount", label: "Amount", prompt: "💰 ስንት ብር ተከፈለ? (ከፊል ክፍያ ሊሆን ይችላል)", type: "number" },
   { id: "note", label: "Note", prompt: "🗒 ማስታወሻ ካለ ይፃፉ።", type: "text", skippable: true },
 ];
 
@@ -2085,7 +2164,7 @@ export function assetPreview(state: AssetFlowState): string {
             it.ledgerKind === "bag" ? "ከረጢት" : "ቶን"
           }`
         : "";
-      const code = it.stockCode ? ` <i>[${esc(it.stockCode)}]</i>` : "";
+      const code = it.machine ? ` · 🚜 ${esc(it.machine)}` : it.stockCode ? ` <i>[${esc(it.stockCode)}]</i>` : "";
       // The typed GRV: say which store item each line moves, or that it is new.
       const store =
         hasGrvLines(d)
@@ -2167,14 +2246,20 @@ export function assetPreview(state: AssetFlowState): string {
 
   if (state.kind === "rm_credit_purchase") {
     const t = Number(d.tonnes) || 0;
-    const price = Number(d.pricePerTonne) || 0;
+    const total = Number(d.materialTotal) || 0;
+    const fee = Number(d.driverFee) || 0;
+    const paidM = paidNow(d, "material") ? Number(d.paidMaterial) || 0 : 0;
+    const paidD = paidNow(d, "driver") ? Number(d.paidDriver) || 0 : 0;
     return (
       head +
       `📅 Date: ${esc(d.date)}\n` +
-      `🏢 አቅራቢ: <b>${esc(d.supplier)}</b>\n` +
-      `🚚 ታርጋ: ${esc(d.truckPlate) || "—"}\n` +
-      `🧱 ${esc(d.material)}: <b>${qty(t)} t</b> × ${money(price)} ብር\n` +
-      `💳 በብድር የሚከፈል: <b>${money(Math.round(t * price * 100) / 100)} ብር</b>\n` +
+      `⛰ የቋራ ባለቤት: <b>${esc(d.quarryOwner)}</b>\n` +
+      `🤝 የሽያጭ ወኪል: ${esc(d.salesAgent) || "—"}\n` +
+      `🧑‍✈️ ሹፌር: <b>${esc(d.driverName)}</b> · 🚚 ${esc(d.truckPlate) || "—"}\n` +
+      `🧱 ${esc(d.material)}: <b>${qty(t)} t</b>${t > 0 ? ` <i>(${money(total / t)} ብር/t)</i>` : ""}\n` +
+      `💰 ጥሬ ዕቃ: <b>${money(total)}</b> · ተከፈለ ${money(paidM)} · ቀሪ <b>${money(total - paidM)}</b> ብር\n` +
+      `🧑‍✈️ ሹፌር: <b>${money(fee)}</b> · ተከፈለ ${money(paidD)} · ቀሪ <b>${money(fee - paidD)}</b> ብር\n` +
+      `💳 በብድር የሚቀር: <b>${money(total - paidM + fee - paidD)} ብር</b>\n` +
       `🗒 ማስታወሻ: ${esc(d.note) || "—"}\n`
     );
   }
@@ -2198,18 +2283,19 @@ export function assetPreview(state: AssetFlowState): string {
   }
 
   if (state.kind === "rm_credit_payment") {
-    const load = chosenLoad(d);
+    const owed = chosenOwed(d);
     const paid = Number(d.amount) || 0;
-    const left = load ? Math.round((load.remaining - paid) * 100) / 100 : 0;
+    const left = owed ? Math.round((owed.left - paid) * 100) / 100 : 0;
+    const who = owed ? (owed.part === "driver" ? owed.load.driverName || "ሹፌር" : owed.load.owner || owed.load.supplier) : "";
     return (
       head +
       `📅 Date: ${esc(d.date)}\n` +
-      `🏢 አቅራቢ: <b>${esc(chosenSupplierName(d))}</b>\n` +
-      (load
-        ? `🚚 ጭነት: ${esc(load.date)} · ${esc(load.truckPlate || "—")} · ${esc(load.material)} ${qty(load.tonnes)} t · ዕዳ <b>${money(load.remaining)}</b>\n`
+      (owed
+        ? `🚚 ጭነት: ${esc(owed.load.date)} · ${esc(owed.load.truckPlate || "—")} · ${esc(owed.load.material)} ${qty(owed.load.tonnes)} t\n` +
+          `👤 ${PART_LABEL[owed.part]}: <b>${esc(who)}</b> · ዕዳ <b>${money(owed.left)}</b>\n`
         : "") +
       `💰 የተከፈለ: <b>${money(paid)}</b>\n` +
-      (load ? (left <= 1 ? "✅ ይህ ጭነት ሙሉ በሙሉ ይከፈላል።\n" : `⏳ ከክፍያ በኋላ የሚቀር: <b>${money(left)}</b>\n`) : "") +
+      (owed ? (left <= 1 ? "✅ ይህ ሙሉ በሙሉ ይከፈላል።\n" : `⏳ ከክፍያ በኋላ የሚቀር: <b>${money(left)}</b>\n`) : "") +
       `🗒 ማስታወሻ: ${esc(d.note) || "—"}\n`
     );
   }
@@ -2308,6 +2394,8 @@ export interface VoucherItem {
   ledgerKind: LedgerKind | "store" | null;
   ledgerKey: string | null;
   ledgerQty: number;
+  /** SIV: the machine or car the item was taken for. */
+  machine?: string | null;
 }
 
 /**
@@ -2324,7 +2412,8 @@ export function voucherItems(draft: Record<string, string | number>): VoucherIte
   // The GRV's typed, AI-matched lines. A line still without a key is a new
   // item, given one when the voucher is saved (saveAssetFlow).
   if (hasGrvLines(draft)) {
-    return grvLines(draft).map((l) => ({
+    return grvLines(draft).map((l, i) => ({
+      machine: l.machine || String(draft[sivMachineKey(i + 1)] || "") || null,
       stockCode: null,
       description: l.desc ? `${l.name} — ${l.desc}` : l.name,
       unit: l.match ? STORE_ITEM_BY_KEY.get(l.match)?.unit ?? l.unit : l.unit,
@@ -2444,18 +2533,39 @@ export async function saveAssetReport(
   if (state.kind === "rm_credit_purchase") {
     const date = reportDate(d.date);
     const tonnes = Number(d.tonnes) || 0;
-    const price = Number(d.pricePerTonne) || 0;
+    const total = Math.round((Number(d.materialTotal) || 0) * 100) / 100;
+    const fee = Math.round((Number(d.driverFee) || 0) * 100) / 100;
     if (!(tonnes > 0)) throw new Error("A load has to be more than zero tonnes.");
     const material = String(d.material || "");
     if (!(RAW_MATERIALS as readonly string[]).includes(material)) throw new Error("Pick the raw material from the list.");
-    const [row] = await sql<{ id: string }[]>`
-      insert into raw_material_credits
-        (date, date_label, supplier, truck_plate, material, tonnes, price_per_tonne, amount, note, reported_by, source)
-      values (${date}, ${eatDateLabel(date)}, ${String(d.supplier || "").trim()}, ${String(d.truckPlate || "").trim() || null},
-              ${material}, ${tonnes}, ${price}, ${Math.round(tonnes * price * 100) / 100},
-              ${String(d.note || "") || null}, ${reportedBy}, 'telegram')
-      returning id`;
-    return { id: row.id, table: "raw_material_credits" };
+    const owner = String(d.quarryOwner || "").trim();
+    if (!owner) throw new Error("Name the quarry owner.");
+    const paidM = paidNow(d, "material") ? Math.round((Number(d.paidMaterial) || 0) * 100) / 100 : 0;
+    const paidD = paidNow(d, "driver") ? Math.round((Number(d.paidDriver) || 0) * 100) / 100 : 0;
+    if (paidM > total + 1) throw new Error(`More was paid on the raw material than it costs (${money(total)} ETB).`);
+    if (paidD > fee + 1) throw new Error(`More was paid to the driver than the fee (${money(fee)} ETB).`);
+    const paidOn = eatDateLabel(date);
+    // The load and what was paid on the spot, together or not at all.
+    const id = await sql.begin(async (tx) => {
+      const [row] = await tx<{ id: string }[]>`
+        insert into raw_material_credits
+          (date, date_label, supplier, quarry_owner, sales_agent, driver_name, truck_plate, material, tonnes,
+           price_per_tonne, amount, driver_fee, note, reported_by, source)
+        values (${date}, ${paidOn}, ${owner}, ${owner}, ${String(d.salesAgent || "").trim() || null},
+                ${String(d.driverName || "").trim() || null}, ${String(d.truckPlate || "").trim() || null},
+                ${material}, ${tonnes}, ${Math.round((total / tonnes) * 100) / 100}, ${total}, ${fee},
+                ${String(d.note || "") || null}, ${reportedBy}, 'telegram')
+        returning id`;
+      for (const [part, amount] of [["material", paidM], ["driver", paidD]] as const) {
+        if (amount > 0) {
+          await tx`
+            insert into raw_material_credit_payments (credit_id, part, amount, paid_on, note, recorded_by)
+            values (${row.id}::uuid, ${part}, ${amount}, ${paidOn}::date, ${"paid on loading"}, ${reportedBy})`;
+        }
+      }
+      return row.id;
+    });
+    return { id, table: "raw_material_credits" };
   }
 
   if (state.kind === "item_purchase") {
@@ -2480,20 +2590,20 @@ export async function saveAssetReport(
   }
 
   if (state.kind === "rm_credit_payment") {
-    const load = chosenLoad(d);
+    const owed = chosenOwed(d);
     const amount = Math.round((Number(d.amount) || 0) * 100) / 100;
-    if (!load) throw new Error("No load was chosen for this payment.");
+    if (!owed) throw new Error("Nothing unpaid was chosen for this payment.");
     if (!(amount > 0)) throw new Error("A payment has to be more than zero.");
     // Read again HERE: somebody may have recorded a payment on the same load
     // while this one was being filled in.
-    const outstanding = await loadRemaining(load.id);
+    const outstanding = await loadRemaining(owed.load.id, owed.part);
     if (outstanding === null) throw new Error("That load no longer exists.");
     if (amount > outstanding + 1) {
-      throw new Error(`That is more than is owed on this load — ${money(outstanding)} ETB is outstanding.`);
+      throw new Error(`That is more than is owed — ${money(outstanding)} ETB is outstanding on it.`);
     }
     const [row] = await sql<{ id: string }[]>`
-      insert into raw_material_credit_payments (credit_id, amount, paid_on, note, recorded_by)
-      values (${load.id}::uuid, ${amount}, ${eatDateLabel(reportDate(d.date))}::date,
+      insert into raw_material_credit_payments (credit_id, part, amount, paid_on, note, recorded_by)
+      values (${owed.load.id}::uuid, ${owed.part}, ${amount}, ${eatDateLabel(reportDate(d.date))}::date,
               ${String(d.note || "") || null}, ${reportedBy})
       returning id`;
     return { id: row.id, table: "raw_material_credit_payments" };
@@ -2935,6 +3045,8 @@ export async function saveAssetReport(
         ledger_kind: it.ledgerKind,
         ledger_key: it.ledgerKey,
         ledger_qty: it.ledgerKey ? it.ledgerQty : null,
+        // The issue line's machine or car (0043). GRV lines have no such column.
+        ...(isGrv ? {} : { machine: it.machine ?? null }),
       }));
       await tx`insert into ${tx(isGrv ? "goods_receiving_items" : "store_issue_items")} ${tx(rows)}`;
     }
@@ -3050,13 +3162,15 @@ export async function saveAssetReport(
       unit: String(d.unit || "") || null,
       department: String(d.department || "") || null,
       notes: String(d.notes || "") || null,
+      // The machine or car it is for; null for PP bags / oil (0043).
+      machine: d.machine && d.machine !== NO_MACHINE ? String(d.machine) : null,
       tg_file_id: state.photoFileId || null,
       requested_by: reportedBy,
       source: "telegram",
       status: "pending",
       legitimacy: state.check ? sql.json({ ...state.check }) : null,
     },
-    { optional: ["tg_file_id", "description", "unit", "department", "notes"], source: "asset-flows" }
+    { optional: ["tg_file_id", "description", "unit", "department", "notes", "machine"], source: "asset-flows" }
   );
   return { id: row.id, table: "purchase_requests" };
 }

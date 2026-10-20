@@ -18,6 +18,8 @@ interface Item {
   position: number;
   stockCode: string | null;
   description: string;
+  /** SIV: the machine or car the item went to (0043). */
+  machine?: string | null;
   unit: string | null;
   quantity: number | null;
   unitCost: number | null;
@@ -260,6 +262,7 @@ function VoucherCard({ v, items, isGrv }: { v: Voucher; items: Item[]; isGrv: bo
                   <td className="p-1.5 text-left text-stone-700">
                     {it.description}
                     {it.stockCode ? <span className="text-stone-400"> · {it.stockCode}</span> : null}
+                    {it.machine ? <span className="text-stone-500"> · 🚜 {it.machine}</span> : null}
                   </td>
                   <td className="p-1.5 text-stone-500">{it.unit || "—"}</td>
                   <td className="p-1.5 tabular-nums text-stone-700">{fmt(it.quantity, 3)}</td>

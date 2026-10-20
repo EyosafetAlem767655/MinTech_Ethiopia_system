@@ -111,13 +111,11 @@ async function departmentKpis(
       // Shift analysis and stone traceability were removed from the system, so
       // their KPIs went with them. What is left is what the guided daily report
       // actually records: tonnage produced and how many days were filed.
-      const [r] = await sql<{ reports: string }[]>`
-        select count(*) as reports from production_reports
-         where date >= ${start} and date < ${end}
-      `;
+      // Reports SUBMITTED in the window, whatever day they are for.
+      const reports = await filedIn("production_reports", start, end);
       return [
         { icon: "🏭", label: "Tons produced", value: base.tonsProduced, suffix: " t", decimals: 2 },
-        { icon: "📋", label: "Production reports", value: Number(r.reports) || 0 },
+        { icon: "📋", label: "Production reports", value: reports },
       ];
     }
 
@@ -134,7 +132,7 @@ async function departmentKpis(
         sql<{ raw: string; damage: string; pr_count: string }[]>`
           select
             (select count(*) from raw_material_receipts where date >= ${start} and date < ${end})       as raw,
-            (select count(*) from pp_bag_damage_reports where date >= ${start} and date < ${end})       as damage,
+            (select count(*) from pp_bag_damage_reports where created_at >= ${start} and created_at < ${end}) as damage,
             (select count(*) from purchase_requests     where created_at >= ${start} and created_at < ${end}) as pr_count
         `,
         sql<{ grv: string; siv: string }[]>`
@@ -229,7 +227,8 @@ async function departmentSubmissions(dept: DepartmentKey, start: Date, end: Date
       // gate feeds were removed with their modules.
       const prod = await sql<{ id: string; fgr_no: string | null; reported_by: string; products: Record<string, number>; date: Date }[]>`
         select id, fgr_no, reported_by, products, date
-          from production_reports where date >= ${start} and date < ${end}
+          from production_reports
+         where (date >= ${start} and date < ${end}) or (created_at >= ${start} and created_at < ${end})
          order by date desc limit 30`;
       typed = prod.map<Submission>((r) => {
         const tons = Object.values(r.products || {}).reduce((a, b) => a + Number(b || 0), 0);
@@ -382,42 +381,38 @@ export async function getDepartmentSummary(
  * this reason months ago and these were missed. Sales showed "Receipts", which
  * left the sales tab when it was rebuilt around invoices.
  *
- * The windows also match the panels now: every count filters on the report's
- * own `date` where it has one, because that is what the tables on the tab
- * filter on. Counting arrivals here while the tab counts report dates would put
- * a "3 updates" pill above a table showing two rows.
+ * The windows count SUBMISSIONS: a row filed (or re-filed) in the window,
+ * whatever report date it carries. The tab panels include the same rows — a
+ * row shows there when its report date OR its submission falls in the window —
+ * so the pill and the table agree.
  */
 async function departmentActivityCounts(
   dept: DepartmentKey,
   start: Date,
   end: Date
 ): Promise<{ total: number; headline: Kpi[] }> {
-  // Every count below tolerates a table that is not there yet. These four run
-  // in parallel behind one Brief, so a single missing relation — the sales
-  // table between a deploy and its migration, say — would otherwise 500 the
-  // whole page rather than blank one tile. A zero here is honest: nothing
-  // could have been filed into a table that does not exist.
-  const missing = (e: unknown) => {
-    if ((e as { code?: string })?.code !== "42P01") throw e;
-    console.warn(`departmentActivityCounts(${dept}): a table is not migrated yet; counting 0`);
-  };
+  // Every figure here is counted by when it was SUBMITTED (or re-filed), not by
+  // the report date typed on the bot. A report filed this morning for
+  // yesterday is today's activity: counted by its report date it fell outside
+  // "Daily" and the Brief said nothing had come in on a day full of
+  // submissions. `filedIn` also tolerates a table or column a migration has
+  // not added yet — one missing table blanks one figure, never the card.
+  const count = (tables: string[]) => Promise.all(tables.map((t) => filedIn(t, start, end)));
+  const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
 
   switch (dept) {
     case "production": {
-      // The tab is exactly two panels, so the card is exactly two numbers.
-      const [a] = await sql<{ production: string; whiteness: string }[]>`
-        select
-          (select count(*) from production_reports where date >= ${start} and date < ${end}) as production,
-          (select count(*) from whiteness_checks   where date >= ${start} and date < ${end}) as whiteness`.catch(
-        (e) => {
-          missing(e);
-          return [{ production: "0", whiteness: "0" }];
-        }
-      );
-      const production = Number(a.production) || 0;
-      const whiteness = Number(a.whiteness) || 0;
+      // The tab is exactly two panels, so the card is exactly two numbers; the
+      // badge counts everything production files.
+      const [production, whiteness, usage, downtime, hours] = await count([
+        "production_reports",
+        "whiteness_checks",
+        "pp_bag_usage",
+        "downtime_months",
+        "production_hours",
+      ]);
       return {
-        total: production + whiteness,
+        total: production + whiteness + usage + downtime + hours,
         headline: [
           { icon: "🏭", label: "Production reports", value: production },
           { icon: "⚪", label: "Whiteness checks", value: whiteness },
@@ -426,64 +421,25 @@ async function departmentActivityCounts(
     }
     case "asset_management": {
       // Four tiles, because this tab is four things and a card showing two of
-      // them describes a quarter of the department.
-      //
-      // "Raw material loads" used to head this card, counting
-      // `raw_material_receipts` — the per-TRUCK table that nothing has written
-      // since the daily raw-material report replaced it. The figure could only
-      // ever be stale or zero, and nobody could say what it was counting. It is
-      // gone from here; the rows stay readable under Settings → Submissions.
-      //
-      // Split in two queries on purpose: the second group of tables arrives in
-      // 0014, 0019, 0022 and 0033, and a database a migration behind must still
-      // show the counts it does have rather than an empty card.
-      const [[a], [b]] = await Promise.all([
-        sql<{ purchases: string; claims: string }[]>`
-          select
-            (select count(*) from purchase_requests where created_at >= ${start} and created_at < ${end}) as purchases,
-            (select count(*) from damage_claims     where created_at >= ${start} and created_at < ${end}) as claims`.catch(
-          (e) => {
-            missing(e);
-            return [{ purchases: "0", claims: "0" }];
-          }
-        ),
-        sql<{
-          raw: string;
-          grv: string;
-          bags: string;
-          siv: string;
-          usage: string;
-          damage: string;
-          stock: string;
-        }[]>`
-          select
-            (select count(*) from raw_material_daily      where date >= ${start} and date < ${end}) as raw,
-            (select count(*) from goods_receiving_vouchers where created_at >= ${start} and created_at < ${end}) as grv,
-            (select count(*) from pp_bag_purchases        where date >= ${start} and date < ${end}) as bags,
-            (select count(*) from store_issue_vouchers     where created_at >= ${start} and created_at < ${end}) as siv,
-            (select count(*) from pp_bag_usage             where date >= ${start} and date < ${end}) as usage,
-            (select count(*) from pp_bag_damage_reports    where date >= ${start} and date < ${end}) as damage,
-            (select count(*) from daily_ops_reports        where date >= ${start} and date < ${end}) as stock`.catch(
-          () => [{ raw: "0", grv: "0", bags: "0", siv: "0", usage: "0", damage: "0", stock: "0" }]
-        ),
+      // them describes a quarter of the department. The badge counts every
+      // form the store and asset roles file.
+      const [raw, grv, bags, siv, purchases, claims, damage, stock, counts, base] = await count([
+        "raw_material_daily",
+        "goods_receiving_vouchers",
+        "pp_bag_purchases",
+        "store_issue_vouchers",
+        "purchase_requests",
+        "damage_claims",
+        "pp_bag_damage_reports",
+        "daily_ops_reports",
+        "store_counts",
+        "monthly_base_balances",
       ]);
-      const purchases = Number(a.purchases) || 0;
-      const raw = Number(b.raw) || 0;
-      const siv = Number(b.siv) || 0;
       // Goods received is both ways they arrive: the voucher, and the PP bag
       // receiving form that took the bags off it.
-      const received = (Number(b.grv) || 0) + (Number(b.bags) || 0);
-      const total =
-        raw +
-        purchases +
-        received +
-        siv +
-        (Number(a.claims) || 0) +
-        (Number(b.usage) || 0) +
-        (Number(b.damage) || 0) +
-        (Number(b.stock) || 0);
+      const received = grv + bags;
       return {
-        total,
+        total: sum([raw, received, siv, purchases, claims, damage, stock, counts, base]),
         headline: [
           { icon: "🧱", label: "Raw material days", value: raw },
           { icon: "📥", label: "Goods received", value: received },
@@ -495,13 +451,13 @@ async function departmentActivityCounts(
     case "sales": {
       // Tonnage rather than a second count: the tab leads with the analytics,
       // and how much left the yard is the figure that tab is built around.
-      const [a] = await sql<{ sales: string; tons: string }[]>`
-        select count(*) as sales, coalesce(sum(qty), 0) as tons
-          from sales_invoices where date >= ${start} and date < ${end}`.catch((e) => {
-        missing(e);
-        return [{ sales: "0", tons: "0" }];
+      const [sales] = await count(["sales_invoices"]);
+      const [a] = await sql<{ tons: string }[]>`
+        select coalesce(sum(qty), 0) as tons
+          from sales_invoices where created_at >= ${start} and created_at < ${end}`.catch((e) => {
+        if ((e as { code?: string })?.code !== "42P01") throw e;
+        return [{ tons: "0" }];
       });
-      const sales = Number(a.sales) || 0;
       return {
         total: sales,
         headline: [
@@ -513,25 +469,24 @@ async function departmentActivityCounts(
     case "finance": {
       // The card shows what Finance watches — the credit book and this month's
       // report — in millions so a nine-digit birr figure fits a tile. The
-      // "updates" badge counts what Finance actually files now: credit
-      // collections, goods received and price lists.
-      const [credit, cash, worth, [a]] = await Promise.all([
+      // "updates" badge counts everything Finance files.
+      const [credit, cash, worth, filed] = await Promise.all([
         creditTotals(),
         cashSales(start, end),
         monthNetWorth(),
-        sql<{ payments: string; grv: string; prices: string }[]>`
-          select
-            (select count(*) from sales_credit_payments    where created_at >= ${start} and created_at < ${end}) as payments,
-            (select count(*) from goods_receiving_vouchers where date >= ${start} and date < ${end})             as grv,
-            (select count(*) from monthly_price_lists      where updated_at >= ${start} and updated_at < ${end}) as prices
-        `.catch((e) => {
-          missing(e);
-          return [{ payments: "0", grv: "0", prices: "0" }];
-        }),
+        count([
+          "sales_credit_payments",
+          "goods_receiving_vouchers",
+          "monthly_price_lists",
+          "wht_holders",
+          "raw_material_credits",
+          "raw_material_credit_payments",
+          "item_purchases",
+        ]),
       ]);
       const M = { suffix: " M", decimals: 2 } as const;
       return {
-        total: (Number(a.payments) || 0) + (Number(a.grv) || 0) + (Number(a.prices) || 0),
+        total: sum(filed),
         headline: [
           { icon: "💳", label: "Credit outstanding (ETB)", value: millions(credit.outstanding), ...M },
           { icon: "⏰", label: `Overdue · ${credit.overdueSales} sale${credit.overdueSales === 1 ? "" : "s"}`, value: millions(credit.overdue), ...M },
@@ -540,6 +495,33 @@ async function departmentActivityCounts(
         ],
       };
     }
+  }
+}
+
+/**
+ * Rows of one table submitted in the window — created, or re-filed (an upsert
+ * moves `updated_at`), in it. A table without `updated_at` is counted on
+ * `created_at` alone; one not migrated yet counts 0.
+ */
+async function filedIn(table: string, start: Date, end: Date): Promise<number> {
+  const code = (e: unknown) => (e as { code?: string })?.code;
+  try {
+    const [r] = await sql<{ n: string }[]>`
+      select count(*) as n from ${sql(table)}
+       where (created_at >= ${start} and created_at < ${end})
+          or (updated_at >= ${start} and updated_at < ${end})`;
+    return Number(r?.n) || 0;
+  } catch (e) {
+    if (code(e) === "42P01") return 0;
+    if (code(e) !== "42703") throw e;
+  }
+  try {
+    const [r] = await sql<{ n: string }[]>`
+      select count(*) as n from ${sql(table)} where created_at >= ${start} and created_at < ${end}`;
+    return Number(r?.n) || 0;
+  } catch (e) {
+    if (code(e) === "42P01" || code(e) === "42703") return 0;
+    throw e;
   }
 }
 

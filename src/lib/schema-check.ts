@@ -39,6 +39,11 @@ export const EXPECTED_COLUMNS: ExpectedColumn[] = [
   { table: "purchase_requests", column: "unit", migration: "0028_purchase_request_details.sql" },
   { table: "purchase_requests", column: "department", migration: "0028_purchase_request_details.sql" },
   { table: "purchase_requests", column: "notes", migration: "0028_purchase_request_details.sql" },
+  // Which machine or car; the people behind a raw material load (0043).
+  { table: "purchase_requests", column: "machine", migration: "0043_machines_rm_people.sql" },
+  { table: "store_issue_items", column: "machine", migration: "0043_machines_rm_people.sql" },
+  { table: "raw_material_credits", column: "driver_fee", migration: "0043_machines_rm_people.sql" },
+  { table: "raw_material_credit_payments", column: "part", migration: "0043_machines_rm_people.sql" },
 
   // Whiteness alarms (0032). Without it every re-save of a below-spec check
   // alerts every admin and HR user again, so its absence is loud rather than

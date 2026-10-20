@@ -55,6 +55,8 @@ interface Row {
   unit?: string | null;
   department?: string | null;
   notes?: string | null;
+  /** The machine or car it is for (0043); null for PP bags / oil. */
+  machine?: string | null;
   photoFileId: string | null;
   legitimacy: Legitimacy | null;
   status: string;
@@ -351,6 +353,7 @@ export default function ToolRequestsPanel() {
                   <th className="p-2 text-left font-bold">Date</th>
                   <th className="p-2 font-bold">Type</th>
                   <th className="p-2 text-left font-bold">Item</th>
+                  <th className="p-2 text-left font-bold">Machine</th>
                   <th className="p-2 font-bold">Qty</th>
                   <th className="p-2 font-bold">Asked before</th>
                   <th className="p-2 font-bold">AI check</th>
@@ -363,7 +366,7 @@ export default function ToolRequestsPanel() {
                   {/* The department heading replaces the old Dept column: the
                       same fact, stated once per block instead of on every row. */}
                   <tr className="border-t border-clay-100 bg-clay-50/60">
-                    <td colSpan={8} className="px-2 py-1.5 text-left">
+                    <td colSpan={9} className="px-2 py-1.5 text-left">
                       <span className="text-[11px] font-bold text-clay-800">
                         {purchaseDeptLabel(g.key === "unassigned" ? null : g.key)}
                       </span>
@@ -391,6 +394,9 @@ export default function ToolRequestsPanel() {
                           <KindBadge kind={r.kind} />
                         </td>
                         <td className="max-w-[220px] truncate p-2 text-left font-semibold text-stone-700">{r.title}</td>
+                        <td className="max-w-[140px] truncate p-2 text-left text-stone-600">
+                          {r.machine ? `🚜 ${r.machine}` : <span className="text-stone-300">PP bag / oil</span>}
+                        </td>
                         <td className="p-2 tabular-nums">
                           {r.quantity ?? ""}
                           {r.unit && <span className="ml-1 text-[10px] text-stone-400">{r.unit}</span>}
@@ -527,6 +533,7 @@ function RequestModal({
           )}
           {field("Reason", row.justification)}
           {field("Department", row.department ? purchaseDeptLabel(row.department) : null)}
+          {field("Machine", row.machine ? `🚜 ${row.machine}` : "PP bag / oil — no machine")}
           {field("Notes", row.notes)}
           {row.decidedBy && row.decidedAt
             ? field("Decision", `${row.status} by ${row.decidedBy} · ${fmtWhen(row.decidedAt)}`)

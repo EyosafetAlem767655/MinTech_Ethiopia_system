@@ -37,7 +37,7 @@ export const SIV_COUNT_STEP = "sivCount";
 /** The SIV's fill-in block: a header, then the numbered lines still to fill. */
 export function sivTemplate(count: number, have = 0): string {
   const n = Math.max(1, Math.min(MAX_GRV_LINES, Math.round(count) || 1));
-  const rows: string[] = ["Name | Description | Qty"];
+  const rows: string[] = ["Name | Description | Qty | Machine/car"];
   for (let i = have + 1; i <= n; i++) rows.push(`${i}. `);
   return rows.join("\n");
 }
@@ -66,6 +66,8 @@ export interface GrvLine {
    * then cleared so it is never converted twice.
    */
   inDrums?: boolean;
+  /** SIV only: the machine or car the item was taken for (0043). */
+  machine?: string;
 }
 
 export const grvLineKey = (n: number) => `gl:${n}`;
@@ -107,7 +109,7 @@ function toNumber(raw: string): number | null {
 }
 
 /** What one typed line says before matching. */
-export type TypedGrvLine = Pick<GrvLine, "name" | "desc" | "qty" | "cost" | "inDrums">;
+export type TypedGrvLine = Pick<GrvLine, "name" | "desc" | "qty" | "cost" | "inDrums" | "machine">;
 
 /**
  * Turn a quantity written in drums into the matched item's unit, when that
@@ -147,6 +149,13 @@ export function parseGrvLines(
     if (!line || /^[-—#>]/.test(line) || /^name\s*\|/i.test(line)) continue;
     const parts = line.split(/\s*[|\t]\s*|\s+-\s+/).map((p) => p.trim());
     while (parts.length && !parts[parts.length - 1]) parts.pop();
+    // An issue line may end with the machine or car it was taken for, after
+    // the quantity: "Ball bearing | 6210 | 2 | Crusher 1". Taken off first, so
+    // the quantity is the last field again for everything below.
+    let machine = "";
+    if (!withCost && parts.length >= 3 && toNumber(parts[parts.length - 1]) === null && toNumber(parts[parts.length - 2]) !== null) {
+      machine = parts.pop()!.replace(/\s+/g, " ");
+    }
     if (parts.length < 2) {
       bad.push(raw.trim());
       continue;
@@ -182,6 +191,7 @@ export function parseGrvLines(
       qty,
       cost: cost && cost > 0 ? cost : null,
       ...(inDrums ? { inDrums: true } : {}),
+      ...(machine ? { machine } : {}),
     });
   }
   return { lines, bad };
@@ -233,7 +243,8 @@ export function grvLineSummary(l: GrvLine, n: number, withCost = true): string {
   const target = item
     ? `→ ${esc(itemLabel(item))} <code>${esc(item.key)}</code>`
     : `→ 🆕 new · ${esc(GROUP_BY_KEY.get(l.group)?.label ?? l.group)} · ${l.unit}`;
-  return `${n}. ${typed}\n    ${target}`;
+  const machine = l.machine ? ` · 🚜 ${esc(l.machine)}` : "";
+  return `${n}. ${typed}${machine}\n    ${target}`;
 }
 
 /** Telegram's limit is 4096 characters a message; the card is split well under it. */

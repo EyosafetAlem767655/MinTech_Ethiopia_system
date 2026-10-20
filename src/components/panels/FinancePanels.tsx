@@ -74,6 +74,8 @@ export default function FinancePanels() {
 
 interface RmPayment {
   id: string;
+  /** Raw material or the driver's fee (0043). */
+  part?: "material" | "driver";
   amount: number;
   paidOn: string;
   note: string | null;
@@ -84,11 +86,17 @@ interface RmLoad {
   id: string;
   date: string;
   supplier: string;
+  quarryOwner?: string | null;
+  salesAgent?: string | null;
+  driverName?: string | null;
   truckPlate: string | null;
   material: string;
   tonnes: number;
   pricePerTonne: number;
   amount: number;
+  driverFee?: number;
+  materialLeft?: number;
+  driverLeft?: number;
   paid: number;
   remaining: number;
   status: "open" | "settled";
@@ -185,16 +193,17 @@ function RmCreditTab() {
             </label>
           </div>
           <div className="card overflow-x-auto p-0">
-            <table className="w-full min-w-[900px] text-right text-xs">
+            <table className="w-full min-w-[1100px] text-right text-xs">
               <thead className="bg-clay-50/70 text-[10px] uppercase tracking-wide text-stone-500">
                 <tr>
                   <th className="p-2 text-left font-bold">Date</th>
-                  <th className="p-2 text-left font-bold">Supplier</th>
+                  <th className="p-2 text-left font-bold">Quarry owner</th>
+                  <th className="p-2 text-left font-bold">Agent · Driver</th>
                   <th className="p-2 text-left font-bold">Truck</th>
                   <th className="p-2 text-left font-bold">Material</th>
                   <th className="p-2 font-bold">Tonnes</th>
-                  <th className="p-2 font-bold">Price / t</th>
-                  <th className="p-2 font-bold">Amount</th>
+                  <th className="p-2 font-bold">Raw material</th>
+                  <th className="p-2 font-bold">Driver fee</th>
                   <th className="p-2 font-bold">Paid</th>
                   <th className="p-2 font-bold">Owed</th>
                   <th className="p-2 text-left font-bold">Status</th>
@@ -203,7 +212,7 @@ function RmCreditTab() {
               <tbody>
                 {loads.length === 0 && (
                   <tr>
-                    <td colSpan={10} className="p-4 text-center text-stone-400">
+                    <td colSpan={11} className="p-4 text-center text-stone-400">
                       Every load is paid.
                     </td>
                   </tr>
@@ -216,15 +225,26 @@ function RmCreditTab() {
                       aria-expanded={openId === l.id}
                     >
                       <td className="p-2 text-left font-semibold text-stone-800">{fmtDate(l.date)}</td>
-                      <td className="p-2 text-left text-stone-700">{l.supplier}</td>
+                      <td className="p-2 text-left text-stone-700">{l.quarryOwner || l.supplier}</td>
+                      <td className="p-2 text-left text-[11px] text-stone-500">
+                        {l.salesAgent || "—"} · {l.driverName || "—"}
+                      </td>
                       <td className="p-2 text-left text-stone-500">{l.truckPlate || "—"}</td>
                       <td className="p-2 text-left text-stone-700">{l.material}</td>
                       <td className="p-2 tabular-nums text-stone-700">{fmt(l.tonnes, 3)}</td>
-                      <td className="p-2 tabular-nums text-stone-500">{fmt(l.pricePerTonne, 2)}</td>
-                      <td className="p-2 tabular-nums text-stone-800">{fmt(l.amount, 0)}</td>
+                      <td className="p-2 tabular-nums text-stone-800">
+                        {fmt(l.amount, 0)}
+                        <span className="block text-[10px] text-stone-400">{fmt(l.pricePerTonne, 2)} / t</span>
+                      </td>
+                      <td className="p-2 tabular-nums text-stone-700">{l.driverFee ? fmt(l.driverFee, 0) : "—"}</td>
                       <td className="p-2 tabular-nums text-green-700">{fmt(l.paid, 0)}</td>
                       <td className={`p-2 font-bold tabular-nums ${l.status === "open" ? "text-clay-900" : "text-stone-400"}`}>
                         {fmt(Math.max(0, l.remaining), 0)}
+                        {(l.driverFee ?? 0) > 0 && (
+                          <span className="block text-[10px] font-normal text-stone-500">
+                            material {fmt(Math.max(0, l.materialLeft ?? 0), 0)} · driver {fmt(Math.max(0, l.driverLeft ?? 0), 0)}
+                          </span>
+                        )}
                       </td>
                       <td className="p-2 text-left">
                         <span
@@ -239,14 +259,15 @@ function RmCreditTab() {
                     </tr>
                     {openId === l.id && (
                       <tr className="bg-clay-50/30">
-                        <td colSpan={10} className="p-3 text-left">
+                        <td colSpan={11} className="p-3 text-left">
                           {l.payments.length === 0 ? (
                             <p className="text-[11px] text-stone-500">No payment recorded yet.</p>
                           ) : (
                             <ul className="space-y-1 text-[11px] text-stone-600">
                               {l.payments.map((p) => (
                                 <li key={p.id}>
-                                  💸 {fmtDate(p.paidOn)} · <b className="tabular-nums">{fmt(p.amount, 0)} ETB</b> · {p.recordedBy}
+                                  💸 {fmtDate(p.paidOn)} · {p.part === "driver" ? "🧑‍✈️ driver" : "🧱 raw material"} ·{" "}
+                                  <b className="tabular-nums">{fmt(p.amount, 0)} ETB</b> · {p.recordedBy}
                                   {p.note ? <span className="text-stone-400"> — {p.note}</span> : null}
                                 </li>
                               ))}
@@ -1391,6 +1412,7 @@ interface ItemPurchase {
 
 interface RequestRow extends PurchaseRequestRef {
   department?: string | null;
+  machine?: string | null;
   status: string;
   requestedBy: string;
   createdAt: string;
@@ -1546,6 +1568,7 @@ function PurchaseStatusTab() {
                 <th className="p-2 text-left font-bold">Asked</th>
                 <th className="p-2 text-left font-bold">Item</th>
                 <th className="p-2 text-left font-bold">Department</th>
+                <th className="p-2 text-left font-bold">Machine</th>
                 <th className="p-2 font-bold">Qty</th>
                 <th className="p-2 text-left font-bold">By</th>
                 <th className="p-2 text-left font-bold">Status</th>
@@ -1560,6 +1583,9 @@ function PurchaseStatusTab() {
                     <td className="p-2 text-left font-semibold text-stone-800">{fmtDate(r.createdAt)}</td>
                     <td className="max-w-[220px] truncate p-2 text-left font-semibold text-stone-700">{r.title}</td>
                     <td className="p-2 text-left text-stone-500">{purchaseDeptLabel(r.department)}</td>
+                    <td className="max-w-[140px] truncate p-2 text-left text-stone-600">
+                      {r.machine ? `🚜 ${r.machine}` : <span className="text-stone-300">PP bag / oil</span>}
+                    </td>
                     <td className="p-2 tabular-nums text-stone-700">
                       {r.quantity ?? ""}
                       {r.unit && <span className="ml-1 text-[10px] text-stone-400">{r.unit}</span>}

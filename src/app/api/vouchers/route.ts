@@ -71,15 +71,28 @@ export async function GET() {
        limit 800
     `.catch(() => null),
     selectVoucher(SIV_SELECT + TG_COLUMN + SIV_TAIL, SIV_SELECT + SIV_TAIL),
+    // With the machine or car each item went to (0043); without it on a
+    // database that has not run that migration yet.
     sql<Record<string, unknown>[]>`
       select i.siv_id as "voucherId", i.position, i.stock_code as "stockCode", i.description,
              i.unit, i.quantity, i.unit_cost as "unitCost", i.total_amount as "totalAmount",
-             i.ledger_kind as "ledgerKind", i.ledger_key as "ledgerKey", i.ledger_qty as "ledgerQty"
+             i.ledger_kind as "ledgerKind", i.ledger_key as "ledgerKey", i.ledger_qty as "ledgerQty",
+             i.machine
         from store_issue_items i
         join store_issue_vouchers v on v.id = i.siv_id
        order by v.date desc, i.position
        limit 800
-    `.catch(() => null),
+    `.catch(() =>
+      sql<Record<string, unknown>[]>`
+        select i.siv_id as "voucherId", i.position, i.stock_code as "stockCode", i.description,
+               i.unit, i.quantity, i.unit_cost as "unitCost", i.total_amount as "totalAmount",
+               i.ledger_kind as "ledgerKind", i.ledger_key as "ledgerKey", i.ledger_qty as "ledgerQty"
+          from store_issue_items i
+          join store_issue_vouchers v on v.id = i.siv_id
+         order by v.date desc, i.position
+         limit 800
+      `.catch(() => null)
+    ),
   ]);
 
   // Every branch returns the SAME shape, including the one where both tables are

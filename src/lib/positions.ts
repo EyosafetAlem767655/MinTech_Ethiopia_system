@@ -226,14 +226,14 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
     button: "🚚 የጥሬ ዕቃ ብድር ግዢ",
     captureMode: "asset_entry",
     input: "any",
-    question: "🚚 በብድር የተገዛ የጥሬ ዕቃ ጭነት እንመዘግባለን — አቅራቢ፣ ታርጋ፣ ዓይነት፣ ቶን እና ዋጋ።",
+    question: "🚚 የገባውን የጥሬ ዕቃ ጭነት እንመዘግባለን — የቋራ ባለቤት፣ የሽያጭ ወኪል፣ ሹፌርና ታርጋ፣ ዓይነት፣ ቶን፣ ዋጋና የሹፌር ክፍያ።",
   },
   rm_credit_payment: {
     key: "rm_credit_payment",
-    button: "💸 የጥሬ ዕቃ ብድር ክፍያ",
+    button: "💸 የጥሬ ዕቃ credit ክፍያ",
     captureMode: "asset_entry",
     input: "any",
-    question: "💸 ለጥሬ ዕቃ አቅራቢ የተከፈለውን የብድር ክፍያ እንመዘግባለን።",
+    question: "💸 ያልተከፈሉ የጥሬ ዕቃና የሹፌር ክፍያዎች ዝርዝር ይመጣል — የተከፈለውን ይምረጡ።",
   },
   item_purchase: {
     key: "item_purchase",

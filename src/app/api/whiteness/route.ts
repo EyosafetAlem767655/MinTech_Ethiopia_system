@@ -28,7 +28,9 @@ export async function GET(req: NextRequest) {
              product_code as "productCode", line, readings, avg,
              reported_by as "reportedBy", created_at as "createdAt"
         from whiteness_checks
-       where date >= ${start}
+       -- Also what was SUBMITTED in the window, whatever day it is for: a
+       -- check filed today for yesterday belongs on today's board.
+       where date >= ${start} or created_at >= ${start}
        order by date desc, quarter desc, product_code, line
        limit 1000
     `;

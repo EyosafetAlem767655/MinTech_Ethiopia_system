@@ -14,6 +14,17 @@ export async function GET() {
   // before?" from these rows. A window that stops short of the last purchase of
   // a part would answer that question with a confident no.
   const shapes = [
+    // With the machine it is for (0043).
+    () => sql<Record<string, unknown>[]>`
+      select id as _id, title, quantity, kind, justification, amount,
+             description, unit, department, notes, machine,
+             coalesce(photo_file_id::text, tg_file_id) as "photoFileId", legitimacy, status,
+             decided_by as "decidedBy", decided_at as "decidedAt",
+             requested_by as "requestedBy", created_at as "createdAt"
+        from purchase_requests
+       order by created_at desc
+       limit 500
+    `,
     () => sql<Record<string, unknown>[]>`
       select id as _id, title, quantity, kind, justification, amount,
              description, unit, department, notes,
