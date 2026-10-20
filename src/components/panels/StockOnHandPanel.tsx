@@ -28,7 +28,6 @@ interface OpsRow {
   reportedBy: string;
   stock?: Record<string, number>;
   bags?: Partial<Record<BagSize, Record<string, number>>>;
-  createdAt?: string | null;
 }
 
 const fmtDate = (d: string) => new Date(d).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
@@ -92,10 +91,8 @@ export default function StockOnHandPanel() {
         // count, and letting one in would both print a blank line and — as the
         // latest row of its bucket — pull the closing level down to zero.
         if (!r.stock || Object.keys(r.stock).length === 0) return false;
-        // For a day in the window, or submitted in it.
         const t = new Date(r.date).getTime();
-        const filed = r.createdAt ? new Date(r.createdAt).getTime() : NaN;
-        return (t >= from && t < to) || (filed >= from && filed < to);
+        return t >= from && t < to;
       })
       .slice()
       .sort((a, b) => +new Date(b.date) - +new Date(a.date));

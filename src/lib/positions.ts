@@ -223,7 +223,7 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
   },
   rm_credit_purchase: {
     key: "rm_credit_purchase",
-    button: "🚚 የጥሬ ዕቃ ብድር ግዢ",
+    button: "🚚 የጥሬ ዕቃ Credit ግዢ",
     captureMode: "asset_entry",
     input: "any",
     question: "🚚 የገባውን የጥሬ ዕቃ ጭነት እንመዘግባለን — የቋራ ባለቤት፣ የሽያጭ ወኪል፣ ሹፌርና ታርጋ፣ ዓይነት፣ ቶን፣ ዋጋና የሹፌር ክፍያ።",

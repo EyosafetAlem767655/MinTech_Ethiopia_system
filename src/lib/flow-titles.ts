@@ -63,7 +63,7 @@ export const FLOW_TITLE: Record<AssetFlowKind, string> = {
   bank_collection: "🏦 የወሩ የባንክ ገቢ",
   price_list: "💲 የወሩ unit price ዝርዝር",
   pp_bag_price: "🧺 PP Bag unit price update",
-  rm_credit_purchase: "🚚 የጥሬ ዕቃ ብድር ግዢ",
+  rm_credit_purchase: "🚚 የጥሬ ዕቃ Credit ግዢ",
   rm_credit_payment: "💸 የጥሬ ዕቃ credit ክፍያ",
   item_purchase: "🛍 የዕቃ ግዢ",
   wht_holder: "📄 WHT ደረሰኝ ያዢ",

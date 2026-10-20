@@ -96,7 +96,7 @@ import {
   tickedStoreItems,
 } from "@/lib/store-voucher";
 import { costsAt } from "@/lib/store-costs";
-import { applySalesExtraction, parseSalesPaste, salesMissing } from "@/lib/sales-invoice";
+import { SALES_KEYS, applySalesExtraction, parseSalesPaste, salesEditBlock, salesMissing } from "@/lib/sales-invoice";
 import { applyFlowEdit, describeFlowChanges, editableFields, renderFieldList } from "@/lib/flow-edit";
 import { dailyHeartbeat } from "@/lib/heartbeat";
 import { loadImage, loadImages, telegramFileId } from "@/lib/images";
@@ -196,6 +196,7 @@ const CAP_BY_LABEL = new Map<string, Capability>([
   ...Object.values(CAPABILITIES).map((c) => [normaliseChoice(c.button), c] as const),
   // The button's old name, so a keyboard sent before the rename still works.
   [normaliseChoice("💸 የጥሬ ዕቃ ብድር ክፍያ"), CAPABILITIES.rm_credit_payment] as const,
+  [normaliseChoice("🚚 የጥሬ ዕቃ ብድር ግዢ"), CAPABILITIES.rm_credit_purchase] as const,
 ]);
 const HR_KIND_BY_LABEL = new Map<string, HrKind>(
   (Object.keys(HR_KINDS) as HrKind[]).map((k) => [normaliseChoice(HR_KINDS[k].button), k])
@@ -2287,6 +2288,24 @@ export async function POST(req: NextRequest) {
         // is offered, including the voucher line items the review card only
         // summarises — a curated list of "the editable ones" is the thing this
         // replaces.
+        if (normText === NORM_RECEIPT.edit && state.kind === "sales_invoice") {
+          // The sales report is corrected by copy and paste: the whole sale
+          // as one block, edited and sent back, read by the same parser as the
+          // fill-in block — no AI guessing which field was meant.
+          state.step = "paste";
+          session.assetFlow = { ...state };
+          await persist(session);
+          await sendMessage(
+            chatId,
+            "✏️ ከታች ያለውን ሙሉ ሪፖርት ይቅዱ (ይንኩት)፣ የሚስተካከለውን ያስተካክሉ፣ ከዚያ መልሰው ይላኩት።\n" +
+              "<i>Tap the block to copy it, correct what is wrong, and send it back.</i>"
+          );
+          await sendMessage(chatId, `<pre>${escapeHtml(salesEditBlock(state.draft))}</pre>`, {
+            reply_markup: CHANGE_CANCEL_KEYBOARD,
+          });
+          return NextResponse.json({ ok: true });
+        }
+
         if (normText === NORM_RECEIPT.edit) {
           const fields = editableFields(state.kind, state.draft);
           if (fields.length === 0) {
@@ -2896,6 +2915,13 @@ export async function POST(req: NextRequest) {
             { reply_markup: CHANGE_CANCEL_KEYBOARD }
           );
           return NextResponse.json({ ok: true });
+        }
+        // A sale whose bank line was sent again: the old per-bank amounts and
+        // "Other" name go first, so a changed bank leaves nothing stale behind.
+        if (state.kind === "sales_invoice" && parsed.values[SALES_KEYS.bank] !== undefined) {
+          for (const k of Object.keys(state.draft)) {
+            if (k.startsWith("bankAmt:") || k === SALES_KEYS.bankOther) delete state.draft[k];
+          }
         }
         Object.assign(state.draft, parsed.values);
 

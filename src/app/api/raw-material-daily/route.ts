@@ -21,9 +21,7 @@ export async function GET(req: Request) {
     select id as _id, date, date_label as "dateLabel", received, issued, stock,
            reported_by as "reportedBy", created_at as "createdAt"
       from raw_material_daily
-     -- Also what was SUBMITTED (or re-filed) in the window: a day filed this
-     -- morning for yesterday belongs on today's board.
-     where date >= ${start} or created_at >= ${start} or updated_at >= ${start}
+     where date >= ${start}
      order by date desc
      limit 500
   `.catch((e) => {

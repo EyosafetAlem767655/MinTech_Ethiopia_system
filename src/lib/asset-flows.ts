@@ -7,7 +7,6 @@ import {
   BAG_STOCK,
   DELIVERY_PRODUCTS,
   FINANCE_RAW_MATERIALS,
-  RAW_MATERIALS,
   PRODUCT_ORDER,
   PRODUCTION_PRODUCTS,
   bagLabel,
@@ -1137,16 +1136,17 @@ const paidNow = (d: Record<string, string | number>, part: "material" | "driver"
 
 const RM_CREDIT_PURCHASE_STEPS: AssetStep[] = [
   { id: "date", prompt: "📅 ጭነቱ የገባበትን ቀን ይምረጡ።", type: "date" },
-  { id: "quarryOwner", label: "Quarry owner", prompt: "⛰ የቋራው ባለቤት (Quarry owner) ማን ነው?", type: "text" },
+  { id: "quarryOwner", label: "Quarry owner", prompt: "Quarry owner ስም ማን ነው?", type: "text" },
   { id: "salesAgent", label: "Sales agent", prompt: "🤝 የሽያጭ ወኪሉ (Sales agent) ማን ነው?", type: "text", skippable: true },
   { id: "driverName", label: "Driver", prompt: "🧑‍✈️ ሹፌሩ ማን ነው?", type: "text" },
   { id: "truckPlate", label: "Truck plate", prompt: "🚚 የመኪናውን ታርጋ ቁጥር ይፃፉ።", type: "text" },
+  // The three materials bought on credit (0044).
   {
     id: "material",
     label: "Material",
     prompt: "🧱 የትኛው ጥሬ ዕቃ ነው?",
     type: "choice",
-    choices: RAW_MATERIALS.map((m) => ({ label: m, value: m })),
+    choices: FINANCE_RAW_MATERIALS.map((m) => ({ label: m, value: m })),
   },
   { id: "tonnes", label: "Tonnes", prompt: "⚖️ ስንት ቶን ገባ?", type: "number" },
   { id: "materialTotal", label: "Raw material total", prompt: "💰 የጥሬ ዕቃው ጠቅላላ ዋጋ ስንት ብር ነው?", type: "number" },
@@ -2537,7 +2537,7 @@ export async function saveAssetReport(
     const fee = Math.round((Number(d.driverFee) || 0) * 100) / 100;
     if (!(tonnes > 0)) throw new Error("A load has to be more than zero tonnes.");
     const material = String(d.material || "");
-    if (!(RAW_MATERIALS as readonly string[]).includes(material)) throw new Error("Pick the raw material from the list.");
+    if (!(FINANCE_RAW_MATERIALS as readonly string[]).includes(material)) throw new Error("Pick the raw material from the list.");
     const owner = String(d.quarryOwner || "").trim();
     if (!owner) throw new Error("Name the quarry owner.");
     const paidM = paidNow(d, "material") ? Math.round((Number(d.paidMaterial) || 0) * 100) / 100 : 0;

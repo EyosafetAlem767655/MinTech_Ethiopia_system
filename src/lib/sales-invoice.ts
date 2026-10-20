@@ -95,7 +95,9 @@ export function salesTin(draft: Record<string, string | number>): string | null 
 export function normaliseTin(raw: string): { ok: true; value: string } | { ok: false; error: string } {
   const t = String(raw || "").trim();
   if (/^(-+|none|no|n\/a|የለም)$/i.test(t)) return { ok: true, value: "none" };
-  const digits = t.replace(/[\s\-.]/g, "");
+  // Every non-digit goes: "TIN: 0012345678", "0012-345-678" and "No. 0012345678"
+  // are all the same ten digits as printed.
+  const digits = t.replace(/\D/g, "");
   if (/^\d{10}$/.test(digits)) return { ok: true, value: digits };
   return { ok: false, error: '⚠️ TIN 10 አሃዝ መሆን አለበት (ለምሳሌ 0012345678)። ከሌለ "-" ይላኩ።' };
 }
@@ -145,6 +147,35 @@ export function salesTemplate(draft: Record<string, string | number> = {}): stri
     for (const b of salesBanksTicked(draft)) {
       if (!answered(draft, salesBankAmountKey(b))) lines.push(`${bankAmountLabel(b)}=`);
     }
+  }
+  return lines.join("\n");
+}
+
+/**
+ * The WHOLE sale as one copyable block — the ✏️ correction on the sales report.
+ *
+ * Every line filled with what is on the card, in the same `Label=value` shape
+ * as the fill-in block, so `parseSalesPaste` reads the corrected copy back. No
+ * AI interprets the correction: what is sent back is what is saved.
+ */
+export function salesEditBlock(draft: Record<string, string | number>): string {
+  const v = (key: string) => {
+    const x = draft[key];
+    return x === undefined || x === null ? "" : String(x);
+  };
+  const tin = v(SALES_KEYS.tin);
+  const banks = salesBanksTicked(draft).map((b) => bankName(draft, b));
+  const lines: string[] = [
+    `${L_CUSTOMER}=${v(SALES_KEYS.customer)}`,
+    `${L_CASH}=${v(SALES_KEYS.invoiceCash)}`,
+    `${L_CREDIT}=${v(SALES_KEYS.invoiceCredit)}`,
+    `${L_TIN}=${tin === "none" ? "-" : tin}`,
+    H_BRANDS,
+    ...DELIVERY_PRODUCTS.map((code) => `${productLabel(code)}=${v(salesProductKey(code))}`),
+    `${L_BANK}=${banks.join(", ")}`,
+  ];
+  if (needsBankAmounts(draft)) {
+    for (const b of salesBanksTicked(draft)) lines.push(`${bankAmountLabel(b)}=${v(salesBankAmountKey(b))}`);
   }
   return lines.join("\n");
 }

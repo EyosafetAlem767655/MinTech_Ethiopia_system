@@ -1168,8 +1168,8 @@ const SALES_INVOICE_SYSTEM =
   'Return exactly: { "customer": string (the buyer / "Deliver to" name as printed), ' +
   '"invoiceCash": number (ETB invoiced and paid in cash; 0 if this was a credit sale), ' +
   '"invoiceCredit": number (ETB invoiced on credit / to be paid later; 0 if paid in cash), ' +
-  '"tin": string (the BUYER\'s TIN — Tax Identification Number, 10 digits, as printed for the customer; ' +
-  'NOT the seller\'s own TIN; "" if none), ' +
+  '"tin": string (the BUYER\'s TIN — Tax Identification Number — as a STRING of its 10 digits with any ' +
+  'leading zeros kept, e.g. "0012345678"; "" if none), ' +
   '"products": { "<code>": number } (tonnes sold per product, keyed by CODE), ' +
   '"banks": [ { "bank": string, "amount": number } ] (ONE entry per bank deposit slip or payment line — ' +
   'a sale can be paid into several banks; amount is the ETB on that slip; [] if none), ' +
@@ -1180,6 +1180,10 @@ const SALES_INVOICE_SYSTEM =
   "bags must be converted ONLY if the document itself states the weight; otherwise report the tonnes " +
   "as printed.\n" +
   `Banks, exactly as printed on the slip; the system matches them onto this list itself: ${BANKS.join(", ")}.\n` +
+  "The buyer's TIN is printed in the CUSTOMER / BUYER section, usually beside or under the customer's " +
+  'name, labelled "Customer TIN", "Buyer\'s TIN", "TIN No.", "TIN", "Tax ID", "VAT Reg. No." or in Amharic ' +
+  '"የግብር ከፋይ መለያ ቁጥር" / "ቲን". The SELLER\'s own TIN is in the header near the company name and logo — never ' +
+  "return that one. Look on every image for it; a handwritten TIN counts.\n" +
   "Decide cash vs credit from the document: a cash sales invoice / cash receipt is cash; an invoice " +
   "marked credit, on account, or unpaid is credit. If the paperwork does not say, put the grand total " +
   "in invoiceCash and say so in notes.\n" +
@@ -1241,7 +1245,12 @@ export async function extractSalesInvoice(
         customer: String(p.customer || "").trim(),
         invoiceCash: receiptNum(p.invoiceCash),
         invoiceCredit: receiptNum(p.invoiceCredit),
-        tin: String(p.tin || "").trim(),
+        // A TIN answered as a NUMBER has lost its leading zeros on the way
+        // through JSON ("0012345678" → 12345678); they are put back.
+        tin:
+          typeof p.tin === "number" && Number.isInteger(p.tin) && String(p.tin).length < 10
+            ? String(p.tin).padStart(10, "0")
+            : String(p.tin || "").trim(),
         products,
         banks: (Array.isArray(p.banks) ? p.banks : p.bank ? [{ bank: p.bank, amount: 0 }] : [])
           .map((b: unknown) => {
