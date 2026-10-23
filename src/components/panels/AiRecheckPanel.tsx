@@ -1,5 +1,7 @@
 "use client";
 
+import { useCanEdit } from "@/lib/use-role";
+
 import { useCallback, useEffect, useState } from "react";
 
 /**
@@ -28,6 +30,7 @@ const when = (at: string | null) =>
   at ? new Date(at).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "—";
 
 export default function AiRecheckPanel() {
+  const canEdit = useCanEdit();
   const [rows, setRows] = useState<Pending[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [done, setDone] = useState<Record<string, string>>({});
@@ -104,14 +107,14 @@ export default function AiRecheckPanel() {
             These submissions are saved and counted — only the photo verdict is missing.
           </p>
         </div>
-        <button
+        {canEdit && <button
           type="button"
           onClick={runAll}
           disabled={busy !== null}
           className="rounded-full bg-clay-700 px-3 py-1.5 text-[11px] font-bold text-white transition hover:bg-clay-800 disabled:opacity-50"
         >
           {busy ? "Checking…" : `Re-run all ${rows.length}`}
-        </button>
+        </button>}
       </div>
 
       {error && <p className="rounded-xl bg-red-50 px-3 py-2 text-[11px] text-red-700">{error}</p>}
@@ -125,14 +128,14 @@ export default function AiRecheckPanel() {
                 {p.by} · {when(p.at)} · {p.reason}
               </p>
             </div>
-            <button
+            {canEdit && <button
               type="button"
               onClick={() => run(p)}
               disabled={busy !== null}
               className="shrink-0 rounded-full border border-clay-200 px-2.5 py-1 text-[11px] font-bold text-clay-800 transition hover:bg-clay-50 disabled:opacity-50"
             >
               {busy === p.id ? "Checking…" : "Re-run"}
-            </button>
+            </button>}
           </li>
         ))}
       </ul>

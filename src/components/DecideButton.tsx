@@ -1,5 +1,7 @@
 "use client";
 
+import { useCanEdit } from "@/lib/use-role";
+
 /**
  * The review button used by every panel that carries a human decision — PP bag
  * damage, damage claims and tool purchase requests.
@@ -31,6 +33,10 @@ export default function DecideBtn({
   title?: string;
   onClick: () => void;
 }) {
+  // Every one of these records a decision or a figure: a view-only (HR)
+  // account is not offered them. The server refuses them anyway.
+  const canEdit = useCanEdit();
+  if (!canEdit) return null;
   return (
     <button
       type="button"

@@ -48,8 +48,22 @@ export async function createSession(input: {
   label: string;
   userAgent: string;
   ip: string;
+  /** The personal account signing in (0045); absent for the Super Admin. */
+  userId?: string;
+  role?: string;
 }): Promise<string> {
   await ensureWebSessionsTable();
+  if (input.userId) {
+    // A personal account's device is tied to it, so revoking the account
+    // revokes the device too.
+    const rows = await sql<{ id: string }[]>`
+      insert into web_sessions (token, label, user_agent, ip, user_id, role)
+      values (${generateSessionToken()}, ${input.label}, ${input.userAgent}, ${input.ip},
+              ${input.userId}::uuid, ${input.role ?? null})
+      returning id
+    `;
+    return rows[0].id;
+  }
   const rows = await sql<{ id: string }[]>`
     insert into web_sessions (token, label, user_agent, ip)
     values (${generateSessionToken()}, ${input.label}, ${input.userAgent}, ${input.ip})

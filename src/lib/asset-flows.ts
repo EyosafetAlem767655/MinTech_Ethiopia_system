@@ -1,7 +1,9 @@
 import sql from "@/lib/sql";
 import {
+  BAG_COMPANIES,
   BAG_KINDS,
   BAG_KIND_KEYS,
+  BASE_BAG_KINDS,
   BAG_SIZES,
   BAG_SIZE_LABEL,
   BAG_STOCK,
@@ -9,6 +11,8 @@ import {
   FINANCE_RAW_MATERIALS,
   PRODUCT_ORDER,
   PRODUCTION_PRODUCTS,
+  bagBaseLabel,
+  bagCompanyName,
   bagLabel,
   bagLedgerKey,
   ledgerLabel,
@@ -55,6 +59,7 @@ import {
   MAX_GRV_LINES,
 } from "@/lib/grv-lines";
 import { NO_MACHINE, decodeMachines } from "@/lib/machines";
+import { addBagCompany } from "@/lib/bag-companies";
 import { createCustomItems } from "@/lib/store-custom";
 import { eatDateLabel } from "@/lib/dates";
 import { chosenCustomerName, chosenInvoice, customerChoices, invoiceChoices, invoicesFor } from "@/lib/credit-bot";
@@ -104,7 +109,7 @@ import {
   itemsOfGroup,
   type StoreBlockKey,
 } from "@/lib/store-items";
-import { itemKey, storeGroupTemplate } from "@/lib/store-count-paste";
+import { itemKey, storeGroupTemplate, templateName } from "@/lib/store-count-paste";
 import {
   STORE_DEPTS_STEP,
   STORE_QTY_STEP,
@@ -498,6 +503,36 @@ const TOOL_REQUEST_STEPS: AssetStep[] = [
   { id: "notes", label: "Notes", prompt: "🗒 ተጨማሪ ማስታወሻ ካለ ይፃፉ።", type: "text", skippable: true },
 ];
 
+/**
+ * The PP bags in stock, by company — what the usage and damage forms offer.
+ *
+ * Read from the stock check when the flow opens (the webhook seeds it, like
+ * the credit lists), so a bag that is not on hand cannot be chosen. Each
+ * button names the company and how many are there. With nothing seeded — a
+ * database with no counts yet — every kind is offered rather than none.
+ */
+export const BAG_STOCK_KEY = "_bagStock";
+
+export interface InStockBag {
+  key: string;
+  label: string;
+  qty: number;
+}
+
+function inStockBagChoices(d: Record<string, string | number>): { label: string; value: string }[] {
+  let list: InStockBag[] = [];
+  try {
+    const raw = d[BAG_STOCK_KEY];
+    list = typeof raw === "string" && raw ? (JSON.parse(raw) as InStockBag[]) : [];
+  } catch {
+    list = [];
+  }
+  if (list.length > 0) {
+    return list.map((b) => ({ label: `${b.label} (${b.qty.toLocaleString("en-US")})`, value: b.key }));
+  }
+  return BAG_KINDS.map(({ size, colour }) => ({ label: bagLabel(size, colour), value: bagLedgerKey(size, colour) }));
+}
+
 /** Piles one damage report can carry. The report is weekly, so several. */
 export const MAX_DAMAGE_PILES = 6;
 
@@ -538,12 +573,10 @@ const PP_BAG_DAMAGE_STEPS: AssetStep[] = [
       },
       {
         id: k.kind,
-        prompt: `🧺 ክምር ${i} — የትኛው ከረጢት ነው?`,
+        prompt: `🧺 ክምር ${i} — የትኛው ከረጢት ነው? (ኩባንያውን ጨምሮ — ያሉት ብቻ)`,
         type: "choice",
-        choices: BAG_KINDS.map(({ size, colour }) => ({
-          label: `${bagLabel(size, colour)} PP`,
-          value: bagLedgerKey(size, colour),
-        })),
+        // Only the bags in stock, each with its company.
+        choicesFrom: inStockBagChoices,
         when: asked,
       },
       {
@@ -1002,12 +1035,10 @@ const PP_BAG_USED_STEPS: AssetStep[] = [
       {
         id: k.kind,
         label: `ዕቃ ${i} · ከረጢት`,
-        prompt: `🧺 ዕቃ ${i} — የትኛው ከረጢት ዋለ?`,
+        prompt: `🧺 ዕቃ ${i} — የትኛው ከረጢት ዋለ? (ኩባንያውን ጨምሮ — ያሉት ብቻ)`,
         type: "choice",
-        choices: BAG_KINDS.map(({ size, colour }) => ({
-          label: `${bagLabel(size, colour)} PP`,
-          value: bagLedgerKey(size, colour),
-        })),
+        // Only the bags in stock, each with its company.
+        choicesFrom: inStockBagChoices,
         when: asked,
       },
       {
@@ -1287,6 +1318,71 @@ const ITEM_PURCHASE_STEPS: AssetStep[] = [
   { id: "note", label: "Note", prompt: "🗒 ማስታወሻ ካለ ይፃፉ (አቅራቢ፣ ደረሰኝ ቁጥር…)።", type: "text", skippable: true },
 ];
 
+/* ───────────────────── Stationery items issue voucher ────────────────────── */
+
+/**
+ * Stationery taken out of the store, by the one person who issues it.
+ *
+ * Date → tick the items (the stationery group, two to a row) → how many of
+ * each → who took it → the paper voucher's number. Saved as a store issue
+ * voucher, so the balance goes down exactly as any SIV moves it. Stationery
+ * comes IN on the ordinary GRV.
+ */
+export const STAT_GROUP = "stat";
+export const STAT_ITEMS_STEP = "statItems";
+const MAX_STAT_ITEMS = 150;
+export const statQtyStep = (i: number) => `statQty_${i}`;
+
+/** The stationery items, in list order (GRV additions last). */
+export function stationeryItems(): StoreItem[] {
+  return allStoreItems().filter((i) => i.group === STAT_GROUP);
+}
+
+/** The ticked items, as indexes into `stationeryItems()`. */
+function statTicked(d: Record<string, string | number>): number[] {
+  return ticked(d, STAT_ITEMS_STEP)
+    .map(Number)
+    .filter((n) => Number.isInteger(n) && n >= 0);
+}
+
+const STATIONERY_ISSUE_STEPS: AssetStep[] = [
+  { id: "date", prompt: "📅 ዕቃዎቹ የወጡበትን ቀን ይምረጡ።", type: "date" },
+  {
+    id: STAT_ITEMS_STEP,
+    label: "Items",
+    prompt: "📎 የሚወጡትን ዕቃዎች ይንኩ (ብዙ መምረጥ ይቻላል)፣ ከዚያ ✅ ጨርሻለሁ ይጫኑ።",
+    type: "multichoice",
+    columns: 2,
+    // A getter: an item a GRV adds to the group is listed when the step is shown.
+    get choices() {
+      return stationeryItems().map((it, i) => ({ label: templateName(it), value: String(i) }));
+    },
+  },
+  ...Array.from({ length: MAX_STAT_ITEMS }, (_, i): AssetStep => ({
+    id: statQtyStep(i),
+    get label() {
+      return `${stationeryItems()[i]?.name ?? `Item ${i + 1}`} — qty`;
+    },
+    get prompt() {
+      const it = stationeryItems()[i];
+      return `🔢 <b>${it ? it.name : `Item ${i + 1}`}</b> — ስንት ${it?.unit ?? ""} ወጣ?`;
+    },
+    type: "number",
+    when: (d) => statTicked(d).includes(i),
+  })),
+  { id: "receivedBy", label: "Received by", prompt: "🧑 የተረከበው (Received by) ማን ነው?", type: "text" },
+  { id: "voucherNo", label: "Voucher No.", prompt: "🔢 የቫውቸሩን ቁጥር ይፃፉ። ከሌለ \"-\" ይላኩ።", type: "text", skippable: true },
+];
+
+/** The lines of a stationery issue: each ticked item with the quantity given. */
+function stationeryLines(d: Record<string, string | number>): { item: StoreItem; qty: number }[] {
+  const items = stationeryItems();
+  return statTicked(d)
+    .sort((a, b) => a - b)
+    .map((i) => ({ item: items[i], qty: Number(d[statQtyStep(i)]) || 0 }))
+    .filter((l) => l.item && l.qty > 0);
+}
+
 /* ───────────────────── Downtime, monthly (production) ────────────────────── */
 
 /**
@@ -1349,8 +1445,39 @@ const DOWNTIME_STEPS: AssetStep[] = [
  * exist: the opening balance, the daily usage report (used), and the PP Bag
  * count block of the daily production report (counted on the floor).
  */
+/** The company step's answer for Great Wall (a choice value cannot be ""). */
+const GREAT_WALL = "great-wall";
+export const BAG_COMPANY_OTHER = "other";
+
+/** The company a delivery is from: "" for Great Wall, a key otherwise, null if "Other" not yet named. */
+export function chosenBagCompany(d: Record<string, string | number>): string | null {
+  const v = String(d.bagCompany || "");
+  if (!v || v === GREAT_WALL) return "";
+  if (v === BAG_COMPANY_OTHER) return null;
+  return v;
+}
+
 const PP_BAG_RECEIPT_STEPS: AssetStep[] = [
   { id: "date", prompt: "📅 ከረጢቶቹ የገቡበትን ቀን ይምረጡ።", type: "date" },
+  // Which company made them: the stock, the price and the stock check are
+  // all kept per company.
+  {
+    id: "bagCompany",
+    label: "Company",
+    prompt: "🏭 የPP ከረጢቱ አምራች ኩባንያ የትኛው ነው?",
+    type: "choice",
+    choicesFrom: () => [
+      ...BAG_COMPANIES.map((c) => ({ label: `🏭 ${c.name}`, value: c.key || GREAT_WALL })),
+      { label: "➕ ሌላ (Other)", value: BAG_COMPANY_OTHER },
+    ],
+  },
+  {
+    id: "bagCompanyOther",
+    label: "Company name",
+    prompt: "🏭 የኩባንያውን ስም ይፃፉ።",
+    type: "text",
+    when: (d) => d.bagCompany === BAG_COMPANY_OTHER,
+  },
   {
     id: "paste",
     prompt:
@@ -1584,6 +1711,7 @@ const STEPS: Record<AssetFlowKind, AssetStep[]> = {
   rm_credit_purchase: RM_CREDIT_PURCHASE_STEPS,
   rm_credit_payment: RM_CREDIT_PAYMENT_STEPS,
   item_purchase: ITEM_PURCHASE_STEPS,
+  stationery_issue: STATIONERY_ISSUE_STEPS,
   wht_holder: WHT_HOLDER_STEPS,
   sales_invoice: SALES_INVOICE_STEPS,
 };
@@ -1829,13 +1957,10 @@ export function productionTotal(draft: Record<string, string | number>): number 
 /** The stock count as `daily_ops_reports.bags` stores it: { kg25: {…}, kg40: {…} }. */
 function bagMap(draft: Record<string, string | number>): Record<string, Record<string, number>> {
   const out: Record<string, Record<string, number>> = {};
-  for (const size of BAG_SIZES) {
-    const inner: Record<string, number> = {};
-    for (const colour of BAG_STOCK[size]) {
-      const v = Number(draft[bagKey(size as BagSize, colour)]) || 0;
-      if (v !== 0) inner[colour] = v;
-    }
-    if (Object.keys(inner).length > 0) out[size] = inner;
+  // Every company's kinds: the count is kept per manufacturer.
+  for (const { size, colour } of BAG_KINDS) {
+    const v = Number(draft[bagKey(size, colour)]) || 0;
+    if (v !== 0) out[size] = { ...(out[size] || {}), [colour]: v };
   }
   return out;
 }
@@ -1939,15 +2064,17 @@ export function assetPreview(state: AssetFlowState): string {
   }
 
   if (state.kind === "pp_bag_receipt") {
-    const lines = BAG_KINDS.map(({ size, colour }) => {
+    const lines = BASE_BAG_KINDS.map(({ size, colour }) => {
       const v = d[ppBagKey(size, colour)];
       // A kind with no figure is shown as a dash, not as 0: none of that colour
       // arrived, which is different from a delivery of none.
-      return `  • ${bagLabel(size, colour)}: ${v === undefined || v === "" ? "—" : qty(Number(v))}`;
+      return `  • ${bagBaseLabel(size, colour)}: ${v === undefined || v === "" ? "—" : qty(Number(v))}`;
     }).join("\n");
+    const company = chosenBagCompany(d);
     return (
       head +
-      `📅 Date: ${esc(d.date)}\n\n` +
+      `📅 Date: ${esc(d.date)}\n` +
+      `🏭 ኩባንያ: <b>${esc(company === null ? String(d.bagCompanyOther || "") : bagCompanyName(company))}</b>\n\n` +
       `🧺 <b>የገቡ ከረጢቶች (ቁጥር)</b>\n${lines}\n` +
       `  ─────────\n  <b>ጠቅላላ: ${qty(ppBagTotal(d))}</b>\n`
     );
@@ -1993,9 +2120,7 @@ export function assetPreview(state: AssetFlowState): string {
       (a, c) => a + (Number(d[`${DELIVERED_PREFIX}${c}`]) || 0),
       0
     );
-    const bags = BAG_SIZES.flatMap((size) =>
-      BAG_STOCK[size].map((colour) => cell(bagKey(size, colour), bagLabel(size, colour)))
-    ).join("\n");
+    const bags = BAG_KINDS.map(({ size, colour }) => cell(bagKey(size, colour), bagLabel(size, colour))).join("\n");
 
     return (
       head +
@@ -2261,6 +2386,19 @@ export function assetPreview(state: AssetFlowState): string {
       `🧑‍✈️ ሹፌር: <b>${money(fee)}</b> · ተከፈለ ${money(paidD)} · ቀሪ <b>${money(fee - paidD)}</b> ብር\n` +
       `💳 በብድር የሚቀር: <b>${money(total - paidM + fee - paidD)} ብር</b>\n` +
       `🗒 ማስታወሻ: ${esc(d.note) || "—"}\n`
+    );
+  }
+
+  if (state.kind === "stationery_issue") {
+    const lines = stationeryLines(d);
+    return (
+      head +
+      `📅 Date: ${esc(d.date)}\n` +
+      (lines.length
+        ? lines.map((l, n) => `${n + 1}. ${esc(l.item.name)} — <b>${qty(l.qty)}</b> ${esc(l.item.unit)}`).join("\n")
+        : "⚠️ ምንም ዕቃ አልተመረጠም።") +
+      `\n🧑 የተረከበው: <b>${esc(d.receivedBy) || "—"}</b>\n` +
+      `🔢 ቫውቸር: ${esc(d.voucherNo) || "—"}\n`
     );
   }
 
@@ -2568,6 +2706,34 @@ export async function saveAssetReport(
     return { id, table: "raw_material_credits" };
   }
 
+  if (state.kind === "stationery_issue") {
+    // Saved as a store issue voucher: the same header, lines and transaction,
+    // every line already pointing at its stationery item.
+    const lines = stationeryLines(d);
+    if (lines.length === 0) throw new Error("Pick at least one item and give how many were taken.");
+    const siv: Record<string, string | number> = {
+      date: d.date,
+      sivNo: String(d.voucherNo || ""),
+      departmentSection: "Stationery",
+      receivedBy: String(d.receivedBy || ""),
+      [GRV_MATCH_STEP]: GRV_MATCH_OK,
+    };
+    setGrvLines(
+      siv,
+      lines.map((l) => ({
+        name: l.item.name,
+        desc: "",
+        qty: l.qty,
+        cost: null,
+        match: l.item.key,
+        group: l.item.group,
+        unit: l.item.unit,
+        how: "manual" as const,
+      }))
+    );
+    return saveAssetReport({ ...state, kind: "store_issue", draft: siv }, reportedBy);
+  }
+
   if (state.kind === "item_purchase") {
     const key = purchaseItemKey(d);
     const basis = priceBasisFor(d.unit);
@@ -2699,9 +2865,13 @@ export async function saveAssetReport(
     // receipt. This form is filed by the store, and the column defaults to
     // 'finance' — so it has to be said, or every delivery would be filed under
     // a department that did not file it.
+    // The company is applied to every colour of the delivery; a company typed
+    // under "Other" is added first, so it is a known company from now on.
+    const company =
+      chosenBagCompany(d) ?? (await addBagCompany(String(d.bagCompanyOther || "")));
     const [row] = await sql<{ id: string }[]>`
       insert into pp_bag_purchases (date, bags, reported_by, filed_by_dept, source)
-      values (${reportDate(d.date)}, ${sql.json(bagsReceived(d))}, ${reportedBy}, 'asset', 'telegram')
+      values (${reportDate(d.date)}, ${sql.json(bagsReceived(d, company))}, ${reportedBy}, 'asset', 'telegram')
       returning id`;
     return { id: row.id, table: "pp_bag_purchases" };
   }

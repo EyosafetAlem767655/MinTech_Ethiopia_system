@@ -2,6 +2,7 @@
 
 import { Fragment, useCallback, useEffect, useState } from "react";
 import DecideBtn from "@/components/DecideButton";
+import { useCanEdit, useIsSuper } from "@/lib/use-role";
 import { PriceListEditor, StoreCostEditor } from "@/components/panels/UnitCostEditors";
 import PurchaseForm, { type PurchaseRequestRef } from "@/components/panels/PurchaseForm";
 import { purchaseDeptLabel } from "@/lib/purchase-departments";
@@ -752,6 +753,7 @@ function CreditModal({
   onSaved: () => Promise<void>;
   onError: (msg: string) => void;
 }) {
+  const isSuper = useIsSuper();
   const [amount, setAmount] = useState("");
   const [collectedOn, setCollectedOn] = useState("");
   const [note, setNote] = useState("");
@@ -856,14 +858,14 @@ function CreditModal({
                     <span className="ml-2 text-[11px] text-stone-500">{fmtDate(p.collectedOn)}</span>
                     {p.note && <p className="truncate text-[11px] text-stone-400">{p.note}</p>}
                   </div>
-                  <button
+                  {isSuper && <button
                     onClick={() => removePayment(p.id)}
                     disabled={busy}
                     title="Remove this payment"
                     className="shrink-0 rounded-full bg-stone-200 px-2 py-0.5 text-[10px] font-bold text-stone-600 disabled:opacity-50"
                   >
                     ✕
-                  </button>
+                  </button>}
                 </div>
               ))}
             </div>
@@ -950,6 +952,7 @@ const STATUS_TONE: Record<string, string> = {
 };
 
 function WhtTab() {
+  const canEdit = useCanEdit();
   const [rows, setRows] = useState<Holder[] | null>(null);
   const [smsConfigured, setSmsConfigured] = useState(true);
   const [busy, setBusy] = useState<Record<string, boolean>>({});
@@ -1099,13 +1102,13 @@ function WhtTab() {
               placeholder={sms.sender ? `Test number (default ${sms.sender})` : "Test number"}
               className="min-w-0 flex-1 rounded-lg border border-stone-200 px-2 py-1.5 text-xs"
             />
-            <button
+            {canEdit && <button
               onClick={testSms}
               disabled={testing}
               className="shrink-0 rounded-lg bg-clay-700 px-3 py-1.5 text-xs font-bold text-white disabled:bg-stone-200 disabled:text-stone-400"
             >
               {testing ? "…" : "Send test"}
-            </button>
+            </button>}
           </div>
           <p className="text-[10px] text-stone-400">
             A test never claims a customer&apos;s daily slot, so it cannot stop a real chase going out.

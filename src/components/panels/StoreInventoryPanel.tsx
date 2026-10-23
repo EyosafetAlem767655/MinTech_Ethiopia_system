@@ -84,7 +84,6 @@ export default function StoreInventoryPanel() {
 
   if (!items) return <div className="card h-40 animate-pulse bg-clay-50" />;
 
-  const staleGroups = groups.filter((g) => g.stale);
   const byGroup = (group: string) => items.filter((s) => s.item.group === group);
   const valueOf = (rows: ItemStatus[]) => rows.reduce((a, s) => a + (s.value ?? 0), 0);
   const totalValue = valueOf(items);
@@ -98,13 +97,6 @@ export default function StoreInventoryPanel() {
           {totalValue > 0 && <> · worth <b className="text-stone-600">{etb(totalValue)} ETB</b></>}
         </p>
       </div>
-
-      {staleGroups.length > 0 && (
-        <p className="card border-l-4 border-l-amber-500 p-3 text-xs font-bold text-amber-800">
-          ⏳ {staleGroups.length} group{staleGroups.length === 1 ? "" : "s"} not counted in the last week:{" "}
-          <span className="font-normal">{staleGroups.map((g) => g.label).join(", ")}</span>
-        </p>
-      )}
 
       <input
         value={q}
@@ -148,11 +140,7 @@ export default function StoreInventoryPanel() {
                       <span className="text-[10px] text-stone-400">{rows.length} items</span>
                     </span>
                     <span className="flex items-center gap-2">
-                      <span
-                        className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
-                          status?.stale ? "bg-amber-100 text-amber-800" : "bg-clay-50 text-stone-500"
-                        }`}
-                      >
+                      <span className="rounded-full bg-clay-50 px-2 py-0.5 text-[10px] font-bold text-stone-500">
                         {ago(status?.daysSince ?? null)}
                       </span>
                       <span className="text-xs text-stone-400">{isOpen ? "▾" : "▸"}</span>

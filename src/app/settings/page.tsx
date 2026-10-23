@@ -21,6 +21,8 @@ import {
   type SubmissionSpec,
 } from "@/lib/submissions";
 import { InstallButton } from "@/components/InstallPrompt";
+import { useCanEdit, useIsSuper } from "@/lib/use-role";
+import WebUsersTab from "@/components/panels/WebUsersPanel";
 import AiRecheckPanel from "@/components/panels/AiRecheckPanel";
 import type { SchemaReport } from "@/lib/schema-check";
 
@@ -77,11 +79,16 @@ const ACTION_STYLES: Record<string, string> = {
   error: "bg-red-200 text-red-900",
 };
 
-type Tab = "users" | "submissions" | "errors" | "activity" | "devices";
+type Tab = "users" | "submissions" | "errors" | "activity" | "devices" | "webusers";
 
 export default function SettingsPage() {
   const [tab, setTab] = useState<Tab>("users");
   const router = useRouter();
+  // Errors, Devices, Web users and the danger zone are the Super Admin's.
+  const isSuper = useIsSuper();
+  const tabs: Tab[] = isSuper
+    ? ["users", "submissions", "errors", "activity", "devices", "webusers"]
+    : ["users", "submissions", "activity"];
 
   const logout = async () => {
     if (!confirm("Log out of this browser?")) return;
@@ -118,7 +125,7 @@ export default function SettingsPage() {
       </div>
 
       <div className="flex gap-1.5 py-5">
-        {(["users", "submissions", "errors", "activity", "devices"] as const).map((t) => (
+        {tabs.map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -134,6 +141,8 @@ export default function SettingsPage() {
               ? "Errors"
               : t === "activity"
               ? "Bot activity"
+              : t === "webusers"
+              ? "👤 Web users"
               : "Devices"}
           </button>
         ))}
@@ -141,14 +150,15 @@ export default function SettingsPage() {
 
       {tab === "users" && <UsersTab />}
       {tab === "submissions" && <SubmissionsTab />}
-      {tab === "errors" && <ErrorsTab />}
+      {tab === "errors" && isSuper && <ErrorsTab />}
       {tab === "activity" && <ActivityTab />}
-      {tab === "devices" && <DevicesTab />}
+      {tab === "devices" && isSuper && <DevicesTab />}
+      {tab === "webusers" && isSuper && <WebUsersTab />}
 
       {/* Kept out of the tabs on purpose. Nothing here is recoverable, so it
           should be somewhere you arrive at deliberately rather than somewhere
           you land while looking for something else. */}
-      {tab === "submissions" && <DangerZone />}
+      {tab === "submissions" && isSuper && <DangerZone />}
     </main>
   );
 }
@@ -373,6 +383,8 @@ function SubmissionDetail(props: {
   onClose: () => void;
 }) {
   const { collection, row, spec, editing, draft, busy, error, onClose } = props;
+  const canEdit = useCanEdit();
+  const isSuper = useIsSuper();
   const [data, setData] = useState<{ row: Record<string, unknown>; children: { table: string; rows: Record<string, unknown>[] }[] } | null>(null);
   const [loadError, setLoadError] = useState("");
 
@@ -531,8 +543,8 @@ function SubmissionDetail(props: {
             </>
           ) : (
             <>
-              {spec.editableKeys.length > 0 && <SmallBtn label="✏️ Edit" disabled={busy} onClick={props.onEdit} />}
-              <SmallBtn label="🗑 Delete" tone="red" disabled={busy} onClick={props.onDelete} />
+              {spec.editableKeys.length > 0 && canEdit && <SmallBtn label="✏️ Edit" disabled={busy} onClick={props.onEdit} />}
+              {isSuper && <SmallBtn label="🗑 Delete" tone="red" disabled={busy} onClick={props.onDelete} />}
               <SmallBtn label="Close" onClick={onClose} />
             </>
           )}
@@ -591,6 +603,8 @@ interface BinRow {
  * click any more.
  */
 function SubmissionsTab() {
+  const canEdit = useCanEdit();
+  const isSuper = useIsSuper();
   const [collection, setCollection] = useState<CollectionFilter>("all");
   const [range, setRange] = useState<SubmissionRange>("24h");
   const [rows, setRows] = useState<SubmissionRow[] | null>(null);
@@ -1024,10 +1038,14 @@ function SubmissionsTab() {
                     Deleted {fmtTime(entry.deletedAt)} by {entry.deletedBy}
                     {entry.photoIds.length > 0 ? ` · ${entry.photoIds.length} photo(s) kept` : ""}
                   </p>
-                  <div className="flex gap-1.5 border-t border-clay-50 pt-2">
-                    <SmallBtn label="↩️ Restore" tone="green" disabled={busy} onClick={() => restore(entry)} />
-                    <SmallBtn label="🗑 Remove for good" tone="red" disabled={busy} onClick={() => purge(entry)} />
-                  </div>
+                  {canEdit && (
+                    <div className="flex gap-1.5 border-t border-clay-50 pt-2">
+                      <SmallBtn label="↩️ Restore" tone="green" disabled={busy} onClick={() => restore(entry)} />
+                      {isSuper && (
+                        <SmallBtn label="🗑 Remove for good" tone="red" disabled={busy} onClick={() => purge(entry)} />
+                      )}
+                    </div>
+                  )}
                 </div>
               ))}
             </>
@@ -1441,6 +1459,9 @@ function DevicesTab() {
 /* ────────────────────────────────── Employees ─────────────────────────────── */
 
 function UsersTab() {
+  // HR sees the list only; the Chief manages bot users but deletes nothing.
+  const canEdit = useCanEdit();
+  const isSuper = useIsSuper();
   const [users, setUsers] = useState<BotUser[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -1532,6 +1553,7 @@ function UsersTab() {
   return (
     <div className="space-y-5">
       {/* Add employee */}
+      {canEdit && (
       <form onSubmit={create} className="rounded-2xl border border-stone-200 bg-white p-4">
         <h2 className="text-sm font-bold text-stone-900">Add a Telegram user</h2>
         <p className="mt-0.5 text-xs text-stone-500">
@@ -1582,6 +1604,7 @@ function UsersTab() {
           {busy ? "Saving…" : "Add employee"}
         </button>
       </form>
+      )}
 
       {/* Existing employees */}
       {users.length === 0 && <p className="py-10 text-center text-sm text-stone-400">No Telegram users yet.</p>}
@@ -1623,6 +1646,7 @@ function UsersTab() {
                 </div>
               </div>
 
+              {canEdit && (
               <div className="mt-3 flex flex-wrap gap-1.5">
                 <SmallBtn label="Edit positions" onClick={() => setEditing(editing === u._id ? null : u._id)} />
                 <SmallBtn label="Reset password" onClick={() => resetPassword(u._id, u.fullName)} />
@@ -1633,8 +1657,9 @@ function UsersTab() {
                   tone={u.active ? "amber" : "green"}
                   onClick={() => patch(u._id, { active: !u.active })}
                 />
-                <SmallBtn label="Archive" tone="red" onClick={() => archive(u._id, u.fullName)} />
+                {isSuper && <SmallBtn label="Archive" tone="red" onClick={() => archive(u._id, u.fullName)} />}
               </div>
+              )}
 
               {editing === u._id && (
                 <PositionEditor
@@ -1685,10 +1710,12 @@ function UsersTab() {
                       {u.archivedAt ? `Archived ${fmtTime(u.archivedAt)}` : ""} · reports kept
                     </p>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <SmallBtn label="Restore" tone="green" onClick={() => patch(u._id, { restore: true })} />
-                    <SmallBtn label="Delete" tone="red" onClick={() => purge(u._id, u.fullName)} />
-                  </div>
+                  {canEdit && (
+                    <div className="flex items-center gap-2">
+                      <SmallBtn label="Restore" tone="green" onClick={() => patch(u._id, { restore: true })} />
+                      {isSuper && <SmallBtn label="Delete" tone="red" onClick={() => purge(u._id, u.fullName)} />}
+                    </div>
+                  )}
                 </div>
               ))}
           </div>

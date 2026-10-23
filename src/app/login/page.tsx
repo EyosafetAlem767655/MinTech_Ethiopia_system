@@ -4,6 +4,7 @@ import { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
 function LoginForm() {
+  const [name, setName] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -17,7 +18,7 @@ function LoginForm() {
     const res = await fetch("/api/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password }),
+      body: JSON.stringify({ name, password }),
     });
     setBusy(false);
     if (res.ok) {
@@ -25,7 +26,7 @@ function LoginForm() {
       return;
     }
     if (res.status === 401) {
-      setError("Wrong password. Try again.");
+      setError(name.trim() ? "Wrong name or password. Try again." : "Wrong password. Try again.");
     } else {
       const body = await res.json().catch(() => null);
       setError(body?.error || "Could not sign in. Please try again.");
@@ -35,7 +36,16 @@ function LoginForm() {
   return (
     <form onSubmit={submit} className="card p-6 w-full max-w-sm animate-scale-in">
       <h1 className="font-display text-xl font-bold text-clay-900">Welcome back</h1>
-      <p className="text-xs text-stone-400 mt-1 mb-4">Enter the team password to continue.</p>
+      <p className="text-xs text-stone-400 mt-1 mb-4">
+        Your name and password. The Super Admin leaves the name empty.
+      </p>
+      <input
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        placeholder="Name (empty for Super Admin)"
+        autoComplete="username"
+        className="mb-2 w-full rounded-xl border border-clay-200 px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-clay-500"
+      />
       <input
         type="password"
         value={password}

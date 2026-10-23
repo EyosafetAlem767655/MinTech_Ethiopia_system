@@ -1,3 +1,5 @@
+import { isRole, type Role } from "@/lib/roles";
+
 export const AUTH_COOKIE = "mt_auth";
 
 /**
@@ -32,24 +34,48 @@ async function hmacHex(sid: string): Promise<string> {
   return toHex(sig);
 }
 
-/** Builds the signed cookie value for a session id. */
-export async function signSession(sid: string): Promise<string> {
-  return `${sid}.${await hmacHex(sid)}`;
+/**
+ * Builds the signed cookie value for a session id and the role it was opened
+ * with: `<sid>.<role>.<hmac(sid|role)>`. The role is inside the signature, so
+ * it cannot be edited in the browser to climb from HR to Super Admin.
+ */
+export async function signSession(sid: string, role: Role = "super"): Promise<string> {
+  return `${sid}.${role}.${await hmacHex(`${sid}|${role}`)}`;
+}
+
+const sameHex = (a: string, b: string) => {
+  // Length-then-content compare; the values are HMACs of the same length.
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+};
+
+/**
+ * The session id and role, if the cookie's signature is valid, else null.
+ *
+ * A cookie from before roles (`<sid>.<hmac(sid)>`) could only have been minted
+ * by the ADMIN_PASSWORD login, so it reads as the Super Admin.
+ */
+export async function readSession(cookie: string | undefined | null): Promise<{ sid: string; role: Role } | null> {
+  if (!cookie) return null;
+  const parts = cookie.split(".");
+  if (parts.length === 3) {
+    const [sid, role, sig] = parts;
+    if (!sid || !isRole(role)) return null;
+    return sameHex(sig, await hmacHex(`${sid}|${role}`)) ? { sid, role } : null;
+  }
+  if (parts.length === 2) {
+    const [sid, sig] = parts;
+    if (!sid) return null;
+    return sameHex(sig, await hmacHex(sid)) ? { sid, role: "super" } : null;
+  }
+  return null;
 }
 
 /** Returns the session id if the cookie's signature is valid, else null. */
 export async function verifySession(cookie: string | undefined | null): Promise<string | null> {
-  if (!cookie) return null;
-  const dot = cookie.lastIndexOf(".");
-  if (dot <= 0) return null;
-  const sid = cookie.slice(0, dot);
-  const sig = cookie.slice(dot + 1);
-  const expected = await hmacHex(sid);
-  // Length-then-content compare; the values are HMACs of the same length.
-  if (sig.length !== expected.length) return null;
-  let diff = 0;
-  for (let i = 0; i < sig.length; i++) diff |= sig.charCodeAt(i) ^ expected.charCodeAt(i);
-  return diff === 0 ? sid : null;
+  return (await readSession(cookie))?.sid ?? null;
 }
 
 export function isAuthDisabled(): boolean {

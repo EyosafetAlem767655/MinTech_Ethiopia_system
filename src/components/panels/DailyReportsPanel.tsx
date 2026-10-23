@@ -1,5 +1,7 @@
 "use client";
 
+import { useCanEdit, useIsSuper } from "@/lib/use-role";
+
 import { useEffect, useState } from "react";
 
 /**
@@ -449,6 +451,8 @@ function Card({
   onSave: (text: string) => Promise<boolean>;
   onDelete: () => void;
 }) {
+  const canEdit = useCanEdit();
+  const isSuper = useIsSuper();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(text);
   const [busy, setBusy] = useState(false);
@@ -469,7 +473,7 @@ function Card({
           <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-[11px] font-bold text-indigo-700">{badge}</span>
         )}
         <span className="text-[11px] text-stone-400">{fmtTime(when)}</span>
-        {!editing && (
+        {!editing && canEdit && (
           <span className="ml-auto flex gap-2">
             <button
               onClick={() => {
@@ -480,9 +484,11 @@ function Card({
             >
               ✏️ Edit
             </button>
-            <button onClick={onDelete} className="text-[11px] font-bold text-red-600 hover:text-red-700">
-              🗑 Delete
-            </button>
+            {isSuper && (
+              <button onClick={onDelete} className="text-[11px] font-bold text-red-600 hover:text-red-700">
+                🗑 Delete
+              </button>
+            )}
           </span>
         )}
       </div>

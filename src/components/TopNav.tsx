@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
 import { NAV_ITEMS, isActive } from "@/lib/nav";
+import { useMe } from "@/lib/use-role";
 
 /**
  * The desktop navigation: a top bar, shown only from `lg` up.
@@ -19,6 +20,7 @@ import { NAV_ITEMS, isActive } from "@/lib/nav";
 export default function TopNav() {
   const pathname = usePathname();
   const [refreshing, setRefreshing] = useState(false);
+  const me = useMe();
 
   /**
    * A full reload, deliberately — not `router.refresh()`.
@@ -44,6 +46,16 @@ export default function TopNav() {
           <img src="/favicon.svg" alt="" className="h-6 w-6" />
           <span className="font-display text-sm font-bold tracking-tight text-clay-900">MinTech</span>
         </Link>
+        {/* Who is signed in, and — for HR — that nothing here can be changed. */}
+        {me && me.role !== "super" && (
+          <span
+            className={`rounded-full px-2.5 py-0.5 text-[10px] font-bold ${
+              me.role === "hr" ? "bg-amber-100 text-amber-800" : "bg-clay-50 text-clay-700"
+            }`}
+          >
+            {me.role === "hr" ? "👁 View only" : me.roleLabel} · {me.name}
+          </span>
+        )}
 
         <div className="flex flex-1 items-center justify-end gap-1">
           {NAV_ITEMS.map((it) => {

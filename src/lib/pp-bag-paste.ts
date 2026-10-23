@@ -1,4 +1,4 @@
-import { BAG_KINDS, bagLabel, bagLedgerKey, parseBagLedgerKey, type BagSize } from "@/lib/products";
+import { BASE_BAG_KINDS, bagBaseLabel, bagColourFor, bagLedgerKey, parseBagLedgerKey, type BagSize } from "@/lib/products";
 
 /**
  * The fill-in block for a PP bag delivery, and its parser.
@@ -42,7 +42,8 @@ export function ledgerKeyOf(draftKey: string): string | null {
  * over from last time would be a receipt nobody took.
  */
 export function ppBagTemplate(): string {
-  return BAG_KINDS.map(({ size, colour }) => `${bagLabel(size, colour)}=`).join("\n");
+  // The company is asked once, before this block, so the rows are just the kinds.
+  return BASE_BAG_KINDS.map(({ size, colour }) => `${bagBaseLabel(size, colour)}=`).join("\n");
 }
 
 /* ─────────────────────────────── Parsing ──────────────────────────────────── */
@@ -53,11 +54,11 @@ const norm = (s: string) => s.toLowerCase().replace(/[\s\-_.:]/g, "");
 /** Every spelling of a bag kind → its ledger key, built once. */
 const LOOKUP: Map<string, string> = (() => {
   const out = new Map<string, string>();
-  for (const { size, colour } of BAG_KINDS) {
+  for (const { size, colour } of BASE_BAG_KINDS) {
     const key = bagLedgerKey(size, colour);
-    out.set(norm(bagLabel(size, colour)), key);
-    out.set(norm(`${bagLabel(size, colour)} PP`), key);
-    out.set(norm(`${bagLabel(size, colour)} PP bag`), key);
+    out.set(norm(bagBaseLabel(size, colour)), key);
+    out.set(norm(`${bagBaseLabel(size, colour)} PP`), key);
+    out.set(norm(`${bagBaseLabel(size, colour)} PP bag`), key);
     // The stored spelling, so a figure copied off the dashboard pastes back in.
     out.set(norm(key), key);
     out.set(norm(`${size} ${colour}`), key);
@@ -142,19 +143,24 @@ export function parsePpBagPaste(text: string): ParsedPpBags {
  * report already read. A kind with no figure is left out entirely rather than
  * written as 0 — the row then says what arrived, and nothing else.
  */
-export function bagsReceived(draft: Record<string, string | number>): Record<string, Record<string, number>> {
+export function bagsReceived(
+  draft: Record<string, string | number>,
+  company = ""
+): Record<string, Record<string, number>> {
   const out: Record<string, Record<string, number>> = {};
-  for (const { size, colour } of BAG_KINDS) {
+  for (const { size, colour } of BASE_BAG_KINDS) {
     const v = draft[bagKey(size, colour)];
     if (v === undefined || v === "") continue;
     const n = Number(v);
     if (!isFinite(n)) continue;
-    out[size] = { ...(out[size] || {}), [colour]: n };
+    // Stored under the company's colour ("Yellow@ethio-india"), so every
+    // reader of the receipt counts it against the right manufacturer.
+    out[size] = { ...(out[size] || {}), [bagColourFor(colour, company)]: n };
   }
   return out;
 }
 
 /** Total pieces in a draft, for the review card. */
 export function bagTotal(draft: Record<string, string | number>): number {
-  return BAG_KINDS.reduce((a, { size, colour }) => a + (Number(draft[bagKey(size, colour)]) || 0), 0);
+  return BASE_BAG_KINDS.reduce((a, { size, colour }) => a + (Number(draft[bagKey(size, colour)]) || 0), 0);
 }

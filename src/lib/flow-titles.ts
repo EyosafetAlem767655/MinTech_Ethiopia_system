@@ -42,6 +42,8 @@ export type AssetFlowKind =
   | "rm_credit_payment"
   // An item finance bought: what, how many, at what price.
   | "item_purchase"
+  // Stationery taken from the store — its own issue voucher.
+  | "stationery_issue"
   // Sales: one transaction, read off its receipts and completed by hand.
   | "sales_invoice";
 
@@ -66,6 +68,7 @@ export const FLOW_TITLE: Record<AssetFlowKind, string> = {
   rm_credit_purchase: "🚚 የጥሬ ዕቃ Credit ግዢ",
   rm_credit_payment: "💸 የጥሬ ዕቃ credit ክፍያ",
   item_purchase: "🛍 የዕቃ ግዢ",
+  stationery_issue: "📎 Stationary items issue voucher",
   wht_holder: "📄 WHT ደረሰኝ ያዢ",
   sales_invoice: "🧾 የሽያጭ ሪፖርት",
 };

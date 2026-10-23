@@ -78,7 +78,7 @@ const SYSTEM =
   '(a "6210" bearing is not a "6212"; a 16A breaker is not a 25A one). If no item is that exact part, key is null ' +
   "and the line becomes a NEW item. Never pick a near miss.\n" +
   "group: for a new item, the best group key from the group list; for a match, the item's group.\n" +
-  "unit: for a new item, how it is counted — one of pcs, l, m, roll, pak, kg, set, bottle, drum, tin, berga; " +
+  "unit: for a new item, how it is counted — one of pcs, l, m, roll, pak, kg, set, bottle, drum, tin, berga, pad, ream; " +
   "for a match, the item's unit.";
 
 /**
@@ -95,7 +95,7 @@ const SYSTEM_ISSUE =
   "pick the CLOSEST existing item of the same kind, allowing for different wording, spelling, abbreviations, " +
   "Amharic/English names and word order. When a size or code is given (6210, C-150, 16A), prefer the item " +
   "with that size. key is null ONLY when nothing on the list is that kind of part at all — then it becomes a " +
-  "new item, and group / unit say where to file it (one of pcs, l, m, roll, pak, kg, set, bottle, drum, tin, berga).";
+  "new item, and group / unit say where to file it (one of pcs, l, m, roll, pak, kg, set, bottle, drum, tin, berga, pad, ream).";
 
 /**
  * Match every line still pending. A line already decided — matched earlier, or

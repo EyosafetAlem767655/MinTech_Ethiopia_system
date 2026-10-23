@@ -45,7 +45,9 @@ export type CapabilityKey =
   | "rm_credit_purchase"
   | "rm_credit_payment"
   // An item bought: matched to the store list, priced by the unit or the total.
-  | "item_purchase";
+  | "item_purchase"
+  // Stationery taken out of the store, by the one person who issues it.
+  | "stationery_issue";
 
 /** How the bot collects a capability's payload. */
 export type CaptureMode =
@@ -235,6 +237,13 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
     input: "any",
     question: "💸 ያልተከፈሉ የጥሬ ዕቃና የሹፌር ክፍያዎች ዝርዝር ይመጣል — የተከፈለውን ይምረጡ።",
   },
+  stationery_issue: {
+    key: "stationery_issue",
+    button: "📎 Stationary items issue voucher",
+    captureMode: "asset_entry",
+    input: "any",
+    question: "📎 ከመጋዘን የወጡትን የጽሕፈት መሣሪያዎች እንመዘግባለን — ዕቃዎቹን ይምረጡ፣ ብዛቱን ይፃፉ።",
+  },
   item_purchase: {
     key: "item_purchase",
     button: "🛍 የዕቃ ግዢ",
@@ -333,6 +342,7 @@ export type PositionKey =
   | "prod_daily"
   | "asset_materials"
   | "asset_purchase"
+  | "stationery_issuer"
   | "sales_daily"
   | "finance"
   | "hr"
@@ -438,6 +448,16 @@ export const POSITIONS: Record<PositionKey, Position> = {
     dailyRequired: false,
     submissionTables: ["purchase_requests"],
   },
+  stationery_issuer: {
+    key: "stationery_issuer",
+    department: "asset_management",
+    en: "Stationery issuer",
+    am: "የጽሕፈት መሣሪያ አውጪ",
+    description: "Issues stationery items from the store on the stationery issue voucher (not daily).",
+    capabilities: ["stationery_issue"],
+    dailyRequired: false,
+    submissionTables: [],
+  },
   sales_daily: {
     key: "sales_daily",
     department: "sales",
@@ -513,7 +533,7 @@ export const POSITION_GROUPS: PositionGroup[] = [
     name: "Asset Management",
     am: "የንብረት አስተዳደር",
     icon: "📦",
-    positions: ["asset_materials", "asset_purchase"],
+    positions: ["asset_materials", "asset_purchase", "stationery_issuer"],
   },
   { key: "sales", name: "Sales", am: "ሽያጭ", icon: "🤝", positions: ["sales_daily"] },
   { key: "finance", name: "Finance", am: "ፋይናንስ", icon: "💵", positions: ["finance"] },

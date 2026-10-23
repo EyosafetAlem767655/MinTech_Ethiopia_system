@@ -29,7 +29,7 @@
  * `roll` and `pak` arrived with the opening count: cable comes on a roll and
  * electrodes in a packet, and counting either in pieces would mean nothing.
  */
-export type StoreUnit = "pcs" | "l" | "m" | "roll" | "pak" | "kg" | "set" | "bottle" | "drum" | "tin" | "berga";
+export type StoreUnit = "pcs" | "l" | "m" | "roll" | "pak" | "kg" | "set" | "bottle" | "drum" | "tin" | "berga" | "pad" | "ream";
 
 export interface StoreItem {
   /** Permanent. See rule 1 above. */
@@ -96,6 +96,7 @@ export const STORE_GROUPS: StoreGroup[] = [
   // actually holds, which the managers' original list did not reach.
   { key: "elec2", label: "Electrical fittings", block: "electrical" },
   { key: "oil", label: "Oils", block: "workshop" },
+  { key: "stat", label: "Stationery items", block: "workshop" },
   { key: "wsh", label: "Work shop item", block: "workshop" },
   { key: "cons", label: "Consumables", block: "workshop" },
   // Added with the owner's full store list (October 2026). Each is a heading
@@ -545,6 +546,63 @@ export const STORE_ITEMS: StoreItem[] = [
   it("oil:hipersyn-46", "oil", "Hipersyn oil 46/208L"),
   it("oil:engine-20w50", "oil", "Engin oil 20w50", "drum"),
   it("oil:transmission", "oil", "Transmition oil AFT", "l"),
+
+  /* ── 📎 Stationery items (the owner's list, October 2026) ─────────────────
+     Pads of the printed vouchers and forms, and office supplies. Received on a
+     GRV like any store item; issued only on the 📎 stationery issue voucher. */
+  it("stat:get-pass", "stat", "Get pass", "pad"),
+  it("stat:finished-goods-transfer-vo", "stat", "Finished goods transfer vo.", "pad"),
+  it("stat:delivery-note", "stat", "Delivery note", "pad"),
+  it("stat:finished-goods-receiving-vo", "stat", "Finished goods receiving vo.", "pad"),
+  it("stat:material-receiving-vo", "stat", "Material receiving vo", "pad"),
+  it("stat:temporary-raw-material-receiving-vo", "stat", "Temporary raw material receiving vo", "pad"),
+  it("stat:purchase-requistion-vo", "stat", "Purchase requistion vo.", "pad"),
+  it("stat:store-requistion-note", "stat", "Store requistion note", "pad"),
+  it("stat:goods-receiving-voucher", "stat", "Goods receiving voucher", "pad"),
+  it("stat:cash-sales-attachement", "stat", "Cash sales attachement", "pad"),
+  it("stat:credit-sales-attachement", "stat", "Credit sales attachement", "pad"),
+  it("stat:fixed-asset-receiving-vo", "stat", "Fixed asset receiving vo.", "pad"),
+  it("stat:jornal-voucher", "stat", "Jornal voucher", "pad"),
+  it("stat:purchase-order", "stat", "Purchase order", "pad"),
+  it("stat:store-issue-vo", "stat", "Store issue vo.", "pad"),
+  it("stat:petty-cash-payment-vo", "stat", "Petty cash payment vo", "pad"),
+  it("stat:delivery-order", "stat", "Delivery order", "pad"),
+  it("stat:receipt-for-withholding-vo", "stat", "Receipt for withholding vo.", "pad"),
+  it("stat:non-stock-items-receiving-issue-vo", "stat", "Non stock items receiving & issue vo.", "pad"),
+  it("stat:credit-sales-invoice", "stat", "Credit sales invoice", "pad"),
+  it("stat:cash-sale-invoice", "stat", "Cash sale invoice", "pad"),
+  it("stat:cash-recipient-vo", "stat", "Cash recipient vo.", "pad"),
+  it("stat:bin-card", "stat", "Bin card", "pcs"),
+  it("stat:finished-product-other-goods-dispatch", "stat", "Finished product & other goods dispatch", "pad"),
+  it("stat:finished-product-other-goods-get-pass", "stat", "Finished product & other goods get pass", "pad"),
+  it("stat:purchase-voucher", "stat", "Purchase voucher", "pad"),
+  it("stat:check-payment-voucher", "stat", "Check payment voucher", "pad"),
+  it("stat:with-holding-tax-on-payment-active", "stat", "With holding tax on payment /Active/", "pad"),
+  it("stat:credit-sales-invoice-vat", "stat", "Credit sales invoice /VAT/", "pad"),
+  it("stat:cash-sales-invoice-vat-active", "stat", "Cash sales invoice /VAT/ active", "pad"),
+  it("stat:receipt-invoice-active", "stat", "Receipt invoice /active/", "pad"),
+  it("stat:purchase-voucher-active", "stat", "Purchase voucher /active/", "pad"),
+  it("stat:proforma-invoice", "stat", "Proforma invoice", "pad"),
+  it("stat:heded-kaki-envelope-postal-a4", "stat", "Heded kaki envelope postal A4", "pcs"),
+  it("stat:heded-white-envelope-postal", "stat", "Heded white envelope postal", "pcs"),
+  it("stat:inter-office-memo", "stat", "Inter office memo", "pcs"),
+  it("stat:credit-note", "stat", "Credit note", "pad"),
+  it("stat:stapler-wire", "stat", "Stapler wire", "pcs"),
+  it("stat:ball-point-pen", "stat", "Ball point pen", "pcs"),
+  it("stat:fastener", "stat", "Fastener", "pcs"),
+  it("stat:heded-carbon", "stat", "Heded carbon", "ream"),
+  it("stat:photo-copy-paper", "stat", "Photo copy paper", "ream"),
+  it("stat:box-file", "stat", "Box file", "pcs"),
+  it("stat:flat-file", "stat", "Flat file", "pcs"),
+  it("stat:registration-book-big", "stat", "Registration book big", "pcs"),
+  it("stat:registration-book-small", "stat", "Registration book small", "pcs"),
+  it("stat:writing-pad", "stat", "Writing pad", "pcs"),
+  it("stat:pencil", "stat", "Pencil", "pcs"),
+  it("stat:eraser", "stat", "Eraser", "pcs"),
+  it("stat:heded-letter", "stat", "Heded letter", "pcs"),
+  it("stat:note-book-small", "stat", "Note book small", "pcs"),
+  it("stat:marker", "stat", "Marker", "pcs"),
+  it("stat:correction-fluid", "stat", "Correction fluid", "pcs"),
   it("oil:dacsin-46", "oil", "Dacsin oil 46 (Compressor)"),
   it("oil:coolant", "oil", "Coolant (Anti corrosive)"),
   it("oil:stop-leak", "oil", "Stop leak"),

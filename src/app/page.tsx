@@ -5,7 +5,7 @@ import Link from "next/link";
 import CountUp from "@/components/CountUp";
 import RangeSelector from "@/components/RangeSelector";
 import DailyReportsPanel from "@/components/panels/DailyReportsPanel";
-import { enablePushNotifications } from "@/components/PwaSetup";
+import { useMe } from "@/lib/use-role";
 import { DEPARTMENTS } from "@/lib/departments";
 import { type RangeKey } from "@/lib/ranges";
 import { FLOW_TITLE } from "@/lib/flow-titles";
@@ -28,7 +28,8 @@ export default function OwnerDashboard() {
   const [range, setRange] = useState<RangeKey>("monthly");
   const [brief, setBrief] = useState<BriefData | null>(null);
   const [summaries, setSummaries] = useState<DepartmentSummary[] | null>(null);
-  const [pushState, setPushState] = useState<string>("");
+  // "Mr. Anteneh" for the Super Admin; anyone else is greeted by their own name.
+  const me = useMe();
   const [error, setError] = useState("");
 
   // Exceptions + AI brief — the two owner-level items kept on the landing.
@@ -82,22 +83,15 @@ export default function OwnerDashboard() {
             className="h-16 w-auto max-w-[88%] drop-shadow-[0_4px_12px_rgba(0,0,0,0.25)]"
           />
           <h1 className="font-display text-3xl font-bold mt-5 leading-tight">
-            {greeting.emoji} {greeting.text}, Mr. Anteneh
+            {greeting.emoji} {greeting.text}
+            {me ? `, ${me.name}` : ""}
           </h1>
           <p className="text-clay-100/90 text-sm mt-2">{today} · Department activity</p>
-          <button
-            onClick={async () => setPushState(await enablePushNotifications())}
-            disabled={pushState === "granted"}
-            className="mt-4 text-xs font-semibold bg-white/15 hover:bg-white/25 border border-white/25 rounded-full px-4 py-2 transition-all active:scale-95 disabled:opacity-80"
-          >
-            {pushState === "granted"
-              ? "🔔 Morning push enabled"
-              : pushState === "denied"
-              ? "🔕 Blocked — allow notifications in settings"
-              : pushState === "unsupported"
-              ? "🔕 Push not available (install the app first)"
-              : "🔕 Enable 6:30 AM push"}
-          </button>
+          {me && me.role !== "super" && (
+            <p className="mt-3 rounded-full border border-white/25 bg-white/15 px-4 py-1.5 text-xs font-semibold">
+              {me.role === "hr" ? "👁 View only — nothing can be changed from this account" : `🔑 ${me.roleLabel}`}
+            </p>
+          )}
         </div>
       </header>
 

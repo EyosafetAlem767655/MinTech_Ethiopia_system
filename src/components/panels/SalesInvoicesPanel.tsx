@@ -1,5 +1,7 @@
 "use client";
 
+import { useCanEdit } from "@/lib/use-role";
+
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { productLabel, orderProducts, DELIVERY_PRODUCTS } from "@/lib/products";
 
@@ -251,6 +253,7 @@ function CustomerEditor({ rows, onSaved }: { rows: Row[]; onSaved: () => void })
 }
 
 function EditorRow({ row, onSaved }: { row: Row; onSaved: () => void }) {
+  const canEdit = useCanEdit();
   const [customer, setCustomer] = useState(row.customer);
   const [tin, setTin] = useState(row.tin || "");
   const [all, setAll] = useState(true);
@@ -300,13 +303,15 @@ function EditorRow({ row, onSaved }: { row: Row; onSaved: () => void }) {
           <input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} />
           same name
         </label>
-        <button
-          className="rounded-lg bg-clay-700 px-3 py-1 text-[11px] font-bold text-white disabled:opacity-40"
-          disabled={!dirty || !tinOk || !customer.trim() || state.busy}
-          onClick={save}
-        >
-          {state.busy ? "…" : "Save"}
-        </button>
+        {canEdit && (
+          <button
+            className="rounded-lg bg-clay-700 px-3 py-1 text-[11px] font-bold text-white disabled:opacity-40"
+            disabled={!dirty || !tinOk || !customer.trim() || state.busy}
+            onClick={save}
+          >
+            {state.busy ? "…" : "Save"}
+          </button>
+        )}
         {state.msg && <span className="text-[10px] text-green-700">{state.msg}</span>}
         {state.err && <span className="text-[10px] text-red-700">{state.err}</span>}
         {!tinOk && <span className="text-[10px] text-red-700">10 digits</span>}

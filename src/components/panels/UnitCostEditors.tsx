@@ -1,5 +1,7 @@
 "use client";
 
+import { useCanEdit } from "@/lib/use-role";
+
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { STORE_BLOCKS, STORE_GROUPS, STORE_ITEMS } from "@/lib/store-items";
 
@@ -36,6 +38,9 @@ function SaveBar({
   onSave: () => void;
   onReset: () => void;
 }) {
+  // A view-only (HR) account reads the prices but cannot save them.
+  const canEdit = useCanEdit();
+  if (!canEdit) return null;
   return (
     <div className="flex flex-wrap items-center justify-end gap-2 border-t border-clay-50 p-3">
       {message && <span className="mr-auto text-[11px] font-bold text-stone-500">{message}</span>}

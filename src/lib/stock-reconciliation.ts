@@ -9,6 +9,7 @@ import {
   type BagSize,
 } from "@/lib/products";
 import { monthBounds, monthLabel } from "@/lib/finance-report";
+import { loadBagCompanies } from "@/lib/bag-companies";
 
 /**
  * Does the floor agree with the paperwork?
@@ -86,6 +87,8 @@ const n = (v: unknown) => Number(v) || 0;
  */
 export async function reconcileBags(month = monthLabel()): Promise<ReconciliationResult> {
   const { start, end } = monthBounds(month);
+  // Companies added from the bot ("Other") must have their rows here too.
+  await loadBagCompanies().catch(() => {});
 
   const [base, grvLines, sivLines, bagReceipts, usedLines, latestCount] = await Promise.all([
     sql<{ bags: Record<string, number> }[]>`

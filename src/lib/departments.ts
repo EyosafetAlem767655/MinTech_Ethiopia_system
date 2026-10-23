@@ -59,7 +59,7 @@ export const DEPARTMENTS: Record<DepartmentKey, Department> = {
     accent: "bg-amber-600",
     color: "#d08700",
     blurb: "Materials, bag inventory, purchases and damage.",
-    positions: ["asset_materials", "asset_purchase"],
+    positions: ["asset_materials", "asset_purchase", "stationery_issuer"],
   },
   sales: {
     key: "sales",

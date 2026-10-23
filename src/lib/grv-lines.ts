@@ -101,7 +101,7 @@ export const hasGrvLines = (draft: Record<string, string | number>) => draft[grv
 function toNumber(raw: string): number | null {
   const cleaned = String(raw || "")
     .replace(/,/g, "")
-    .replace(/\b(pcs|pc|ltr|lt|l|kg|m|roll|rolls|pak|pkt|set|sets|drum|drums|bottle|bottles|tin|tins|berga|bag|bags|box|boxes|birr|etb|br)\b\.?|ብር/gi, "")
+    .replace(/\b(pcs|pc|ltr|lt|l|kg|m|roll|rolls|pak|pkt|set|sets|drum|drums|bottle|bottles|tin|tins|berga|pad|pads|ream|reams|rem|pes|bag|bags|box|boxes|birr|etb|br)\b\.?|ብር/gi, "")
     .trim();
   if (!cleaned || !/^\d*\.?\d+$/.test(cleaned)) return null;
   const n = Number(cleaned);

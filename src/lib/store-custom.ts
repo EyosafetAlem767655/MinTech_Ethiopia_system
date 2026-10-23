@@ -11,7 +11,7 @@ import { ADDED_GROUP, GROUP_BY_KEY, registerCustomItems, type StoreItem, type St
  * asks on every update and the table changes only when a GRV is saved.
  */
 
-const UNITS: readonly StoreUnit[] = ["pcs", "l", "m", "roll", "pak", "kg", "set", "bottle", "drum", "tin", "berga"];
+const UNITS: readonly StoreUnit[] = ["pcs", "l", "m", "roll", "pak", "kg", "set", "bottle", "drum", "tin", "berga", "pad", "ream"];
 
 /** A unit as the list spells it; anything unknown counts in pieces. */
 export function storeUnit(raw: unknown): StoreUnit {
@@ -20,6 +20,9 @@ export function storeUnit(raw: unknown): StoreUnit {
   if (/^(lt|ltr|litre|liter|litres|liters)$/.test(u)) return "l";
   if (/^(mtr|meter|metre|mat)$/.test(u)) return "m";
   if (/^(pkt|packet|pack)$/.test(u)) return "pak";
+  if (/^(pads?)$/.test(u)) return "pad";
+  if (/^(reams?|rem|rems)$/.test(u)) return "ream";
+  if (/^(pes|pce|pces|piece|pieces)$/.test(u)) return "pcs";
   return "pcs";
 }
 

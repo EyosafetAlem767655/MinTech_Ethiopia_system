@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { AUTH_COOKIE, isAuthDisabled, verifySession } from "@/lib/auth";
+import { AUTH_COOKIE, isAuthDisabled, readSession } from "@/lib/auth";
 import { isSessionRevoked } from "@/lib/websession";
+import { roleDenies } from "@/lib/roles";
 
 // Routes reachable without the dashboard password.
 // Keep these as specific as possible: a bare "/api/telegram" prefix would also
@@ -26,12 +27,20 @@ export async function middleware(req: NextRequest) {
 
   // Authentication: pure-crypto signature check, no network. A valid signature
   // means this cookie was minted by a real ADMIN_PASSWORD login.
-  const sid = await verifySession(req.cookies.get(AUTH_COOKIE)?.value);
-  if (sid) {
+  const session = await readSession(req.cookies.get(AUTH_COOKIE)?.value);
+  if (session) {
     // Authorization: has this specific device been revoked? Fail-open — only a
     // POSITIVE "revoked" answer bounces the user, so a slow or unreachable DB
     // never locks anyone out of the dashboard.
-    if (!(await isSessionRevoked(sid))) return NextResponse.next();
+    if (!(await isSessionRevoked(session.sid))) {
+      const denied = roleDenies(session.role, req.method, pathname);
+      if (!denied) return NextResponse.next();
+      if (pathname.startsWith("/api/")) return NextResponse.json({ error: denied }, { status: 403 });
+      const home = req.nextUrl.clone();
+      home.pathname = "/";
+      home.search = "";
+      return NextResponse.redirect(home);
+    }
   }
 
   if (pathname.startsWith("/api/")) {
