@@ -1,9 +1,8 @@
 import {
-  BAG_KINDS,
+  BAG_SIZES,
+  BAG_STOCK,
   PRODUCTION_PRODUCTS,
-  bagBaseLabel,
   bagLabel,
-  splitBagColour,
   productLabel,
   type BagSize,
 } from "@/lib/products";
@@ -63,8 +62,9 @@ const H_BAGS = "--- PP Bag count ---";
  */
 export function productionTemplate(): string {
   const products = PRODUCTION_PRODUCTS.map((c) => `${productLabel(c)}=`).join("\n");
-  // One line per bag kind PER COMPANY: the count is kept by manufacturer.
-  const bags = BAG_KINDS.map(({ size, colour }) => `${bagLabel(size, colour)}=`).join("\n");
+  const bags = BAG_SIZES.flatMap((size) =>
+    BAG_STOCK[size].map((colour) => `${bagLabel(size, colour)}=`)
+  ).join("\n");
 
   return [
     "FGR=",
@@ -110,18 +110,17 @@ function buildLookup(): {
   }
 
   const bags = new Map<string, { size: BagSize; colour: string }>();
-  for (const { size, colour } of BAG_KINDS) {
-    bags.set(norm(bagLabel(size, colour)), { size, colour });
-    // "kg25 Yellow" — the stored shape, in case someone copies from the API.
-    bags.set(norm(`${size} ${colour}`), { size, colour });
-    // The label without a company, as it read before companies: Great Wall.
-    if (!splitBagColour(colour).company) bags.set(norm(bagBaseLabel(size, colour)), { size, colour });
+  for (const size of BAG_SIZES) {
+    for (const colour of BAG_STOCK[size]) {
+      bags.set(norm(bagLabel(size, colour)), { size, colour });
+      // "kg25 Yellow" — the stored shape, in case someone copies from the API.
+      bags.set(norm(`${size} ${colour}`), { size, colour });
+    }
   }
   return { products, bags };
 }
 
-/** Built per paste, not once: a company added from the bot must be recognised. */
-let LOOKUP = buildLookup();
+const LOOKUP = buildLookup();
 
 /**
  * Lines that are guidance, not data.
@@ -198,7 +197,6 @@ export interface ParsedPaste {
  * blank here means none, not unknown.
  */
 export function parseProductionPaste(text: string): ParsedPaste {
-  LOOKUP = buildLookup();
   const values: Record<string, string | number> = {};
   const unknown: string[] = [];
   const invalid: string[] = [];

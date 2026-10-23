@@ -70,86 +70,15 @@ export const BAG_STOCK: Record<BagSize, readonly string[]> = {
 
 export const BAG_SIZE_LABEL: Record<BagSize, string> = { kg25: "25KG", kg40: "40KG" };
 
-/* ─────────────────────── Who made the bag (the company) ─────────────────────
- *
- * PP bags come from more than one manufacturer, each at its own price, and
- * every figure — received, used, damaged, counted, valued — is kept per
- * company. The company rides in the bag's COLOUR string after an "@":
- *
- *     "Yellow"              → Great Wall Packaging (no suffix)
- *     "Yellow@ethio-india"  → Ethio-India
- *
- * Great Wall carries no suffix on purpose: every bag recorded before the
- * company was asked was a Great Wall bag (the owner's word — Ethio-India's are
- * the Yellow 40KG, relabelled by seed 0013), so all of history keeps its keys
- * and reads correctly with nothing migrated. A ledger key is then simply
- * "kg40:Yellow@ethio-india", and the nested counts { kg40: { "Yellow@…": n } }.
- */
-
-export interface BagCompany {
-  /** "" for Great Wall Packaging; a slug for every other company. */
-  key: string;
-  name: string;
-}
-
-/** The two the plant buys from today; any other is added from the bot ("Other"). */
-export const BAG_COMPANIES: BagCompany[] = [
-  { key: "", name: "Great Wall Packaging" },
-  { key: "ethio-india", name: "Ethio-India" },
-];
-
-/** "Great Wall" → "great-wall": the stored spelling of a typed company name. */
-export function bagCompanySlug(name: string): string {
-  return String(name || "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 32);
-}
-
-/** The colour as written, and the company key after its "@" ("" = Great Wall). */
-export function splitBagColour(colour: string): { base: string; company: string } {
-  const at = String(colour || "").indexOf("@");
-  return at < 0 ? { base: colour, company: "" } : { base: colour.slice(0, at), company: colour.slice(at + 1) };
-}
-
-/** A colour for one company's bag: "Yellow" + "ethio-india" → "Yellow@ethio-india". */
-export function bagColourFor(base: string, company: string): string {
-  return company ? `${base}@${company}` : base;
-}
-
-/** A company's name from its key; an unregistered key is shown title-cased. */
-export function bagCompanyName(key: string): string {
-  const known = BAG_COMPANIES.find((c) => c.key === key);
-  if (known) return known.name;
-  return key.replace(/-/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
-}
-
-/** "40KG Yellow · Ethio-India" — the column heading and the paste-template key. */
+/** "25KG Yellow" — the column heading and the paste-template key. */
 export function bagLabel(size: BagSize, colour: string): string {
-  const { base, company } = splitBagColour(colour);
-  const short = company === "" ? "Great Wall" : bagCompanyName(company);
-  return `${BAG_SIZE_LABEL[size]} ${base} · ${short}`;
+  return `${BAG_SIZE_LABEL[size]} ${colour}`;
 }
 
-/** "40KG Yellow" — the label without the company, as it read before companies. */
-export function bagBaseLabel(size: BagSize, colour: string): string {
-  return `${BAG_SIZE_LABEL[size]} ${splitBagColour(colour).base}`;
-}
-
-/** The eight kinds one company can supply, in table order. */
-const kindsOf = (company: string) =>
-  BAG_SIZES.flatMap((size) => BAG_STOCK[size].map((base) => ({ size, colour: bagColourFor(base, company) })));
-
-/**
- * Every bag kind in table order: Great Wall's eight first, exactly as before,
- * then each other company's eight APPENDED — so no existing menu number moves.
- * Mutable: a company added from the bot appends its kinds (registerBagCompanies).
- */
-export const BAG_KINDS: { size: BagSize; colour: string }[] = BAG_COMPANIES.flatMap((c) => kindsOf(c.key));
-
-/** Great Wall's kinds only — the paste rows of a delivery, before its company is applied. */
-export const BASE_BAG_KINDS: { size: BagSize; colour: string }[] = kindsOf("");
+/** Every bag kind in table order — the six columns, flattened once. */
+export const BAG_KINDS: { size: BagSize; colour: string }[] = BAG_SIZES.flatMap((size) =>
+  BAG_STOCK[size].map((colour) => ({ size, colour }))
+);
 
 /** A bag count map in either shape: totals per size, or a colour breakdown. */
 export type BagCounts = Record<string, number | Record<string, number> | null | undefined>;
@@ -220,37 +149,11 @@ export function bagLedgerKey(size: BagSize, colour: string): string {
  */
 export const BAG_KIND_KEYS: string[] = BAG_KINDS.map(({ size, colour }) => bagLedgerKey(size, colour));
 
-/**
- * Register companies added from the bot (table pp_bag_companies). Their kinds
- * are appended to BAG_KINDS and BAG_KIND_KEYS in place, so every list built
- * from them — templates, menus, the stock check — includes them. Idempotent.
- */
-export function registerBagCompanies(list: BagCompany[]): void {
-  for (const c of list) {
-    if (!c.key || BAG_COMPANIES.some((k) => k.key === c.key)) continue;
-    BAG_COMPANIES.push({ key: c.key, name: c.name });
-    for (const kind of kindsOf(c.key)) {
-      BAG_KINDS.push(kind);
-      BAG_KIND_KEYS.push(bagLedgerKey(kind.size, kind.colour));
-    }
-  }
-}
-
-/**
- * The reverse, returning null for anything that is not a bag kind. A company
- * suffix is accepted whether or not this instance has registered it yet, so a
- * row filed under a new company is never dropped as "not a bag".
- */
+/** The reverse, returning null for anything that is not one of the six kinds. */
 export function parseBagLedgerKey(key: string): { size: BagSize; colour: string } | null {
-  const raw = String(key || "");
-  const at = raw.indexOf(":");
-  if (at < 0) return null;
-  const size = raw.slice(0, at);
-  const colour = raw.slice(at + 1);
+  const [size, colour] = String(key || "").split(":");
   if (!(BAG_SIZES as readonly string[]).includes(size)) return null;
-  const { base, company } = splitBagColour(colour);
-  if (!BAG_STOCK[size as BagSize].includes(base)) return null;
-  if (company && !/^[a-z0-9-]+$/.test(company)) return null;
+  if (!BAG_STOCK[size as BagSize].includes(colour)) return null;
   return { size: size as BagSize, colour };
 }
 

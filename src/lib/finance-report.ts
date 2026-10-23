@@ -1,6 +1,5 @@
 import sql from "@/lib/sql";
 import { rawMaterialOpening } from "@/lib/raw-material-opening";
-import { loadBagCompanies } from "@/lib/bag-companies";
 import {
   BAG_KINDS,
   BAG_KIND_KEYS,
@@ -196,8 +195,6 @@ function sumMaps(rows: { m: Record<string, number> | null }[]): Record<string, n
 
 export async function buildFinanceReport(month: string): Promise<FinanceReport> {
   const { start, end } = monthBounds(month);
-  // Every PP bag company, the ones added from the bot included, has its own rows.
-  await loadBagCompanies().catch(() => {});
 
   const [
     base,

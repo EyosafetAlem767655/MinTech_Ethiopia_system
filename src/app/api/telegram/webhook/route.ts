@@ -38,7 +38,6 @@ import {
   DOWNTIME_ROWS_STEP,
   oldBagPriceKey,
   saveAssetReport,
-  BAG_STOCK_KEY,
   applyPurchaseItemMatch,
   PURCHASE_ITEM_STEP,
   storeGroupOfStep,
@@ -74,7 +73,6 @@ import {
 } from "@/lib/grv-lines";
 import { matchGrvLines } from "@/lib/store-match";
 import { loadCustomStoreItems } from "@/lib/store-custom";
-import { loadBagCompanies } from "@/lib/bag-companies";
 import { MACHINES_KEY, decodeMachines, normaliseMachine, recentMachines } from "@/lib/machines";
 import { STORE_ITEM_BY_KEY } from "@/lib/store-items";
 import { archiveView, databaseView, errorsView, jobsView, overviewView, systemKeyboard } from "@/lib/system-status";
@@ -1771,15 +1769,6 @@ async function startAssetFlow(
   }
   // The machine names already used, offered as buttons wherever a machine or
   // car is asked for.
-  // PP bags used or damaged can only be bags in stock: the list, by company,
-  // comes from the stock check once, here, and travels in the draft.
-  if (kind === "pp_bag_used" || kind === "pp_bag_damage") {
-    const check = await reconcileBags().catch(() => null);
-    const inStock = (check?.rows ?? [])
-      .map((r) => ({ key: r.key, label: r.label, qty: r.counted ?? r.expected }))
-      .filter((b) => b.qty > 0);
-    draft[BAG_STOCK_KEY] = JSON.stringify(inStock);
-  }
   if (kind === "store_issue" || kind === "tool_request") {
     draft[MACHINES_KEY] = JSON.stringify(await recentMachines().catch(() => []));
   }
@@ -1878,7 +1867,6 @@ export async function POST(req: NextRequest) {
   // The items GRVs have added to the store list, so every store keyboard and
   // block built below includes them. Cached for a minute per instance.
   await loadCustomStoreItems().catch(() => []);
-  await loadBagCompanies().catch(() => {});
 
   /* ── Inline-button callbacks (purchase decisions, owner only) ── */
   const cb = update?.callback_query;

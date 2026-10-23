@@ -1,9 +1,7 @@
 import sql from "@/lib/sql";
 import {
-  BAG_COMPANIES,
   BAG_KINDS,
   BAG_KIND_KEYS,
-  BASE_BAG_KINDS,
   BAG_SIZES,
   BAG_SIZE_LABEL,
   BAG_STOCK,
@@ -11,8 +9,6 @@ import {
   FINANCE_RAW_MATERIALS,
   PRODUCT_ORDER,
   PRODUCTION_PRODUCTS,
-  bagBaseLabel,
-  bagCompanyName,
   bagLabel,
   bagLedgerKey,
   ledgerLabel,
@@ -59,7 +55,6 @@ import {
   MAX_GRV_LINES,
 } from "@/lib/grv-lines";
 import { NO_MACHINE, decodeMachines } from "@/lib/machines";
-import { addBagCompany } from "@/lib/bag-companies";
 import { createCustomItems } from "@/lib/store-custom";
 import { eatDateLabel } from "@/lib/dates";
 import { chosenCustomerName, chosenInvoice, customerChoices, invoiceChoices, invoicesFor } from "@/lib/credit-bot";
@@ -503,36 +498,6 @@ const TOOL_REQUEST_STEPS: AssetStep[] = [
   { id: "notes", label: "Notes", prompt: "🗒 ተጨማሪ ማስታወሻ ካለ ይፃፉ።", type: "text", skippable: true },
 ];
 
-/**
- * The PP bags in stock, by company — what the usage and damage forms offer.
- *
- * Read from the stock check when the flow opens (the webhook seeds it, like
- * the credit lists), so a bag that is not on hand cannot be chosen. Each
- * button names the company and how many are there. With nothing seeded — a
- * database with no counts yet — every kind is offered rather than none.
- */
-export const BAG_STOCK_KEY = "_bagStock";
-
-export interface InStockBag {
-  key: string;
-  label: string;
-  qty: number;
-}
-
-function inStockBagChoices(d: Record<string, string | number>): { label: string; value: string }[] {
-  let list: InStockBag[] = [];
-  try {
-    const raw = d[BAG_STOCK_KEY];
-    list = typeof raw === "string" && raw ? (JSON.parse(raw) as InStockBag[]) : [];
-  } catch {
-    list = [];
-  }
-  if (list.length > 0) {
-    return list.map((b) => ({ label: `${b.label} (${b.qty.toLocaleString("en-US")})`, value: b.key }));
-  }
-  return BAG_KINDS.map(({ size, colour }) => ({ label: bagLabel(size, colour), value: bagLedgerKey(size, colour) }));
-}
-
 /** Piles one damage report can carry. The report is weekly, so several. */
 export const MAX_DAMAGE_PILES = 6;
 
@@ -573,10 +538,12 @@ const PP_BAG_DAMAGE_STEPS: AssetStep[] = [
       },
       {
         id: k.kind,
-        prompt: `🧺 ክምር ${i} — የትኛው ከረጢት ነው? (ኩባንያውን ጨምሮ — ያሉት ብቻ)`,
+        prompt: `🧺 ክምር ${i} — የትኛው ከረጢት ነው?`,
         type: "choice",
-        // Only the bags in stock, each with its company.
-        choicesFrom: inStockBagChoices,
+        choices: BAG_KINDS.map(({ size, colour }) => ({
+          label: `${bagLabel(size, colour)} PP`,
+          value: bagLedgerKey(size, colour),
+        })),
         when: asked,
       },
       {
@@ -1035,10 +1002,12 @@ const PP_BAG_USED_STEPS: AssetStep[] = [
       {
         id: k.kind,
         label: `ዕቃ ${i} · ከረጢት`,
-        prompt: `🧺 ዕቃ ${i} — የትኛው ከረጢት ዋለ? (ኩባንያውን ጨምሮ — ያሉት ብቻ)`,
+        prompt: `🧺 ዕቃ ${i} — የትኛው ከረጢት ዋለ?`,
         type: "choice",
-        // Only the bags in stock, each with its company.
-        choicesFrom: inStockBagChoices,
+        choices: BAG_KINDS.map(({ size, colour }) => ({
+          label: `${bagLabel(size, colour)} PP`,
+          value: bagLedgerKey(size, colour),
+        })),
         when: asked,
       },
       {
@@ -1445,39 +1414,8 @@ const DOWNTIME_STEPS: AssetStep[] = [
  * exist: the opening balance, the daily usage report (used), and the PP Bag
  * count block of the daily production report (counted on the floor).
  */
-/** The company step's answer for Great Wall (a choice value cannot be ""). */
-const GREAT_WALL = "great-wall";
-export const BAG_COMPANY_OTHER = "other";
-
-/** The company a delivery is from: "" for Great Wall, a key otherwise, null if "Other" not yet named. */
-export function chosenBagCompany(d: Record<string, string | number>): string | null {
-  const v = String(d.bagCompany || "");
-  if (!v || v === GREAT_WALL) return "";
-  if (v === BAG_COMPANY_OTHER) return null;
-  return v;
-}
-
 const PP_BAG_RECEIPT_STEPS: AssetStep[] = [
   { id: "date", prompt: "📅 ከረጢቶቹ የገቡበትን ቀን ይምረጡ።", type: "date" },
-  // Which company made them: the stock, the price and the stock check are
-  // all kept per company.
-  {
-    id: "bagCompany",
-    label: "Company",
-    prompt: "🏭 የPP ከረጢቱ አምራች ኩባንያ የትኛው ነው?",
-    type: "choice",
-    choicesFrom: () => [
-      ...BAG_COMPANIES.map((c) => ({ label: `🏭 ${c.name}`, value: c.key || GREAT_WALL })),
-      { label: "➕ ሌላ (Other)", value: BAG_COMPANY_OTHER },
-    ],
-  },
-  {
-    id: "bagCompanyOther",
-    label: "Company name",
-    prompt: "🏭 የኩባንያውን ስም ይፃፉ።",
-    type: "text",
-    when: (d) => d.bagCompany === BAG_COMPANY_OTHER,
-  },
   {
     id: "paste",
     prompt:
@@ -1957,10 +1895,13 @@ export function productionTotal(draft: Record<string, string | number>): number 
 /** The stock count as `daily_ops_reports.bags` stores it: { kg25: {…}, kg40: {…} }. */
 function bagMap(draft: Record<string, string | number>): Record<string, Record<string, number>> {
   const out: Record<string, Record<string, number>> = {};
-  // Every company's kinds: the count is kept per manufacturer.
-  for (const { size, colour } of BAG_KINDS) {
-    const v = Number(draft[bagKey(size, colour)]) || 0;
-    if (v !== 0) out[size] = { ...(out[size] || {}), [colour]: v };
+  for (const size of BAG_SIZES) {
+    const inner: Record<string, number> = {};
+    for (const colour of BAG_STOCK[size]) {
+      const v = Number(draft[bagKey(size as BagSize, colour)]) || 0;
+      if (v !== 0) inner[colour] = v;
+    }
+    if (Object.keys(inner).length > 0) out[size] = inner;
   }
   return out;
 }
@@ -2064,17 +2005,15 @@ export function assetPreview(state: AssetFlowState): string {
   }
 
   if (state.kind === "pp_bag_receipt") {
-    const lines = BASE_BAG_KINDS.map(({ size, colour }) => {
+    const lines = BAG_KINDS.map(({ size, colour }) => {
       const v = d[ppBagKey(size, colour)];
       // A kind with no figure is shown as a dash, not as 0: none of that colour
       // arrived, which is different from a delivery of none.
-      return `  • ${bagBaseLabel(size, colour)}: ${v === undefined || v === "" ? "—" : qty(Number(v))}`;
+      return `  • ${bagLabel(size, colour)}: ${v === undefined || v === "" ? "—" : qty(Number(v))}`;
     }).join("\n");
-    const company = chosenBagCompany(d);
     return (
       head +
-      `📅 Date: ${esc(d.date)}\n` +
-      `🏭 ኩባንያ: <b>${esc(company === null ? String(d.bagCompanyOther || "") : bagCompanyName(company))}</b>\n\n` +
+      `📅 Date: ${esc(d.date)}\n\n` +
       `🧺 <b>የገቡ ከረጢቶች (ቁጥር)</b>\n${lines}\n` +
       `  ─────────\n  <b>ጠቅላላ: ${qty(ppBagTotal(d))}</b>\n`
     );
@@ -2120,7 +2059,9 @@ export function assetPreview(state: AssetFlowState): string {
       (a, c) => a + (Number(d[`${DELIVERED_PREFIX}${c}`]) || 0),
       0
     );
-    const bags = BAG_KINDS.map(({ size, colour }) => cell(bagKey(size, colour), bagLabel(size, colour))).join("\n");
+    const bags = BAG_SIZES.flatMap((size) =>
+      BAG_STOCK[size].map((colour) => cell(bagKey(size, colour), bagLabel(size, colour)))
+    ).join("\n");
 
     return (
       head +
@@ -2865,13 +2806,9 @@ export async function saveAssetReport(
     // receipt. This form is filed by the store, and the column defaults to
     // 'finance' — so it has to be said, or every delivery would be filed under
     // a department that did not file it.
-    // The company is applied to every colour of the delivery; a company typed
-    // under "Other" is added first, so it is a known company from now on.
-    const company =
-      chosenBagCompany(d) ?? (await addBagCompany(String(d.bagCompanyOther || "")));
     const [row] = await sql<{ id: string }[]>`
       insert into pp_bag_purchases (date, bags, reported_by, filed_by_dept, source)
-      values (${reportDate(d.date)}, ${sql.json(bagsReceived(d, company))}, ${reportedBy}, 'asset', 'telegram')
+      values (${reportDate(d.date)}, ${sql.json(bagsReceived(d))}, ${reportedBy}, 'asset', 'telegram')
       returning id`;
     return { id: row.id, table: "pp_bag_purchases" };
   }

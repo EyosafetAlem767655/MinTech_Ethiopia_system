@@ -2,10 +2,8 @@ import {
   BAG_KINDS,
   FINANCE_RAW_MATERIALS,
   PRODUCT_ORDER,
-  bagBaseLabel,
   bagLabel,
   productLabel,
-  splitBagColour,
   type BagSize,
 } from "@/lib/products";
 
@@ -133,17 +131,11 @@ function buildLookup() {
     bags.set(norm(bagLabel(size, colour)), entry);
     bags.set(norm(`${size} ${colour}`), entry);
     bags.set(norm(`${size}:${colour}`), entry);
-    // The label without a company, as it read before companies: Great Wall.
-    if (!splitBagColour(colour).company) {
-      bags.set(norm(`${bagBaseLabel(size, colour)} PP bag`), entry);
-      bags.set(norm(bagBaseLabel(size, colour)), entry);
-    }
   }
   return { brands, materials, bags };
 }
 
-/** Rebuilt per paste: a company added from the bot must be recognised. */
-let LOOKUP = buildLookup();
+const LOOKUP = buildLookup();
 
 function detectSection(line: string): FinanceSection | undefined {
   // A line carrying a value is data, never a header — which is what lets the
@@ -195,7 +187,6 @@ export interface ParsedFinancePaste {
  * they missed a line.
  */
 export function parseFinancePaste(text: string, opts: { usdRate?: boolean } = {}): ParsedFinancePaste {
-  LOOKUP = buildLookup();
   const values: Record<string, string | number> = {};
   const unknown: string[] = [];
   const invalid: string[] = [];
