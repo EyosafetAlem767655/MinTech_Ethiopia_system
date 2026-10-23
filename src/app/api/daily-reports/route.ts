@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import sql from "@/lib/sql";
 import { eatDateKey } from "@/lib/bot-auth";
-import { requiresDailyReport, submissionTablesFor } from "@/lib/positions";
+import { submissionTablesFor } from "@/lib/positions";
 import { daysFor, reporterDaysByTable } from "@/lib/compliance";
 
 export const dynamic = "force-dynamic";
@@ -42,7 +42,7 @@ export async function GET(req: NextRequest) {
         from daily_reports order by created_at desc limit ${limit}
     `,
     sql<{ id: string; full_name: string; positions: string[] }[]>`
-      select id, full_name, positions from telegram_users where active = true order by full_name
+      select id, full_name, positions from telegram_users where archived_at is null order by full_name
     `,
     /**
      * WHAT EACH PERSON ACTUALLY FILED, per EAT day.
@@ -94,9 +94,10 @@ export async function GET(req: NextRequest) {
   const recentActivity = countsByName(activityRows);
   const monthActivity = countsByName(monthRows);
 
-  // Only employees whose role obliges a daily report are held to compliance.
-  // Purchase-only, monthly-only and HR/Admin recipients are excluded.
-  const expected = activeEmployees.filter((u) => requiresDailyReport(u.positions));
+  // EVERY bot user in Settings → Employees is tracked (archived ones aside):
+  // the owner wants the whole roster on the board, not only the roles that owe
+  // a daily report. "Missing today" means has not used the bot today.
+  const expected = activeEmployees;
 
   // Compliance is measured against each role's OWN submission tables. Counting
   // `daily_reports` alone meant roles that report through the guided flows could

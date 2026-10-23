@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   CAPABILITIES,
@@ -376,6 +376,8 @@ function SubmissionDetail(props: {
   busy: boolean;
   error: string;
   onDraft: (d: Record<string, string>) => void;
+  /** The full record's values, once loaded: the starting point of an edit. */
+  onBase: (d: Record<string, string>) => void;
   onEdit: () => void;
   onCancelEdit: () => void;
   onSave: () => void;
@@ -406,6 +408,28 @@ function SubmissionDetail(props: {
   }, [onClose]);
 
   const full = data?.row ?? row;
+
+  // Editing starts from the SUBMITTED record — every editable field filled with
+  // what was filed, read from the full row rather than the short list row,
+  // which does not carry every column. Filled once per edit, so typing is
+  // never overwritten.
+  const filledFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (!editing) {
+      filledFor.current = null;
+      return;
+    }
+    if (!data || filledFor.current === String(row.id)) return;
+    filledFor.current = String(row.id);
+    const vals: Record<string, string> = {};
+    for (const key of spec.editableKeys) {
+      const v = data.row[key];
+      vals[key] = v == null ? "" : typeof v === "object" ? JSON.stringify(v) : String(v);
+    }
+    props.onBase(vals);
+    props.onDraft(vals);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editing, data, row.id]);
   const labelled = spec.displayFields.map((f) => f.column);
   const labelOf = (col: string) => spec.displayFields.find((f) => f.column === col)?.label ?? humanise(col);
   const columns = [
@@ -444,8 +468,12 @@ function SubmissionDetail(props: {
           {editing ? (
             <div className="space-y-2">
               {spec.editableKeys.map((key) => {
-                const f = spec.displayFields.find((x) => x.key === key);
-                if (!f) return null;
+                const f = spec.displayFields.find((x) => x.key === key) ?? {
+                  key,
+                  column: key,
+                  label: humanise(key),
+                  type: "text" as const,
+                };
                 return (
                   <label key={key} className="block text-[11px] font-bold text-stone-500">
                     {f.label}
@@ -467,24 +495,28 @@ function SubmissionDetail(props: {
                   </label>
                 );
               })}
+              <p className="text-[10px] text-stone-400">
+                Change only what is wrong — fields left as they are keep their submitted value.
+              </p>
             </div>
-          ) : (
-            data && (
-              <dl className="grid grid-cols-1 gap-x-4 gap-y-2 text-xs sm:grid-cols-[160px_1fr]">
-                {columns.map((c) => (
-                  <Fragment key={c}>
-                    <dt className="font-bold text-stone-500">{labelOf(c)}</dt>
-                    <dd className="text-stone-800">
-                      <DetailValue value={full[c]} />
-                    </dd>
-                  </Fragment>
-                ))}
-              </dl>
-            )
+          ) : null}
+
+          {/* The whole submitted record stays on screen while editing, so the
+              correction is made against it rather than from memory. */}
+          {data && (
+            <dl className="grid grid-cols-1 gap-x-4 gap-y-2 text-xs sm:grid-cols-[160px_1fr]">
+              {columns.map((c) => (
+                <Fragment key={c}>
+                  <dt className="font-bold text-stone-500">{labelOf(c)}</dt>
+                  <dd className="text-stone-800">
+                    <DetailValue value={full[c]} />
+                  </dd>
+                </Fragment>
+              ))}
+            </dl>
           )}
 
-          {!editing &&
-            data?.children
+          {data?.children
               .filter((c) => c.rows.length > 0)
               .map((c) => {
                 const cols = Object.keys(c.rows[0]).filter((k) => !PLUMBING.has(k) && !/_id$/.test(k) && k !== "created_at");
@@ -615,6 +647,8 @@ function SubmissionsTab() {
   const [q, setQ] = useState("");
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState<Record<string, string>>({});
+  /** The record's values when editing began — only what differs from these is saved. */
+  const [editBase, setEditBase] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [bin, setBin] = useState<BinRow[] | null>(null);
@@ -716,16 +750,25 @@ function SubmissionsTab() {
     const d: Record<string, string> = {};
     for (const key of spec.editableKeys) d[key] = row[key] == null ? "" : String(row[key]);
     setDraft(d);
+    setEditBase(d);
     setEditing(String(row.id));
   };
 
   const save = async (row: SubmissionRow) => {
+    // Only the fields actually changed are sent. Sending the whole form wrote
+    // every field back — a field that had not loaded, or was left alone, could
+    // overwrite the submitted value as if the record were being re-typed.
+    const changed = Object.fromEntries(Object.entries(draft).filter(([k, v]) => v !== (editBase[k] ?? "")));
+    if (Object.keys(changed).length === 0) {
+      setEditing(null);
+      return;
+    }
     setBusy(true);
     setError("");
     const res = await fetch(`/api/submissions/${collectionOf(row)}/${row.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(draft),
+      body: JSON.stringify(changed),
     });
     setBusy(false);
     if (!res.ok) {
@@ -992,6 +1035,7 @@ function SubmissionsTab() {
           busy={busy}
           error={error}
           onDraft={setDraft}
+          onBase={setEditBase}
           onEdit={() => startEdit(open)}
           onCancelEdit={() => setEditing(null)}
           onSave={() => save(open)}

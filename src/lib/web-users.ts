@@ -127,6 +127,21 @@ export async function setWebUserRevoked(id: string, revoked: boolean): Promise<b
   return true;
 }
 
+/**
+ * Delete an account from the database for good.
+ *
+ * Its devices are revoked FIRST and detached from it: the sessions table would
+ * otherwise drop them with the account (on delete cascade), and a session row
+ * that no longer exists reads as "not revoked" to the middleware — the person
+ * would stay signed in on a cookie whose account is gone.
+ */
+export async function deleteWebUser(id: string): Promise<boolean> {
+  await sql`update web_sessions set revoked_at = coalesce(revoked_at, now()), user_id = null
+             where user_id = ${id}::uuid`.catch((e) => console.warn("could not revoke the account's sessions:", e));
+  const rows = await sql<{ id: string }[]>`delete from web_users where id = ${id}::uuid returning id`;
+  return rows.length > 0;
+}
+
 async function revokeUserSessions(userId: string): Promise<void> {
   await sql`update web_sessions set revoked_at = now() where user_id = ${userId}::uuid and revoked_at is null`.catch(
     (e) => console.warn("could not revoke the account's sessions:", e)

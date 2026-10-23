@@ -77,6 +77,41 @@ export default function WebUsersPanel() {
     }
   };
 
+  /** A test SMS / email, to see what each gateway answers. */
+  const [test, setTest] = useState({ phone: "", email: "" });
+  const [testResult, setTestResult] = useState("");
+  const runTest = async () => {
+    setBusy(true);
+    setTestResult("");
+    try {
+      const res = await fetch("/api/web-users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ test: true, phone: test.phone.trim(), email: test.email.trim() }),
+      });
+      const d = await res.json().catch(() => ({}));
+      setTestResult(res.ok ? sentLine(d.sent ?? {}) || "Nothing to send — give a phone or an email." : d.error || "Test failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async (u: WebUser) => {
+    if (!confirm(`Delete ${u.name}'s account for good? This cannot be undone — they are signed out everywhere.`)) return;
+    setBusy(true);
+    setError("");
+    try {
+      const res = await fetch(`/api/web-users?id=${u.id}`, { method: "DELETE" });
+      if (!res.ok) {
+        setError((await res.json().catch(() => ({}))).error || "Could not delete the account.");
+        return;
+      }
+      await load();
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const act = async (u: WebUser, action: "revoke" | "restore" | "reset") => {
     const ask =
       action === "revoke"
@@ -139,6 +174,36 @@ export default function WebUsersPanel() {
           </button>
         </div>
       )}
+
+      <div className="rounded-2xl border border-stone-200 bg-white p-4">
+        <h2 className="text-sm font-bold text-stone-900">Test sending</h2>
+        <p className="mt-0.5 text-xs text-stone-500">
+          Sends a short test message and shows exactly what the SMS gateway and Gmail answered.
+        </p>
+        <div className="mt-3 grid gap-2 sm:grid-cols-3">
+          <input
+            value={test.phone}
+            onChange={(e) => setTest({ ...test, phone: e.target.value })}
+            placeholder="Phone (e.g. 0911234567)"
+            className="rounded-lg border border-stone-200 px-3 py-2 text-sm"
+          />
+          <input
+            value={test.email}
+            onChange={(e) => setTest({ ...test, email: e.target.value })}
+            placeholder="Email"
+            className="rounded-lg border border-stone-200 px-3 py-2 text-sm"
+          />
+          <button
+            type="button"
+            disabled={busy || (!test.phone.trim() && !test.email.trim())}
+            onClick={runTest}
+            className="rounded-lg bg-stone-700 px-4 py-2 text-sm font-bold text-white disabled:opacity-50"
+          >
+            {busy ? "Sending…" : "Send test"}
+          </button>
+        </div>
+        {testResult && <p className="mt-2 break-words text-[11px] font-bold text-stone-700">{testResult}</p>}
+      </div>
 
       <form onSubmit={create} className="rounded-2xl border border-stone-200 bg-white p-4">
         <h2 className="text-sm font-bold text-stone-900">Add a dashboard user</h2>
@@ -249,6 +314,13 @@ export default function WebUsersPanel() {
                     </button>
                   </>
                 )}
+                <button
+                  disabled={busy}
+                  onClick={() => remove(u)}
+                  className="rounded-full border border-red-300 px-3 py-1 text-[11px] font-bold text-red-700 disabled:opacity-50"
+                >
+                  🗑 Delete
+                </button>
               </div>
             </div>
           ))}

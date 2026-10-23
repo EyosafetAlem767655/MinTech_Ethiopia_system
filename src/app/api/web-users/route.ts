@@ -3,8 +3,10 @@ import { envValue } from "@/lib/env";
 import { mailConfigured, sendMail } from "@/lib/mailer";
 import { sendSms, smsGatewayConfigured } from "@/lib/sms";
 import { ROLE_LABEL } from "@/lib/roles";
+import { logError } from "@/lib/errors";
 import {
   createWebUser,
+  deleteWebUser,
   listWebUsers,
   resetWebUserPassword,
   setWebUserRevoked,
@@ -40,12 +42,47 @@ async function deliver(user: WebUser, password: string, send: { sms?: boolean; e
     out.sms = { ok: r.ok, error: r.ok ? undefined : r.error };
   }
   if (send.email && user.email) out.email = await sendMail(user.email, "Your MinTech dashboard login", text);
+  await reportFailures(out, user.name);
   return out;
 }
 
-/** POST — create an account: { name, role, phone?, email?, sendSms?, sendEmail? }. */
+/** A failed send is recorded under Settings → Errors with the gateway's own reason. */
+async function reportFailures(
+  out: { sms?: { ok: boolean; error?: string }; email?: { ok: boolean; error?: string } },
+  who: string
+) {
+  for (const [channel, r] of Object.entries(out)) {
+    if (!r || r.ok) continue;
+    await logError({
+      source: "web-users",
+      kind: `login_${channel}_failed`,
+      message: r.error || "unknown error",
+      detail: { channel, account: who },
+    }).catch(() => {});
+  }
+}
+
+/**
+ * POST — create an account: { name, role, phone?, email?, sendSms?, sendEmail? }.
+ * POST { test: true, phone?, email? } — send a test SMS / email and report
+ * exactly what each gateway answered, so a send that is not arriving can be
+ * told apart from one that is refused.
+ */
 export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => ({}));
+  if (body.test) {
+    const text = "MinTech dashboard: test message. If you can read this, sending logins works.";
+    const out: { sms?: { ok: boolean; error?: string }; email?: { ok: boolean; error?: string } } = {};
+    if (body.phone) {
+      const r = await sendSms(String(body.phone), text);
+      out.sms = r.skipped
+        ? { ok: false, error: "SMS is not configured: set HTTPSMS_API_KEY and PHONE_NUMBER in Vercel." }
+        : { ok: r.ok, error: r.ok ? undefined : r.error };
+    }
+    if (body.email) out.email = await sendMail(String(body.email), "MinTech dashboard — test", text);
+    await reportFailures(out, "test");
+    return NextResponse.json({ ok: true, sent: out });
+  }
   try {
     const { user, password } = await createWebUser({
       name: String(body.name || ""),
@@ -80,4 +117,12 @@ export async function PATCH(req: NextRequest) {
     return NextResponse.json({ ok: true, user: res.user, password: res.password, sent });
   }
   return NextResponse.json({ error: "action must be revoke, restore or reset" }, { status: 400 });
+}
+
+/** DELETE ?id= — remove an account from the database for good. */
+export async function DELETE(req: NextRequest) {
+  const id = req.nextUrl.searchParams.get("id") || "";
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return NextResponse.json({ error: "Unknown account." }, { status: 400 });
+  const ok = await deleteWebUser(id);
+  return ok ? NextResponse.json({ ok: true }) : NextResponse.json({ error: "Unknown account." }, { status: 404 });
 }
