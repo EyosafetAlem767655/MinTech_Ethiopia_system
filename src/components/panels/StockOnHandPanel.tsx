@@ -5,7 +5,7 @@ import RangeSelector from "@/components/RangeSelector";
 import { Chart, ScrollTable } from "@/components/panels/TableChart";
 import { BrandDayBars, BrandLines } from "@/components/panels/BrandCharts";
 import { RANGES, rangeWindow, type Bucket, type RangeKey } from "@/lib/ranges";
-import { BAG_KINDS, PRODUCTION_PRODUCTS, bagLabel, orderProducts, productLabel } from "@/lib/products";
+import { BAG_KINDS, COMPANY_BAG_KINDS, PRODUCTION_PRODUCTS, bagLabel, orderProducts, productLabel } from "@/lib/products";
 import type { BagSize } from "@/lib/products";
 
 /**
@@ -159,6 +159,13 @@ export default function StockOnHandPanel() {
     return [...map.entries()].sort(([a], [b]) => b.localeCompare(a));
   }, [ops, win]);
 
+  /* Only the bag kinds counted in the window: each company's, and those
+     recorded before companies only where history is shown. */
+  const bagCols = useMemo(() => {
+    const used = BAG_KINDS.filter(({ size, colour }) => bagDays.some(([, v]) => Number(v.bags?.[size]?.[colour]) > 0));
+    return used.length > 0 ? used : COMPANY_BAG_KINDS;
+  }, [bagDays]);
+
   if (ops === null) return <div className="card h-64 animate-pulse bg-clay-50" />;
 
   return (
@@ -222,7 +229,7 @@ export default function StockOnHandPanel() {
         <thead className="sticky top-0 z-10 bg-clay-50 text-[10px] uppercase tracking-wide text-stone-500 shadow-[0_1px_0_#f3e3dd]">
           <tr>
             <th className="p-2 text-left font-bold">Date</th>
-            {BAG_KINDS.map(({ size, colour }) => (
+            {bagCols.map(({ size, colour }) => (
               <th key={`${size}-${colour}`} className="p-2 font-bold">
                 {bagLabel(size, colour)}
               </th>
@@ -234,7 +241,7 @@ export default function StockOnHandPanel() {
           {bagDays.map(([day, v]) => (
             <tr key={day} className="border-t border-clay-50">
               <td className="p-2 text-left font-semibold text-stone-800">{fmtDate(day)}</td>
-              {BAG_KINDS.map(({ size, colour }) => (
+              {bagCols.map(({ size, colour }) => (
                 <td key={`${size}-${colour}`} className="p-2 tabular-nums text-stone-700">
                   {num(v.bags?.[size]?.[colour])}
                 </td>

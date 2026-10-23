@@ -1,9 +1,11 @@
 import {
-  BAG_SIZES,
-  BAG_STOCK,
   PRODUCTION_PRODUCTS,
-  bagLabel,
+  bagColourFor,
+  bagCompanyHeading,
+  companyBagBlock,
+  matchBagLine,
   productLabel,
+  splitBagColour,
   type BagSize,
 } from "@/lib/products";
 
@@ -62,9 +64,8 @@ const H_BAGS = "--- PP Bag count ---";
  */
 export function productionTemplate(): string {
   const products = PRODUCTION_PRODUCTS.map((c) => `${productLabel(c)}=`).join("\n");
-  const bags = BAG_SIZES.flatMap((size) =>
-    BAG_STOCK[size].map((colour) => `${bagLabel(size, colour)}=`)
-  ).join("\n");
+  // Counted per company, under a heading each.
+  const bags = companyBagBlock();
 
   return [
     "FGR=",
@@ -101,23 +102,25 @@ const norm = (s: string) => s.toLowerCase().replace(/[\s\-_.]/g, "");
  */
 function buildLookup(): {
   products: Map<string, string>;
-  bags: Map<string, { size: BagSize; colour: string }>;
 } {
   const products = new Map<string, string>();
   for (const code of PRODUCTION_PRODUCTS) {
     products.set(norm(code), code);
     products.set(norm(productLabel(code)), code);
   }
+  return { products };
+}
 
-  const bags = new Map<string, { size: BagSize; colour: string }>();
-  for (const size of BAG_SIZES) {
-    for (const colour of BAG_STOCK[size]) {
-      bags.set(norm(bagLabel(size, colour)), { size, colour });
-      // "kg25 Yellow" — the stored shape, in case someone copies from the API.
-      bags.set(norm(`${size} ${colour}`), { size, colour });
-    }
-  }
-  return { products, bags };
+/**
+ * A bag line under the PP Bag count, with the company heading it sits under.
+ * Null when it is not a bag, or names no company — a count that belongs to
+ * neither company cannot be filed.
+ */
+function companyBag(name: string, company: string): { size: BagSize; colour: string } | null {
+  const bag = matchBagLine(name);
+  if (!bag) return null;
+  const colour = splitBagColour(bag.colour).company ? bag.colour : bagColourFor(bag.colour, company);
+  return splitBagColour(colour).company ? { size: bag.size, colour } : null;
 }
 
 const LOOKUP = buildLookup();
@@ -201,11 +204,21 @@ export function parseProductionPaste(text: string): ParsedPaste {
   const unknown: string[] = [];
   const invalid: string[] = [];
   let section: Section = null;
+  // Inside the PP Bag count: the company heading the lines below belong to.
+  let company = "";
 
   for (const rawLine of text.split(/\r?\n/)) {
     const line = rawLine.trim();
     if (!line) continue;
     if (isGuidance(line)) continue;
+
+    if (section === "bags") {
+      const heading = bagCompanyHeading(line);
+      if (heading) {
+        company = heading;
+        continue;
+      }
+    }
 
     const found = detectSection(line);
     if (found) {
@@ -229,7 +242,7 @@ export function parseProductionPaste(text: string): ParsedPaste {
     // not zero.
     if (!value && nk !== norm("FGR") && nk !== norm("FGR No")) {
       if (section === "bags") {
-        const bag = LOOKUP.bags.get(nk);
+        const bag = companyBag(key, company);
         if (bag) values[bagKey(bag.size, bag.colour)] = 0;
         continue;
       }
@@ -257,7 +270,7 @@ export function parseProductionPaste(text: string): ParsedPaste {
     }
 
     if (section === "bags") {
-      const bag = LOOKUP.bags.get(nk);
+      const bag = companyBag(key, company);
       if (!bag) {
         unknown.push(line);
         continue;
@@ -284,7 +297,7 @@ export function parseProductionPaste(text: string): ParsedPaste {
     // A product line before any section header is ambiguous — it could be any of
     // the three product tables. Reporting it is honest; guessing would put
     // tonnage in the wrong column with no way to tell afterwards.
-    if (LOOKUP.products.has(nk) || LOOKUP.bags.has(nk)) unknown.push(line);
+    if (LOOKUP.products.has(nk) || matchBagLine(key)) unknown.push(line);
   }
 
   return { values, unknown, invalid };

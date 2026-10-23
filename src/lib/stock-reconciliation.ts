@@ -1,7 +1,8 @@
 import sql from "@/lib/sql";
 import {
-  BAG_KINDS,
   BAG_KIND_KEYS,
+  COMPANY_BAG_KINDS,
+  LEGACY_BAG_KINDS,
   bagKindCount,
   bagLabel,
   bagLedgerKey,
@@ -9,6 +10,7 @@ import {
   type BagSize,
 } from "@/lib/products";
 import { monthBounds, monthLabel } from "@/lib/finance-report";
+import { bagCompanyOpening, hasCompanyBags, notBeforeOpening } from "@/lib/bag-opening";
 
 /**
  * Does the floor agree with the paperwork?
@@ -86,6 +88,10 @@ const n = (v: unknown) => Number(v) || 0;
  */
 export async function reconcileBags(month = monthLabel()): Promise<ReconciliationResult> {
   const { start, end } = monthBounds(month);
+  // The per-company opening (bag-opening.ts): company movements count only
+  // after it, so the bags it already counted are not counted again.
+  const opening = await bagCompanyOpening(start, end);
+  const after = opening.after;
 
   const [base, grvLines, sivLines, bagReceipts, usedLines, latestCount] = await Promise.all([
     sql<{ bags: Record<string, number> }[]>`
@@ -97,6 +103,7 @@ export async function reconcileBags(month = monthLabel()): Promise<Reconciliatio
         join goods_receiving_vouchers v on v.id = i.grv_id
        where v.date >= ${start} and v.date < ${end}
          and i.ledger_kind = 'bag' and i.ledger_key is not null
+         and (i.ledger_key not like '%@%' or v.date > ${after})
        group by i.ledger_key
     `.catch(() => []),
     sql<{ ledger_key: string; qty: string }[]>`
@@ -105,13 +112,14 @@ export async function reconcileBags(month = monthLabel()): Promise<Reconciliatio
         join store_issue_vouchers v on v.id = i.siv_id
        where v.date >= ${start} and v.date < ${end}
          and i.ledger_kind = 'bag' and i.ledger_key is not null
+         and (i.ledger_key not like '%@%' or v.date > ${after})
        group by i.ledger_key
     `.catch(() => []),
     // Bags received on the PP bag receiving form. It writes the nested
     // { kg25: { Yellow: n } } shape asset management has always counted in, so
     // it is flattened to ledger keys below rather than in SQL.
-    sql<{ bags: BagCounts }[]>`
-      select bags from pp_bag_purchases where date >= ${start} and date < ${end}
+    sql<{ bags: BagCounts; date: Date }[]>`
+      select bags, date from pp_bag_purchases where date >= ${start} and date < ${end}
     `.catch(() => []),
     // The daily PP bag usage report, per kind. See usedLines below.
     sql<{ ledger_key: string; qty: string }[]>`
@@ -119,6 +127,7 @@ export async function reconcileBags(month = monthLabel()): Promise<Reconciliatio
         from pp_bag_usage_items i
         join pp_bag_usage u on u.id = i.usage_id
        where u.date >= ${start} and u.date < ${end}
+         and (i.ledger_key not like '%@%' or u.date > ${after})
        group by i.ledger_key
     `.catch(() => []),
     // The most recent day production actually counted bags. Not "today": a
@@ -138,7 +147,10 @@ export async function reconcileBags(month = monthLabel()): Promise<Reconciliatio
   // be lined up: the opening balance writes `bag:kg25:Yellow` into its jsonb,
   // both voucher ledgers write `kg25:Yellow`, and production's count nests the
   // colour under the size. `bagLedgerKey` is the single spelling they share.
-  const baseMap = (base[0]?.bags || {}) as Record<string, number>;
+  // A per-company count taken during the month is the companies' opening (it
+  // is later than any balance filed for the 1st); otherwise the filed balance.
+  const filedBase = (base[0]?.bags || {}) as Record<string, number>;
+  const baseMap = opening.from ? { ...filedBase, ...opening.values } : filedBase;
   const received: Record<string, number> = Object.fromEntries(BAG_KIND_KEYS.map((k) => [k, 0]));
   const issued: Record<string, number> = Object.fromEntries(BAG_KIND_KEYS.map((k) => [k, 0]));
 
@@ -158,6 +170,7 @@ export async function reconcileBags(month = monthLabel()): Promise<Reconciliatio
       if (!value || typeof value !== "object") continue;
       for (const [colour, pieces] of Object.entries(value)) {
         const key = `${size}:${colour}`;
+        if (!notBeforeOpening(key, receipt.date, after)) continue;
         if (key in received) received[key] += n(pieces);
       }
     }
@@ -182,7 +195,14 @@ export async function reconcileBags(month = monthLabel()): Promise<Reconciliatio
 
   const countRow = latestCount[0];
 
-  const rows: BagReconciliation[] = BAG_KINDS.map(({ size, colour }) => {
+  // From the first per-company count on, the stock is checked per company and
+  // the kinds recorded before companies are history: their bags are inside
+  // that count. A month before it is checked exactly as it always was.
+  const companyEra =
+    opening.from !== null || hasCompanyBags(filedBase) || (countRow ? JSON.stringify(countRow.bags).includes("@") : false);
+  const kinds = companyEra ? COMPANY_BAG_KINDS : LEGACY_BAG_KINDS;
+
+  const rows: BagReconciliation[] = kinds.map(({ size, colour }) => {
     const key = bagLedgerKey(size, colour);
     const baseBalance = n(baseMap[key]);
     const expected = baseBalance + received[key] - issued[key];

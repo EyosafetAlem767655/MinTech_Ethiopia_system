@@ -70,15 +70,143 @@ export const BAG_STOCK: Record<BagSize, readonly string[]> = {
 
 export const BAG_SIZE_LABEL: Record<BagSize, string> = { kg25: "25KG", kg40: "40KG" };
 
-/** "25KG Yellow" — the column heading and the paste-template key. */
-export function bagLabel(size: BagSize, colour: string): string {
-  return `${BAG_SIZE_LABEL[size]} ${colour}`;
+/* ─────────────────────── Who made the bag (the company) ─────────────────────
+ *
+ * From the opening count of 23 Oct 2026 every PP bag figure — received, used,
+ * damaged, counted, priced — is kept per manufacturer. The company rides in
+ * the colour string after an "@":
+ *
+ *     "Yellow"               → recorded before companies (history, left as is)
+ *     "Yellow@great-wall"    → Great Wall Packaging
+ *     "Yellow@ethio-india"   → Ethio-India
+ *
+ * So a ledger key is "kg40:Yellow@ethio-india" and a nested count is
+ * { kg40: { "Yellow@ethio-india": n } }. Nothing filed before is rewritten:
+ * a key with no company is history and is shown exactly as it was.
+ */
+
+export interface BagCompany {
+  key: string;
+  name: string;
+  /** The name in a table heading. */
+  short: string;
 }
 
-/** Every bag kind in table order — the six columns, flattened once. */
-export const BAG_KINDS: { size: BagSize; colour: string }[] = BAG_SIZES.flatMap((size) =>
+export const BAG_COMPANIES: BagCompany[] = [
+  { key: "great-wall", name: "Great Wall Packaging", short: "Great Wall" },
+  { key: "ethio-india", name: "Ethio-India", short: "Ethio-India" },
+];
+
+/** The colour as written, and the company key after its "@" ("" = before companies). */
+export function splitBagColour(colour: string): { base: string; company: string } {
+  const at = String(colour || "").indexOf("@");
+  return at < 0 ? { base: colour, company: "" } : { base: colour.slice(0, at), company: colour.slice(at + 1) };
+}
+
+/** A colour for one company's bag: "Yellow" + "ethio-india" → "Yellow@ethio-india". */
+export function bagColourFor(base: string, company: string): string {
+  return company ? `${base}@${company}` : base;
+}
+
+export function bagCompanyName(key: string): string {
+  return BAG_COMPANIES.find((c) => c.key === key)?.name ?? key;
+}
+
+/** Is this ledger key one company's bag (rather than history)? */
+export function isCompanyBagKey(key: string): boolean {
+  return String(key || "").includes("@");
+}
+
+/**
+ * The company a heading line names — "Great wall packaging", "Ethio India-",
+ * "--- Ethio-India ---" — or null. A line carrying a value is never a heading.
+ */
+export function bagCompanyHeading(line: string): string | null {
+  if (/[=:]/.test(line) || /\d/.test(line)) return null;
+  const n = String(line || "").toLowerCase().replace(/[^a-z]/g, "");
+  if (n.includes("greatwall")) return "great-wall";
+  // "Ethio lndia" (a typed l for the I) included.
+  if (n.includes("ethio")) return "ethio-india";
+  return null;
+}
+
+/** "25KG Yellow · Ethio-India" — the column heading; history reads "25KG Yellow". */
+export function bagLabel(size: BagSize, colour: string): string {
+  const { base, company } = splitBagColour(colour);
+  if (!company) return `${BAG_SIZE_LABEL[size]} ${colour}`;
+  const short = BAG_COMPANIES.find((c) => c.key === company)?.short ?? company;
+  return `${BAG_SIZE_LABEL[size]} ${base} · ${short}`;
+}
+
+/** "25KG Yellow" — the label without the company, as a line under a company heading. */
+export function bagBaseLabel(size: BagSize, colour: string): string {
+  return `${BAG_SIZE_LABEL[size]} ${splitBagColour(colour).base}`;
+}
+
+/** The eight kinds as recorded before companies — history only. */
+export const LEGACY_BAG_KINDS: { size: BagSize; colour: string }[] = BAG_SIZES.flatMap((size) =>
   BAG_STOCK[size].map((colour) => ({ size, colour }))
 );
+
+/** One company's eight kinds. */
+export function companyBagKinds(company: string): { size: BagSize; colour: string }[] {
+  return LEGACY_BAG_KINDS.map(({ size, colour }) => ({ size, colour: bagColourFor(colour, company) }));
+}
+
+/** Every company's kinds, company by company — what is asked from now on. */
+export const COMPANY_BAG_KINDS: { size: BagSize; colour: string }[] = BAG_COMPANIES.flatMap((c) =>
+  companyBagKinds(c.key)
+);
+
+/**
+ * Every bag kind that can be READ: history first, then each company's. Asking
+ * uses COMPANY_BAG_KINDS; anything that sums or shows stored figures uses this,
+ * so a figure filed before companies is never dropped.
+ */
+export const BAG_KINDS: { size: BagSize; colour: string }[] = [...LEGACY_BAG_KINDS, ...COMPANY_BAG_KINDS];
+
+/**
+ * A bag block grouped by company, the way the plant writes it:
+ *
+ *     Great Wall Packaging
+ *     25KG Yellow=…
+ *     …
+ *     Ethio-India
+ *     25KG Yellow=…
+ *
+ * `value` fills each line (blank by default).
+ */
+export function companyBagBlock(value: (size: BagSize, colour: string) => string = () => ""): string {
+  return BAG_COMPANIES.map((c) =>
+    [c.name, ...companyBagKinds(c.key).map(({ size, colour }) => `${bagBaseLabel(size, colour)}=${value(size, colour)}`)].join("\n")
+  ).join("\n\n");
+}
+
+/**
+ * A bag line's name, loosely: "25kg bag yellow", "25KG Yellow PP bag",
+ * "40kg bag color less" all read as the same kind. Returns the size and the
+ * colour WITHOUT a company — the heading above the line supplies that — or,
+ * for a full label like "25KG Yellow · Ethio-India", the company's colour.
+ */
+export function matchBagLine(name: string): { size: BagSize; colour: string } | null {
+  const raw = String(name || "");
+  // A company written on the line itself.
+  let company = "";
+  const dot = raw.split(/[·@]/);
+  if (dot.length > 1) company = bagCompanyHeading(dot.slice(1).join(" ")) ?? "";
+  const n = dot[0]
+    .toLowerCase()
+    .replace(/colou?r\s*less/g, "colorless")
+    .replace(/\b(pp|bags?|ከረጢት)\b/g, "")
+    .replace(/[^a-z0-9]/g, "");
+  for (const size of BAG_SIZES) {
+    for (const colour of BAG_STOCK[size]) {
+      const label = `${BAG_SIZE_LABEL[size]}${colour}`.toLowerCase();
+      if (n === label || n === `${size}${colour}`.toLowerCase()) return { size, colour: bagColourFor(colour, company) };
+    }
+  }
+  return null;
+}
 
 /** A bag count map in either shape: totals per size, or a colour breakdown. */
 export type BagCounts = Record<string, number | Record<string, number> | null | undefined>;
@@ -149,11 +277,16 @@ export function bagLedgerKey(size: BagSize, colour: string): string {
  */
 export const BAG_KIND_KEYS: string[] = BAG_KINDS.map(({ size, colour }) => bagLedgerKey(size, colour));
 
-/** The reverse, returning null for anything that is not one of the six kinds. */
+/** Each company's kinds as ledger keys — what is asked from now on. */
+export const COMPANY_BAG_KIND_KEYS: string[] = COMPANY_BAG_KINDS.map(({ size, colour }) => bagLedgerKey(size, colour));
+
+/** The reverse, returning null for anything that is not a bag kind (history or a company's). */
 export function parseBagLedgerKey(key: string): { size: BagSize; colour: string } | null {
   const [size, colour] = String(key || "").split(":");
   if (!(BAG_SIZES as readonly string[]).includes(size)) return null;
-  if (!BAG_STOCK[size as BagSize].includes(colour)) return null;
+  const { base, company } = splitBagColour(colour || "");
+  if (!BAG_STOCK[size as BagSize].includes(base)) return null;
+  if (company && !BAG_COMPANIES.some((c) => c.key === company)) return null;
   return { size: size as BagSize, colour };
 }
 
@@ -161,7 +294,7 @@ export function parseBagLedgerKey(key: string): { size: BagSize; colour: string 
 export function ledgerChoices(kinds: readonly LedgerKind[] = ["bag", "material"]) {
   const out: { kind: LedgerKind; key: string; label: string; unit: "pcs" | "t" }[] = [];
   if (kinds.includes("bag")) {
-    for (const { size, colour } of BAG_KINDS) {
+    for (const { size, colour } of COMPANY_BAG_KINDS) {
       out.push({
         kind: "bag",
         key: bagLedgerKey(size, colour),

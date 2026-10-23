@@ -1,8 +1,10 @@
 import sql from "@/lib/sql";
 import { rawMaterialOpening } from "@/lib/raw-material-opening";
+import { bagCompanyOpening, hasCompanyBags, notBeforeOpening } from "@/lib/bag-opening";
 import {
-  BAG_KINDS,
   BAG_KIND_KEYS,
+  COMPANY_BAG_KINDS,
+  LEGACY_BAG_KINDS,
   BAG_SIZES,
   BAG_SIZE_LABEL,
   FINANCE_RAW_MATERIALS,
@@ -195,6 +197,10 @@ function sumMaps(rows: { m: Record<string, number> | null }[]): Record<string, n
 
 export async function buildFinanceReport(month: string): Promise<FinanceReport> {
   const { start, end } = monthBounds(month);
+  // PP bags per company start from their opening (bag-opening.ts); company
+  // movements count only after it.
+  const bagOpening = await bagCompanyOpening(start, end);
+  const after = bagOpening.after;
 
   const [
     base,
@@ -243,8 +249,8 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
     // Goods Receiving Voucher replaced it, but a closed month must still
     // reproduce the figures it was signed off with, so it is unioned in rather
     // than dropped. Nothing can double-count: no flow writes both.
-    sql<{ m: BagCounts }[]>`
-      select bags as m from pp_bag_purchases where date >= ${start} and date < ${end}
+    sql<{ m: BagCounts; date: Date }[]>`
+      select bags as m, date from pp_bag_purchases where date >= ${start} and date < ${end}
     `.catch(() => []),
     // Retired alongside it — the daily raw-material issue, replaced by the Store
     // Issue Voucher for the same reason.
@@ -262,6 +268,7 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
         join goods_receiving_vouchers v on v.id = i.grv_id
        where v.date >= ${start} and v.date < ${end}
          and i.ledger_kind = 'bag' and i.ledger_key is not null
+         and (i.ledger_key not like '%@%' or v.date > ${after})
        group by i.ledger_key
     `.catch(() => []),
     // Everything issued on a Store Issue Voucher, bags and raw materials alike.
@@ -271,6 +278,7 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
         join store_issue_vouchers v on v.id = i.siv_id
        where v.date >= ${start} and v.date < ${end}
          and i.ledger_kind is not null and i.ledger_key is not null
+         and (i.ledger_kind <> 'bag' or i.ledger_key not like '%@%' or v.date > ${after})
        group by i.ledger_kind, i.ledger_key
     `.catch(() => []),
     // The daily raw-material report (0033). Already keyed by the three finance
@@ -284,6 +292,7 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
         from pp_bag_usage_items i
         join pp_bag_usage u on u.id = i.usage_id
        where u.date >= ${start} and u.date < ${end}
+         and (i.ledger_key not like '%@%' or u.date > ${after})
        group by i.ledger_key
     `.catch(() => []),
     // Raw material opening: the balance filed for the month, or last month's
@@ -342,6 +351,7 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
         // Already per colour — key it straight through.
         for (const [colour, qtyBought] of Object.entries(value)) {
           const key = bagLedgerKey(size as (typeof BAG_SIZES)[number], colour);
+          if (!notBeforeOpening(key, row.date, after)) continue;
           if (key in bagsBoughtMap) bagsBoughtMap[key] += n(qtyBought);
         }
       } else if (size in legacyBagsWithoutColour) {
@@ -438,9 +448,17 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
 
   // One row per bag KIND. Bags are counted, not weighed, so they carry their own
   // unit and never contribute to a tonnage total.
-  for (const { size, colour } of BAG_KINDS) {
+  //
+  // From the first per-company count on, the rows are per company and start
+  // from that count; the kinds recorded before companies are inside it, so
+  // valuing them too would count the same bags twice. A month before it
+  // reads exactly as it always did.
+  const filedBags = (baseRow?.bags || {}) as Record<string, number>;
+  const companyEra = bagOpening.from !== null || hasCompanyBags(filedBags);
+  const bagBase = bagOpening.from ? { ...filedBags, ...bagOpening.values } : filedBags;
+  for (const { size, colour } of companyEra ? COMPANY_BAG_KINDS : LEGACY_BAG_KINDS) {
     const key = bagLedgerKey(size, colour);
-    const baseBalance = Math.round(n(baseRow?.bags?.[key]));
+    const baseBalance = Math.round(n(bagBase[key]));
     const rec = Math.round(n(bagsBoughtMap[key]));
     const total = baseBalance + rec;
     const issue = Math.round(n(issuedBags[key]));
@@ -515,7 +533,7 @@ export function priceListItems(): { key: string; label: string; unit: string }[]
     ...FINANCE_RAW_MATERIALS.map((code) => ({ key: code, label: code, unit: "ETB/ton" })),
     // One price per KIND. The colours cost different amounts and are packed
     // separately, so a single price per size would value three products alike.
-    ...BAG_KINDS.map(({ size, colour }) => ({
+    ...COMPANY_BAG_KINDS.map(({ size, colour }) => ({
       key: bagLedgerKey(size, colour),
       label: `${bagLabel(size, colour)} PP bag`,
       unit: "ETB/piece",

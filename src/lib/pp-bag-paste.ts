@@ -1,4 +1,14 @@
-import { BAG_KINDS, bagLabel, bagLedgerKey, parseBagLedgerKey, type BagSize } from "@/lib/products";
+import {
+  BAG_KINDS,
+  bagColourFor,
+  bagCompanyHeading,
+  bagLedgerKey,
+  companyBagBlock,
+  matchBagLine,
+  parseBagLedgerKey,
+  splitBagColour,
+  type BagSize,
+} from "@/lib/products";
 
 /**
  * The fill-in block for a PP bag delivery, and its parser.
@@ -42,28 +52,12 @@ export function ledgerKeyOf(draftKey: string): string | null {
  * over from last time would be a receipt nobody took.
  */
 export function ppBagTemplate(): string {
-  return BAG_KINDS.map(({ size, colour }) => `${bagLabel(size, colour)}=`).join("\n");
+  // One block, a section per company — the way the plant writes its stock.
+  return companyBagBlock();
 }
 
 /* ─────────────────────────────── Parsing ──────────────────────────────────── */
 
-/** Loose key match: case, spaces, hyphens, dots and colons are all noise. */
-const norm = (s: string) => s.toLowerCase().replace(/[\s\-_.:]/g, "");
-
-/** Every spelling of a bag kind → its ledger key, built once. */
-const LOOKUP: Map<string, string> = (() => {
-  const out = new Map<string, string>();
-  for (const { size, colour } of BAG_KINDS) {
-    const key = bagLedgerKey(size, colour);
-    out.set(norm(bagLabel(size, colour)), key);
-    out.set(norm(`${bagLabel(size, colour)} PP`), key);
-    out.set(norm(`${bagLabel(size, colour)} PP bag`), key);
-    // The stored spelling, so a figure copied off the dashboard pastes back in.
-    out.set(norm(key), key);
-    out.set(norm(`${size} ${colour}`), key);
-  }
-  return out;
-})();
 
 function isGuidance(line: string): boolean {
   if (/^[#>/(]/.test(line)) return true;
@@ -106,17 +100,30 @@ export function parsePpBagPaste(text: string): ParsedPpBags {
   const values: Record<string, number> = {};
   const unknown: string[] = [];
   const invalid: string[] = [];
+  // The company heading the lines below it belong to.
+  let company = "";
 
   for (const rawLine of text.split(/\r?\n/)) {
     const line = rawLine.trim();
     if (!line) continue;
     if (isGuidance(line)) continue;
 
+    const heading = bagCompanyHeading(line);
+    if (heading) {
+      company = heading;
+      continue;
+    }
+
     const pair = splitPair(line);
     if (!pair) continue;
     const [name, value] = pair;
 
-    const key = LOOKUP.get(norm(name));
+    // A bag line names its kind; the company comes from the heading above it
+    // (or the line itself). A bag with no company cannot be filed — it would
+    // land on neither company's stock.
+    const bag = matchBagLine(name);
+    const colour = bag ? (splitBagColour(bag.colour).company ? bag.colour : bagColourFor(bag.colour, company)) : "";
+    const key = bag && splitBagColour(colour).company ? bagLedgerKey(bag.size, colour) : null;
     if (!key) {
       // Only complain about lines that were plainly meant as data.
       if (/\d/.test(value)) unknown.push(line);

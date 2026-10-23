@@ -37,6 +37,7 @@ import {
   RETIRED_FLOWS,
   DOWNTIME_ROWS_STEP,
   oldBagPriceKey,
+  BAG_STOCK_KEY,
   saveAssetReport,
   applyPurchaseItemMatch,
   PURCHASE_ITEM_STEP,
@@ -100,7 +101,7 @@ import { SALES_KEYS, applySalesExtraction, parseSalesPaste, salesEditBlock, sale
 import { applyFlowEdit, describeFlowChanges, editableFields, renderFieldList } from "@/lib/flow-edit";
 import { dailyHeartbeat } from "@/lib/heartbeat";
 import { loadImage, loadImages, telegramFileId } from "@/lib/images";
-import { BAG_KIND_KEYS, PRODUCT_ORDER, productLabel } from "@/lib/products";
+import { BAG_KIND_KEYS, PRODUCT_ORDER, isCompanyBagKey, productLabel } from "@/lib/products";
 import { monthLabel } from "@/lib/finance-report";
 import { PP_BAG_PHOTO_KIND, processPpDamageReport, ppVerdictMessage } from "@/lib/pp-bag-damage";
 import {
@@ -1771,6 +1772,16 @@ async function startAssetFlow(
   // car is asked for.
   if (kind === "store_issue" || kind === "tool_request") {
     draft[MACHINES_KEY] = JSON.stringify(await recentMachines().catch(() => []));
+  }
+  // PP bags used or damaged can only be bags in stock: the list, by company,
+  // comes from the stock check once, here, and travels in the draft.
+  if (kind === "pp_bag_used" || kind === "pp_bag_damage") {
+    const check = await reconcileBags().catch(() => null);
+    const inStock = (check?.rows ?? [])
+      .filter((r) => isCompanyBagKey(r.key))
+      .map((r) => ({ key: r.key, label: r.label, qty: r.counted ?? r.expected }))
+      .filter((b) => b.qty > 0);
+    draft[BAG_STOCK_KEY] = JSON.stringify(inStock);
   }
   if (kind === "pp_bag_price") {
     const [row] = await sql<{ prices: Record<string, number> }[]>`

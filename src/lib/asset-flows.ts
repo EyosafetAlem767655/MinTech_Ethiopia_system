@@ -1,7 +1,11 @@
 import sql from "@/lib/sql";
 import {
+  BAG_COMPANIES,
   BAG_KINDS,
   BAG_KIND_KEYS,
+  COMPANY_BAG_KINDS,
+  bagBaseLabel,
+  companyBagKinds,
   BAG_SIZES,
   BAG_SIZE_LABEL,
   BAG_STOCK,
@@ -498,6 +502,39 @@ const TOOL_REQUEST_STEPS: AssetStep[] = [
   { id: "notes", label: "Notes", prompt: "🗒 ተጨማሪ ማስታወሻ ካለ ይፃፉ።", type: "text", skippable: true },
 ];
 
+/**
+ * The PP bags in stock, by company — what the usage and damage forms offer.
+ *
+ * Read from the stock check when the flow opens (the webhook seeds it, like
+ * the credit lists), so a bag that is not on hand cannot be chosen. Each
+ * button names the company and how many are there. With nothing seeded — no
+ * per-company count yet — every company's kinds are offered rather than none.
+ */
+export const BAG_STOCK_KEY = "_bagStock";
+
+export interface InStockBag {
+  key: string;
+  label: string;
+  qty: number;
+}
+
+function inStockBagChoices(d: Record<string, string | number>): { label: string; value: string }[] {
+  let list: InStockBag[] = [];
+  try {
+    const raw = d[BAG_STOCK_KEY];
+    list = typeof raw === "string" && raw ? (JSON.parse(raw) as InStockBag[]) : [];
+  } catch {
+    list = [];
+  }
+  if (list.length > 0) {
+    return list.map((b) => ({ label: `${b.label} (${b.qty.toLocaleString("en-US")})`, value: b.key }));
+  }
+  return COMPANY_BAG_KINDS.map(({ size, colour }) => ({
+    label: `${bagLabel(size, colour)} PP`,
+    value: bagLedgerKey(size, colour),
+  }));
+}
+
 /** Piles one damage report can carry. The report is weekly, so several. */
 export const MAX_DAMAGE_PILES = 6;
 
@@ -538,12 +575,10 @@ const PP_BAG_DAMAGE_STEPS: AssetStep[] = [
       },
       {
         id: k.kind,
-        prompt: `🧺 ክምር ${i} — የትኛው ከረጢት ነው?`,
+        prompt: `🧺 ክምር ${i} — የትኛው ከረጢት ነው? (ኩባንያውን ጨምሮ — ያሉት ብቻ)`,
         type: "choice",
-        choices: BAG_KINDS.map(({ size, colour }) => ({
-          label: `${bagLabel(size, colour)} PP`,
-          value: bagLedgerKey(size, colour),
-        })),
+        // Only the bags in stock, each with its company.
+        choicesFrom: inStockBagChoices,
         when: asked,
       },
       {
@@ -1002,12 +1037,10 @@ const PP_BAG_USED_STEPS: AssetStep[] = [
       {
         id: k.kind,
         label: `ዕቃ ${i} · ከረጢት`,
-        prompt: `🧺 ዕቃ ${i} — የትኛው ከረጢት ዋለ?`,
+        prompt: `🧺 ዕቃ ${i} — የትኛው ከረጢት ዋለ? (ኩባንያውን ጨምሮ — ያሉት ብቻ)`,
         type: "choice",
-        choices: BAG_KINDS.map(({ size, colour }) => ({
-          label: `${bagLabel(size, colour)} PP`,
-          value: bagLedgerKey(size, colour),
-        })),
+        // Only the bags in stock, each with its company.
+        choicesFrom: inStockBagChoices,
         when: asked,
       },
       {
@@ -1420,8 +1453,8 @@ const PP_BAG_RECEIPT_STEPS: AssetStep[] = [
     id: "paste",
     prompt:
       "🧺 የሚከተለውን ቅጂ ሞልተው ይመልሱት።\n\n" +
-      "<i>የገባውን ብዛት (ቁጥር) ከ = በኋላ ይፃፉ። ለምሳሌ፦</i>\n" +
-      "<code>25KG Yellow = 400</code>\n" +
+      "<i>የገባውን ብዛት (ቁጥር) በአምራቹ ኩባንያ ስር ከ = በኋላ ይፃፉ። ለምሳሌ፦</i>\n" +
+      "<code>Ethio-India\n25KG Yellow = 400</code>\n" +
       "<i>ያልገባውን ባዶ ይተዉት።</i>",
     type: "paste",
   },
@@ -1895,13 +1928,10 @@ export function productionTotal(draft: Record<string, string | number>): number 
 /** The stock count as `daily_ops_reports.bags` stores it: { kg25: {…}, kg40: {…} }. */
 function bagMap(draft: Record<string, string | number>): Record<string, Record<string, number>> {
   const out: Record<string, Record<string, number>> = {};
-  for (const size of BAG_SIZES) {
-    const inner: Record<string, number> = {};
-    for (const colour of BAG_STOCK[size]) {
-      const v = Number(draft[bagKey(size as BagSize, colour)]) || 0;
-      if (v !== 0) inner[colour] = v;
-    }
-    if (Object.keys(inner).length > 0) out[size] = inner;
+  // Every kind, each company's included: the count is kept per manufacturer.
+  for (const { size, colour } of BAG_KINDS) {
+    const v = Number(draft[bagKey(size, colour)]) || 0;
+    if (v !== 0) out[size] = { ...(out[size] || {}), [colour]: v };
   }
   return out;
 }
@@ -2005,11 +2035,14 @@ export function assetPreview(state: AssetFlowState): string {
   }
 
   if (state.kind === "pp_bag_receipt") {
-    const lines = BAG_KINDS.map(({ size, colour }) => {
-      const v = d[ppBagKey(size, colour)];
-      // A kind with no figure is shown as a dash, not as 0: none of that colour
-      // arrived, which is different from a delivery of none.
-      return `  • ${bagLabel(size, colour)}: ${v === undefined || v === "" ? "—" : qty(Number(v))}`;
+    // By company. A kind with no figure is shown as a dash, not as 0: none of
+    // that colour arrived, which is different from a delivery of none.
+    const lines = BAG_COMPANIES.map((c) => {
+      const kinds = companyBagKinds(c.key).map(({ size, colour }) => {
+        const v = d[ppBagKey(size, colour)];
+        return `  • ${bagBaseLabel(size, colour)}: ${v === undefined || v === "" ? "—" : qty(Number(v))}`;
+      });
+      return `🏭 <b>${esc(c.name)}</b>\n${kinds.join("\n")}`;
     }).join("\n");
     return (
       head +
@@ -2059,8 +2092,12 @@ export function assetPreview(state: AssetFlowState): string {
       (a, c) => a + (Number(d[`${DELIVERED_PREFIX}${c}`]) || 0),
       0
     );
-    const bags = BAG_SIZES.flatMap((size) =>
-      BAG_STOCK[size].map((colour) => cell(bagKey(size, colour), bagLabel(size, colour)))
+    const bags = BAG_COMPANIES.map(
+      (c) =>
+        `🏭 <b>${esc(c.name)}</b>\n` +
+        companyBagKinds(c.key)
+          .map(({ size, colour }) => cell(bagKey(size, colour), bagBaseLabel(size, colour)))
+          .join("\n")
     ).join("\n");
 
     return (
@@ -2186,7 +2223,7 @@ export function assetPreview(state: AssetFlowState): string {
 
     const brands = PRODUCT_ORDER.map((c) => cell(brandKey(c), productLabel(c), " ቶን"));
     const mats = FINANCE_RAW_MATERIALS.map((m) => cell(materialKey(m), m, " ቶን"));
-    const bags = BAG_KINDS.map(({ size, colour }) =>
+    const bags = COMPANY_BAG_KINDS.map(({ size, colour }) =>
       cell(bagFinanceKey(size, colour), `${bagLabel(size, colour)} PP`)
     );
 
@@ -2380,7 +2417,7 @@ export function assetPreview(state: AssetFlowState): string {
   }
 
   if (state.kind === "pp_bag_price") {
-    const rows = BAG_KINDS.map(({ size, colour }) => {
+    const rows = COMPANY_BAG_KINDS.map(({ size, colour }) => {
       const kind = `${size}:${colour}`;
       const before = Number(d[oldBagPriceKey(kind)]) || 0;
       const after = Number(d[bagFinanceKey(size, colour)]) || 0;

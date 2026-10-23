@@ -1,9 +1,12 @@
 import {
-  BAG_KINDS,
   FINANCE_RAW_MATERIALS,
   PRODUCT_ORDER,
-  bagLabel,
+  bagColourFor,
+  bagCompanyHeading,
+  companyBagBlock,
+  matchBagLine,
   productLabel,
+  splitBagColour,
   type BagSize,
 } from "@/lib/products";
 
@@ -68,7 +71,8 @@ function block(headers: [string, string, string]): string {
   // Six lines, one per kind. Two size lines would ask for a figure the parser
   // deliberately refuses to read, because a bare "25KG" does not say which of
   // its three colours it is.
-  const bags = BAG_KINDS.map(({ size, colour }) => `${bagLabel(size, colour)} PP bag=`).join("\n");
+  // Per company, under a heading each.
+  const bags = companyBagBlock();
   return [headers[0], brands, headers[1], materials, headers[2], bags].join("\n");
 }
 
@@ -92,11 +96,12 @@ export function baseBalanceTemplate(): string {
  * left blank — and a line sent back blank keeps whatever it had.
  */
 export function ppBagPriceTemplate(prices: Record<string, number> = {}): string {
-  const lines = BAG_KINDS.map(({ size, colour }) => {
+  // A price per company: the same size and colour costs differently by maker.
+  const block = companyBagBlock((size, colour) => {
     const v = Number(prices[`${size}:${colour}`]) || 0;
-    return `${bagLabel(size, colour)} PP bag=${v > 0 ? v : ""}`;
+    return v > 0 ? String(v) : "";
   });
-  return [H_BAGS_PRICE, ...lines].join("\n");
+  return [H_BAGS_PRICE, block].join("\n");
 }
 
 export function priceListTemplate(): string {
@@ -120,19 +125,19 @@ function buildLookup() {
   const materials = new Map<string, string>();
   for (const m of FINANCE_RAW_MATERIALS) materials.set(norm(m), m);
 
-  // Every spelling of a bag kind maps to { size, colour }. The bare size is
-  // deliberately NOT accepted: "25KG=4000" does not say which of the three
-  // colours it is, and splitting or guessing would put a price on the wrong one.
-  const bags = new Map<string, { size: BagSize; colour: string }>();
-  for (const { size, colour } of BAG_KINDS) {
-    const entry = { size, colour };
-    bags.set(norm(`${bagLabel(size, colour)} PP bag`), entry);
-    bags.set(norm(`${bagLabel(size, colour)} bag`), entry);
-    bags.set(norm(bagLabel(size, colour)), entry);
-    bags.set(norm(`${size} ${colour}`), entry);
-    bags.set(norm(`${size}:${colour}`), entry);
-  }
-  return { brands, materials, bags };
+  return { brands, materials };
+}
+
+/**
+ * A bag line under the bag section, with the company heading above it. The
+ * bare size is NOT accepted ("25KG=4000" names no colour), and neither is a
+ * bag with no company: it would be priced or counted for neither.
+ */
+function companyBag(name: string, company: string): { size: BagSize; colour: string } | null {
+  const bag = matchBagLine(name);
+  if (!bag) return null;
+  const colour = splitBagColour(bag.colour).company ? bag.colour : bagColourFor(bag.colour, company);
+  return splitBagColour(colour).company ? { size: bag.size, colour } : null;
 }
 
 const LOOKUP = buildLookup();
@@ -191,10 +196,20 @@ export function parseFinancePaste(text: string, opts: { usdRate?: boolean } = {}
   const unknown: string[] = [];
   const invalid: string[] = [];
   let section: FinanceSection | null = null;
+  // Inside the bag section: the company heading the lines below belong to.
+  let company = "";
 
   for (const rawLine of text.split(/\r?\n/)) {
     const line = rawLine.trim();
     if (!line) continue;
+
+    if (section === "bags") {
+      const heading = bagCompanyHeading(line);
+      if (heading) {
+        company = heading;
+        continue;
+      }
+    }
 
     const found = detectSection(line);
     if (found) {
@@ -217,7 +232,7 @@ export function parseFinancePaste(text: string, opts: { usdRate?: boolean } = {}
     }
 
     if (section === "bags") {
-      const bag = LOOKUP.bags.get(nk);
+      const bag = companyBag(key, company);
       if (!bag) {
         unknown.push(line);
         continue;
@@ -255,7 +270,7 @@ export function parseFinancePaste(text: string, opts: { usdRate?: boolean } = {}
     // Before any header, "Talc" is ambiguous — it is a brand on one table and a
     // raw material on the other. Reporting the line is honest; guessing would
     // put a figure on the wrong table with no way to notice afterwards.
-    if (LOOKUP.brands.has(nk) || LOOKUP.materials.has(nk) || LOOKUP.bags.has(nk)) unknown.push(line);
+    if (LOOKUP.brands.has(nk) || LOOKUP.materials.has(nk) || matchBagLine(key)) unknown.push(line);
   }
 
   return { values, unknown, invalid };

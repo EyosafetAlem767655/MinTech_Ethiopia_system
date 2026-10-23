@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { BAG_KINDS, bagLabel, bagLedgerKey } from "@/lib/products";
+import { BAG_KINDS, COMPANY_BAG_KINDS, bagLabel, bagLedgerKey } from "@/lib/products";
 
 /**
  * PP bags consumed, as reported daily from the bot.
@@ -30,11 +30,12 @@ interface Row {
 const fmtDate = (d: string) => new Date(d).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
 const num = (n: number) => (n ? Math.round(n).toLocaleString() : "");
 
-/** The six kinds as columns, in the same order as every other bag table. */
-const COLUMNS = BAG_KINDS.map(({ size, colour }) => ({
+/** Every kind as a column, in the same order as every other bag table. */
+const ALL_COLUMNS = BAG_KINDS.map(({ size, colour }) => ({
   key: bagLedgerKey(size, colour),
   label: bagLabel(size, colour),
 }));
+const COMPANY_COLUMNS = new Set(COMPANY_BAG_KINDS.map(({ size, colour }) => bagLedgerKey(size, colour)));
 
 export default function PpBagUsagePanel() {
   const [rows, setRows] = useState<Row[] | null>(null);
@@ -70,6 +71,9 @@ export default function PpBagUsagePanel() {
   if (!table) return <div className="card h-40 animate-pulse bg-clay-50" />;
 
   const columnTotal = (key: string) => table.reduce((a, r) => a + (r.byKind[key] || 0), 0);
+  // Only kinds actually used (each company's, and history where it is shown).
+  const used = ALL_COLUMNS.filter((c) => columnTotal(c.key) > 0);
+  const COLUMNS = used.length > 0 ? used : ALL_COLUMNS.filter((c) => COMPANY_COLUMNS.has(c.key));
   const grandTotal = table.reduce((a, r) => a + r.total, 0);
 
   return (
