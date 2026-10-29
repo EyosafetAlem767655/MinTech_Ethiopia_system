@@ -15,10 +15,13 @@ export const dynamic = "force-dynamic";
  * while the Brief's totals did.
  */
 export async function GET() {
+  // Grade 1 (0046) is read through to_jsonb so a database without the column
+  // still answers, with no Grade 1 on any day.
   const rows = await sql`
-    select id as _id, date, fgr_no as "fgrNo", reported_by as "reportedBy", products, created_at as "createdAt"
-      from production_reports
-     order by date desc, created_at desc
+    select p.id as _id, p.date, p.fgr_no as "fgrNo", p.reported_by as "reportedBy", p.products,
+           to_jsonb(p) -> 'grade1' as grade1, p.created_at as "createdAt"
+      from production_reports p
+     order by p.date desc, p.created_at desc
      limit 2000
   `;
 

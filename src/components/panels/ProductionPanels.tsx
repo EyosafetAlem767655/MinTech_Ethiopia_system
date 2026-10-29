@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import RangeSelector from "@/components/RangeSelector";
 import { Chart, ScrollTable } from "@/components/panels/TableChart";
 import { BrandDayBars, BrandLines } from "@/components/panels/BrandCharts";
@@ -28,6 +28,12 @@ interface ProductionRow {
   fgrNo: string | null;
   reportedBy: string;
   products: Record<string, number>;
+  /** The day's Grade 1 part (0046), kept out of every total here. */
+  grade1?: {
+    products?: Record<string, number>;
+    stock?: Record<string, number>;
+    delivered?: Record<string, number>;
+  } | null;
   /** When the report reached us, as opposed to the day it is for. */
   createdAt?: string | null;
 }
@@ -186,16 +192,36 @@ export default function ProductionPanels() {
         </thead>
         <tbody>
           {prodRows.map((r) => (
-            <tr key={r._id} className="border-t border-clay-50">
-              <td className="p-2 text-left font-semibold text-stone-800">{fmtDate(r.date)}</td>
-              <td className="p-2 text-left text-stone-500">{r.fgrNo || "—"}</td>
-              {prodCols.map((c) => (
-                <td key={c} className="p-2 tabular-nums text-stone-700">
-                  {num(r.products?.[c])}
-                </td>
-              ))}
-              <td className="p-2 font-bold tabular-nums text-clay-900">{num(sum(r.products))}</td>
-            </tr>
+            <Fragment key={r._id}>
+              <tr className="border-t border-clay-50">
+                <td className="p-2 text-left font-semibold text-stone-800">{fmtDate(r.date)}</td>
+                <td className="p-2 text-left text-stone-500">{r.fgrNo || "—"}</td>
+                {prodCols.map((c) => (
+                  <td key={c} className="p-2 tabular-nums text-stone-700">
+                    {num(r.products?.[c])}
+                  </td>
+                ))}
+                <td className="p-2 font-bold tabular-nums text-clay-900">{num(sum(r.products))}</td>
+              </tr>
+              {/* Grade 1 sits under its day, tagged, and is left out of every
+                  total and chart above: it is priced apart from normal grade. */}
+              {r.grade1 && (
+                <tr className="bg-amber-50/60 text-amber-900">
+                  <td className="p-2 text-left" colSpan={2}>
+                    <span className="rounded bg-amber-200 px-1.5 py-0.5 text-[10px] font-bold">⭐ Grade 1</span>
+                    <span className="ml-2 text-[10px] text-amber-700">
+                      stock {tons(sum(r.grade1.stock))} · delivered {tons(sum(r.grade1.delivered))}
+                    </span>
+                  </td>
+                  {prodCols.map((c) => (
+                    <td key={c} className="p-2 tabular-nums">
+                      {num(r.grade1?.products?.[c])}
+                    </td>
+                  ))}
+                  <td className="p-2 font-bold tabular-nums">{num(sum(r.grade1.products))}</td>
+                </tr>
+              )}
+            </Fragment>
           ))}
         </tbody>
         <tfoot className="sticky bottom-0 bg-clay-50 shadow-[0_-1px_0_#f3e3dd]">

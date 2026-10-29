@@ -33,6 +33,16 @@ export async function GET(req: Request) {
 
   if (rows === null) return NextResponse.json({ rows: [], check: null, unavailable: true });
 
+  // The latest submission of any date: the count is filed about once a month,
+  // so the panel shows the last one rather than a day-by-day table.
+  const [latest] = await sql<Record<string, unknown>[]>`
+    select id as _id, date, date_label as "dateLabel", received, issued, stock,
+           reported_by as "reportedBy", created_at as "createdAt"
+      from raw_material_daily
+     order by date desc, created_at desc
+     limit 1
+  `;
+
   const check = await rawMaterialCheck().catch(() => null);
-  return NextResponse.json({ rows, check });
+  return NextResponse.json({ rows, latest: latest ?? null, check });
 }

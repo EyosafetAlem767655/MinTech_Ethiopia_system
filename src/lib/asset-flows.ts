@@ -83,7 +83,17 @@ import {
   ppBagTemplate,
 } from "@/lib/pp-bag-paste";
 import { chaseHolder } from "@/lib/wht-sms";
-import { bagKey, productionTemplate, DELIVERED_PREFIX, PROD_PREFIX, STOCK_PREFIX } from "@/lib/production-paste";
+import {
+  bagKey,
+  grade1Template,
+  productionTemplate,
+  DELIVERED_PREFIX,
+  G1_DELIVERED_PREFIX,
+  G1_PROD_PREFIX,
+  G1_STOCK_PREFIX,
+  PROD_PREFIX,
+  STOCK_PREFIX,
+} from "@/lib/production-paste";
 import {
   BAG_PREFIX,
   BRAND_PREFIX,
@@ -655,6 +665,9 @@ export function damagePiles(
  * and turning it into a question they must answer before anything can be saved
  * is what made the old flow unfinishable.
  */
+export const GRADE1_STEP = "grade1";
+export const GRADE1_PASTE_STEP = "grade1Paste";
+
 const PRODUCTION_STEPS: AssetStep[] = [
   { id: "date", prompt: "📅 የሪፖርቱን ቀን ይምረጡ።", type: "date" },
   {
@@ -669,6 +682,27 @@ const PRODUCTION_STEPS: AssetStep[] = [
       "<code>ETL-15 = 12\n3-EL = 10</code>\n" +
       "<i>ያልተመረተውን 0 ይፃፉ ወይም ባዶ ይተዉት። የሌለውን መስመር አይሰርዙ።</i>",
     type: "paste",
+  },
+  // Grade 1 is produced rarely and priced apart. "No" goes straight to the
+  // review card, exactly as before; "yes" asks the same three product blocks
+  // again, saved apart from the normal grade (production_reports.grade1).
+  {
+    id: GRADE1_STEP,
+    label: "Grade 1?",
+    prompt: "⭐ Grade 1 ምርት አለ? (Is there a grade one production?)",
+    type: "choice",
+    choices: [
+      { label: "✅ አዎ", value: "yes" },
+      { label: "❌ የለም", value: "no" },
+    ],
+  },
+  {
+    id: GRADE1_PASTE_STEP,
+    prompt:
+      "⭐ <b>Grade 1</b> — የሚከተለውን ቅጂ በGrade 1 ምርት ብቻ ሞልተው ይመልሱት።\n" +
+      "<i>ቁጥሩን ከ = በኋላ ይፃፉ። ያልተመረተውን ባዶ ይተዉት።</i>",
+    type: "paste",
+    when: (d) => d[GRADE1_STEP] === "yes",
   },
 ];
 
@@ -1700,7 +1734,7 @@ export function pasteTemplate(
   draft: Record<string, string | number> = {},
   step = ""
 ): string {
-  if (kind === "production_daily") return productionTemplate();
+  if (kind === "production_daily") return step === GRADE1_PASTE_STEP ? grade1Template() : productionTemplate();
   if (kind === "base_balance") return baseBalanceTemplate();
   if (kind === "price_list") return priceListTemplate();
   if (kind === "pp_bag_price") {
@@ -1945,6 +1979,32 @@ function jsonMap(draft: Record<string, string | number>, prefix: string, keys: r
   return out;
 }
 
+/** The day's Grade 1 part, as production_reports.grade1 stores it. */
+function grade1Map(draft: Record<string, string | number>) {
+  return {
+    products: jsonMap(draft, G1_PROD_PREFIX, PRODUCTION_PRODUCTS),
+    stock: jsonMap(draft, G1_STOCK_PREFIX, PRODUCTION_PRODUCTS),
+    delivered: jsonMap(draft, G1_DELIVERED_PREFIX, PRODUCTION_PRODUCTS),
+  };
+}
+
+/** The Grade 1 section of the production review card. */
+function grade1Preview(
+  d: Record<string, string | number>,
+  cell: (key: string, label: string) => string
+): string {
+  const block = (prefix: string) =>
+    PRODUCTION_PRODUCTS.map((c) => cell(`${prefix}${c}`, productLabel(c))).join("\n");
+  const total = PRODUCTION_PRODUCTS.reduce((a, c) => a + (Number(d[`${G1_PROD_PREFIX}${c}`]) || 0), 0);
+  return (
+    `⭐ <b>GRADE 1</b>\n` +
+    `🏭 <b>የቀኑ ምርት (ቶን)</b>\n${block(G1_PROD_PREFIX)}\n` +
+    `  ─────────\n  <b>Total: ${qty(total)}</b>\n\n` +
+    `🚚 <b>Delivered amount (ቶን)</b>\n${block(G1_DELIVERED_PREFIX)}\n\n` +
+    `📦 <b>ክምችት (ቶን)</b>\n${block(G1_STOCK_PREFIX)}\n`
+  );
+}
+
 /* ──────────────────────────────── Previews ────────────────────────────────── */
 
 const esc = (s: unknown) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -2109,7 +2169,8 @@ export function assetPreview(state: AssetFlowState): string {
       `🚚 <b>Delivered amount (ቶን)</b>\n${delivered}\n` +
       `  ─────────\n  <b>Total: ${qty(deliveredTotal)}</b>\n\n` +
       `📦 <b>ክምችት (ቶን)</b>\n${stock}\n\n` +
-      `🧺 <b>ቀሪ ከረጢት (ብዛት)</b>\n${bags}\n`
+      `🧺 <b>ቀሪ ከረጢት (ብዛት)</b>\n${bags}\n` +
+      (d[GRADE1_STEP] === "yes" ? `\n${grade1Preview(d, cell)}` : "")
     );
   }
 
@@ -2877,11 +2938,22 @@ export async function saveAssetReport(
 
   if (state.kind === "production_daily") {
     const date = reportDate(d.date);
-    const [row] = await sql<{ id: string }[]>`
-      insert into production_reports (date, fgr_no, reported_by, products, source)
-      values (${date}, ${String(d.fgrNo || "") || null}, ${reportedBy},
-              ${sql.json(jsonMap(d, PROD_PREFIX, PRODUCTION_PRODUCTS))}, 'telegram')
-      returning id`;
+    // Grade 1 rides on the same row, in its own column, and only when there
+    // was one. Written in the same insert: before migration 0046 the column is
+    // missing and the save fails whole, rather than keeping the normal part and
+    // silently losing the Grade 1 figures.
+    const grade1 = d[GRADE1_STEP] === "yes" ? grade1Map(d) : null;
+    const [row] = grade1
+      ? await sql<{ id: string }[]>`
+          insert into production_reports (date, fgr_no, reported_by, products, grade1, source)
+          values (${date}, ${String(d.fgrNo || "") || null}, ${reportedBy},
+                  ${sql.json(jsonMap(d, PROD_PREFIX, PRODUCTION_PRODUCTS))}, ${sql.json(grade1)}, 'telegram')
+          returning id`
+      : await sql<{ id: string }[]>`
+          insert into production_reports (date, fgr_no, reported_by, products, source)
+          values (${date}, ${String(d.fgrNo || "") || null}, ${reportedBy},
+                  ${sql.json(jsonMap(d, PROD_PREFIX, PRODUCTION_PRODUCTS))}, 'telegram')
+          returning id`;
 
     // Stock and delivered both belong to the day's ops row, which is where the
     // pasted ops report has always written them. One number per day per column,

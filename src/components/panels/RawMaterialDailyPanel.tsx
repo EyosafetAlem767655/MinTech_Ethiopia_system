@@ -1,9 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import RangeSelector from "@/components/RangeSelector";
-import { ScrollTable } from "@/components/panels/TableChart";
-import { RANGES, type RangeKey } from "@/lib/ranges";
+import { useEffect, useState } from "react";
 import { FINANCE_RAW_MATERIALS } from "@/lib/products";
 
 /**
@@ -15,9 +12,10 @@ import { FINANCE_RAW_MATERIALS } from "@/lib/products";
  * Submissions; nothing was deleted. What changed is what the store files each
  * day, and this is the shape of it.
  *
- * Received and issued are FLOWS and foot; stock is a LEVEL and deliberately
- * does not — adding a month of daily stock counts produces a number that means
- * nothing. The check below does the only comparison worth making.
+ * The report is filed about once a month, so the panel shows the LATEST
+ * submission only, not a day-by-day table. Every day's row is still kept and
+ * readable under Settings → Submissions. The check below does the only
+ * comparison worth making.
  */
 
 interface Row {
@@ -56,51 +54,36 @@ const t = (n: number | null) =>
   n === null ? "—" : `${(Math.round(n * 1000) / 1000).toLocaleString()}`;
 
 export default function RawMaterialDailyPanel() {
-  const [range, setRange] = useState<RangeKey>("monthly");
-  const [rows, setRows] = useState<Row[] | null>(null);
+  const [latest, setLatest] = useState<Row | null | undefined>(undefined);
   const [check, setCheck] = useState<Check | null>(null);
   const [unavailable, setUnavailable] = useState(false);
 
   useEffect(() => {
     let alive = true;
-    setRows(null);
-    fetch(`/api/raw-material-daily?range=${range}`)
+    fetch(`/api/raw-material-daily`)
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (!alive) return;
-        setRows(Array.isArray(d?.rows) ? d.rows : []);
+        setLatest(d?.latest ?? null);
         setCheck(d?.check ?? null);
         setUnavailable(Boolean(d?.unavailable));
       })
       .catch(() => {
-        if (alive) setRows([]);
+        if (alive) setLatest(null);
       });
     return () => {
       alive = false;
     };
-  }, [range]);
+  }, []);
 
-  const totals = useMemo(() => {
-    const sum = (pick: (r: Row) => Record<string, number>) => {
-      const out: Record<string, number> = {};
-      for (const m of FINANCE_RAW_MATERIALS) {
-        out[m] = (rows ?? []).reduce((a, r) => a + (Number(pick(r)?.[m]) || 0), 0);
-      }
-      return out;
-    };
-    return { received: sum((r) => r.received), issued: sum((r) => r.issued) };
-  }, [rows]);
-
-  if (rows === null) return <div className="card h-64 animate-pulse bg-clay-50" />;
+  if (latest === undefined) return <div className="card h-64 animate-pulse bg-clay-50" />;
 
   return (
     <section className="space-y-3">
       <div className="flex flex-wrap items-baseline justify-between gap-2 px-1">
-        <h2 className="font-display text-lg font-bold">🧱 Raw material · daily</h2>
-        <p className="text-[11px] text-stone-400">tonnes · received, used, counted</p>
+        <h2 className="font-display text-lg font-bold">🧱 Raw material · latest</h2>
+        <p className="text-[11px] text-stone-400">tonnes · the last submission</p>
       </div>
-
-      <RangeSelector value={range} onChange={setRange} />
 
       {unavailable && (
         <p className="card p-3 text-xs text-amber-700">
@@ -108,83 +91,39 @@ export default function RawMaterialDailyPanel() {
         </p>
       )}
 
-      <ScrollTable
-        minWidth={720}
-        empty={rows.length === 0}
-        emptyLabel={`No daily raw-material reports in the ${RANGES[range].label.toLowerCase()} window.`}
-      >
-        <thead className="sticky top-0 z-10 bg-clay-50 text-[10px] uppercase tracking-wide text-stone-500 shadow-[0_1px_0_#f3e3dd]">
-          <tr>
-            <th className="p-2 text-left font-bold" rowSpan={2}>
-              Date
-            </th>
-            <th className="p-2 font-bold" colSpan={3}>
-              📥 Received
-            </th>
-            <th className="border-l border-clay-100 p-2 font-bold" colSpan={3}>
-              🏭 Issue
-            </th>
-            <th className="border-l border-clay-100 p-2 font-bold" colSpan={3}>
-              📦 Stock
-            </th>
-            <th className="border-l border-clay-100 p-2 text-left font-bold" rowSpan={2}>
-              By
-            </th>
-          </tr>
-          <tr>
-            {(["received", "issued", "stock"] as const).map((section) =>
-              FINANCE_RAW_MATERIALS.map((m, i) => (
-                <th
-                  key={`${section}-${m}`}
-                  className={`p-2 font-bold ${i === 0 && section !== "received" ? "border-l border-clay-100" : ""}`}
-                >
-                  {m}
-                </th>
-              ))
-            )}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r) => (
-            <tr key={r._id} className="border-t border-clay-50">
-              <td className="p-2 text-left font-semibold text-stone-800">{fmtDate(r.date)}</td>
-              {(["received", "issued", "stock"] as const).map((section) =>
-                FINANCE_RAW_MATERIALS.map((m, i) => (
-                  <td
-                    key={`${section}-${m}`}
-                    className={`p-2 tabular-nums text-stone-700 ${
-                      i === 0 && section !== "received" ? "border-l border-clay-50" : ""
-                    }`}
-                  >
-                    {num(r[section]?.[m])}
-                  </td>
-                ))
-              )}
-              <td className="border-l border-clay-50 p-2 text-left text-stone-500">{r.reportedBy}</td>
-            </tr>
-          ))}
-        </tbody>
-        {/* Received and issued foot; stock does not. Each stock figure is a
-            closing count, so a column of them adds up to nothing real. */}
-        <tfoot className="sticky bottom-0 bg-clay-50 shadow-[0_-1px_0_#f3e3dd]">
-          <tr className="font-bold">
-            <td className="p-2 text-left">Total</td>
-            {FINANCE_RAW_MATERIALS.map((m) => (
-              <td key={`tr-${m}`} className="p-2 tabular-nums">
-                {num(totals.received[m])}
-              </td>
-            ))}
-            {FINANCE_RAW_MATERIALS.map((m, i) => (
-              <td key={`ti-${m}`} className={`p-2 tabular-nums ${i === 0 ? "border-l border-clay-100" : ""}`}>
-                {num(totals.issued[m])}
-              </td>
-            ))}
-            <td colSpan={4} className="border-l border-clay-100 p-2 text-[10px] font-normal text-stone-400">
-              stock is a closing count
-            </td>
-          </tr>
-        </tfoot>
-      </ScrollTable>
+      {/* The count is filed about once a month, so the last submission is the
+          figure worth reading; a day-by-day table was mostly empty days. */}
+      {latest === null ? (
+        !unavailable && <p className="card p-3 text-xs text-stone-500">No raw-material report has been submitted yet.</p>
+      ) : (
+        <section className="card space-y-2 p-3">
+          <p className="text-[11px] text-stone-500">
+            Submitted for <b className="text-stone-800">{fmtDate(latest.date)}</b> by {latest.reportedBy}
+          </p>
+          <div className="-mx-1 overflow-x-auto">
+            <table className="w-full min-w-[360px] text-right text-xs">
+              <thead className="text-[10px] uppercase tracking-wide text-stone-500">
+                <tr>
+                  <th className="p-1.5 text-left font-bold">Material</th>
+                  <th className="p-1.5 font-bold">📥 Received</th>
+                  <th className="p-1.5 font-bold">🏭 Issue</th>
+                  <th className="p-1.5 font-bold">📦 Stock</th>
+                </tr>
+              </thead>
+              <tbody>
+                {FINANCE_RAW_MATERIALS.map((m) => (
+                  <tr key={m} className="border-t border-clay-50">
+                    <td className="p-1.5 text-left font-semibold text-stone-800">{m}</td>
+                    <td className="p-1.5 tabular-nums text-stone-700">{num(latest.received?.[m]) || "—"}</td>
+                    <td className="p-1.5 tabular-nums text-stone-700">{num(latest.issued?.[m]) || "—"}</td>
+                    <td className="p-1.5 font-semibold tabular-nums text-stone-800">{num(latest.stock?.[m]) || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
 
       {check && <StockCheck check={check} />}
     </section>

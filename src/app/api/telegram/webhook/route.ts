@@ -36,6 +36,8 @@ import {
   pasteTemplate,
   RETIRED_FLOWS,
   DOWNTIME_ROWS_STEP,
+  GRADE1_PASTE_STEP,
+  GRADE1_STEP,
   oldBagPriceKey,
   BAG_STOCK_KEY,
   saveAssetReport,
@@ -49,7 +51,7 @@ import {
   type AssetFlowState,
   type VoucherExtractionRecord,
 } from "@/lib/asset-flows";
-import { parseProductionPaste } from "@/lib/production-paste";
+import { parseGrade1Paste, parseProductionPaste } from "@/lib/production-paste";
 import { parseFinancePaste } from "@/lib/finance-paste";
 import { logError, resolveErrors } from "@/lib/errors";
 import { readWithBusyRetry } from "@/lib/llm-retry";
@@ -2474,7 +2476,14 @@ export async function POST(req: NextRequest) {
           /[=:]/.test(text || "") &&
           (text || "").includes("\n")
         ) {
-          state.step = "paste";
+          // The Grade 1 block is the one without the FGR line; it goes back to
+          // the Grade 1 step, so it can never be read over the normal figures.
+          state.step =
+            state.kind === "production_daily" &&
+            state.draft[GRADE1_STEP] === "yes" &&
+            !/^\s*FGR/im.test(text || "")
+              ? GRADE1_PASTE_STEP
+              : "paste";
           session.assetFlow = { ...state };
           await persist(session);
           // Falls through to the paste handler below on this same message.
@@ -2901,7 +2910,9 @@ export async function POST(req: NextRequest) {
         // to guess which column a line belonged to.
         const parsed =
           state.kind === "production_daily"
-            ? parseProductionPaste(val)
+            ? state.step === GRADE1_PASTE_STEP
+              ? parseGrade1Paste(val)
+              : parseProductionPaste(val)
             : state.kind === "sales_invoice"
               ? parseSalesPaste(val)
               : state.kind === "raw_material"

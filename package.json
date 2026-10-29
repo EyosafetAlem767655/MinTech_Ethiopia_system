@@ -12,6 +12,7 @@
     "telegram:set-webhook": "node scripts/set-telegram-webhook.mjs",
     "db:size": "node scripts/db-size.mjs",
     "seed:sales": "npx --yes tsx scripts/generate-sales-seed.ts",
+    "seed:sales-tin": "npx --yes tsx scripts/generate-sales-seed-tin.ts",
     "gen:vapid": "node -e \"const k=require('web-push').generateVAPIDKeys();console.log('VAPID_PUBLIC_KEY='+k.publicKey+'\\nVAPID_PRIVATE_KEY='+k.privateKey+'\\nNEXT_PUBLIC_VAPID_PUBLIC_KEY='+k.publicKey)\""
   },
   "dependencies": {

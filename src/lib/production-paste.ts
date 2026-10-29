@@ -302,3 +302,39 @@ export function parseProductionPaste(text: string): ParsedPaste {
 
   return { values, unknown, invalid };
 }
+
+/* ─────────────────────────────── Grade 1 ──────────────────────────────────── */
+
+/**
+ * Grade 1: produced rarely, priced apart, so kept apart.
+ *
+ * Asked after the normal report when someone answers that there was a Grade 1
+ * production that day. The same three product blocks, under prefixes of their
+ * own, so a Grade 1 figure can never land on top of the normal one — and no
+ * FGR or bags, which belong to the day, not the grade.
+ */
+export const G1_PROD_PREFIX = "g1prod:";
+export const G1_STOCK_PREFIX = "g1stock:";
+export const G1_DELIVERED_PREFIX = "g1deliver:";
+
+const G1_PREFIX: Record<string, string> = {
+  [PROD_PREFIX]: G1_PROD_PREFIX,
+  [STOCK_PREFIX]: G1_STOCK_PREFIX,
+  [DELIVERED_PREFIX]: G1_DELIVERED_PREFIX,
+};
+
+export function grade1Template(): string {
+  const products = PRODUCTION_PRODUCTS.map((c) => `${productLabel(c)}=`).join("\n");
+  return [H_PRODUCTION, products, H_STOCK, products, H_DELIVERED, products].join("\n");
+}
+
+/** Read a filled-in Grade 1 block: the three product tables only. */
+export function parseGrade1Paste(text: string): ParsedPaste {
+  const parsed = parseProductionPaste(text);
+  const values: Record<string, string | number> = {};
+  for (const [key, value] of Object.entries(parsed.values)) {
+    const prefix = Object.keys(G1_PREFIX).find((p) => key.startsWith(p));
+    if (prefix) values[G1_PREFIX[prefix] + key.slice(prefix.length)] = value;
+  }
+  return { ...parsed, values };
+}
