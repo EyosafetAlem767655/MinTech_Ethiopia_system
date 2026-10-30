@@ -478,7 +478,10 @@ export const POSITIONS: Record<PositionKey, Position> = {
     // The GRV replaced the tool purchase report and the PP bag receipt: one
     // voucher covers every kind of purchase, PP bags included as line items.
     // No bank sheet any more: per-bank cash is read off the sales report itself.
-    capabilities: ["grv", "price_list", "pp_bag_price", "wht_holder", "credit_payment", "rm_credit_purchase", "rm_credit_payment", "item_purchase"],
+    // No 🛍 item purchase any more: Finance → Purchase status reads what was
+    // bought off the GRV, so the purchase is not asked for a second time. Its
+    // past rows stay (item_purchases, below).
+    capabilities: ["grv", "price_list", "pp_bag_price", "wht_holder", "credit_payment", "rm_credit_purchase", "rm_credit_payment"],
     // Purchases are on-demand and the price list is monthly, so there is no
     // daily obligation to chase. The WHT chase is its own cron, not a reminder.
     dailyRequired: false,
