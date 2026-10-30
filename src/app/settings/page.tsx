@@ -3,12 +3,10 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
+  BOT_FUNCTIONALITIES,
   CAPABILITIES,
-  POSITIONS,
-  POSITION_GROUPS,
-  capabilitiesFor,
-  resolveCapabilities,
-  toggleCapability,
+  positionsToSelection,
+  selectionToPositions,
   type CapabilityKey,
   type PositionKey,
 } from "@/lib/positions";
@@ -53,6 +51,32 @@ interface Activity {
   detail?: string;
   ok: boolean;
   createdAt: string;
+}
+
+/** What the employee screen ticks: bot buttons, plus the two digest roles. */
+interface Selection {
+  caps: CapabilityKey[];
+  hr: boolean;
+  admin: boolean;
+}
+
+const EMPTY_SELECTION: Selection = { caps: [], hr: false, admin: false };
+
+const selectionEmpty = (s: Selection) => s.caps.length === 0 && !s.hr && !s.admin;
+
+/** The save body for a selection: the roles it implies and its buttons. */
+const selectionBody = (s: Selection) => ({
+  positions: selectionToPositions(s.caps, s.hr, s.admin),
+  capabilities: s.caps,
+});
+
+/** One line saying what an employee gets, in the same words as the picker. */
+function selectionSummary(u: BotUser): string {
+  const s = positionsToSelection(u.positions, u.capabilities);
+  const parts = s.caps.map((k) => CAPABILITIES[k].button);
+  if (s.hr) parts.push("👥 HR");
+  if (s.admin) parts.push("🛡 ADMIN");
+  return parts.join(" · ") || "Nothing ticked";
 }
 
 const fmtTime = (d: string) =>
@@ -1513,8 +1537,7 @@ function UsersTab() {
 
   const [fullName, setFullName] = useState("");
   const [password, setPassword] = useState("");
-  const [positions, setPositions] = useState<PositionKey[]>([]);
-  const [caps, setCaps] = useState<CapabilityKey[] | null>(null);
+  const [selection, setSelection] = useState<Selection>(EMPTY_SELECTION);
 
   const load = useCallback(async () => {
     const res = await fetch("/api/bot-users");
@@ -1525,9 +1548,6 @@ function UsersTab() {
     load();
   }, [load]);
 
-  const togglePosition = (p: PositionKey) =>
-    setPositions((prev) => (prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p]));
-
   const create = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true);
@@ -1535,7 +1555,7 @@ function UsersTab() {
     const res = await fetch("/api/bot-users", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fullName, password, positions, capabilities: caps ?? [] }),
+      body: JSON.stringify({ fullName, password, ...selectionBody(selection) }),
     });
     setBusy(false);
     if (!res.ok) {
@@ -1544,8 +1564,7 @@ function UsersTab() {
     }
     setFullName("");
     setPassword("");
-    setPositions([]);
-    setCaps(null);
+    setSelection(EMPTY_SELECTION);
     await load();
   };
 
@@ -1620,29 +1639,14 @@ function UsersTab() {
           />
         </div>
 
-        <p className="mt-3 text-xs font-bold uppercase tracking-widest text-stone-400">Departments &amp; reports</p>
-        <p className="mt-0.5 text-[11px] text-stone-400">
-          Tick any reports across departments this employee should handle.
-        </p>
-        <div className="mt-2">
-          <PositionPicker selected={positions} onToggle={togglePosition} caps={caps} onCapsChange={setCaps} />
+        <div className="mt-3">
+          <FunctionalityPicker value={selection} onChange={setSelection} />
         </div>
-
-        {positions.length > 0 && (
-          <p className="mt-2 text-[11px] text-stone-500">
-            Bot menu:{" "}
-            <span className="font-medium text-stone-700">
-              {resolveCapabilities(positions, caps)
-                .map((c) => c.button)
-                .join("  ·  ")}
-            </span>
-          </p>
-        )}
 
         {error && <p className="mt-2 text-xs text-red-600">{error}</p>}
 
         <button
-          disabled={busy || !fullName || !password || positions.length === 0}
+          disabled={busy || !fullName || !password || selectionEmpty(selection)}
           className="mt-3 rounded-xl bg-clay-700 px-4 py-2.5 text-sm font-bold text-white transition active:scale-[0.98] disabled:opacity-50"
         >
           {busy ? "Saving…" : "Add employee"}
@@ -1680,9 +1684,7 @@ function UsersTab() {
                       </span>
                     )}
                   </div>
-                  <p className="mt-0.5 text-xs text-stone-500">
-                    {u.positions.map((p) => POSITIONS[p]?.en).filter(Boolean).join(" · ") || "No position"}
-                  </p>
+                  <p className="mt-0.5 text-xs text-stone-500">{selectionSummary(u)}</p>
                   <p className="mt-0.5 text-[11px] text-stone-400">
                     {u.lastLoginAt ? `Last login ${fmtTime(u.lastLoginAt)}` : "Never signed in"}
                     {u.chatId ? ` · chat ${u.chatId}` : ""}
@@ -1692,7 +1694,7 @@ function UsersTab() {
 
               {canEdit && (
               <div className="mt-3 flex flex-wrap gap-1.5">
-                <SmallBtn label="Edit positions" onClick={() => setEditing(editing === u._id ? null : u._id)} />
+                <SmallBtn label="Edit functionalities" onClick={() => setEditing(editing === u._id ? null : u._id)} />
                 <SmallBtn label="Reset password" onClick={() => resetPassword(u._id, u.fullName)} />
                 {u.loggedIn && <SmallBtn label="Force sign-out" onClick={() => patch(u._id, { forceLogout: true })} />}
                 {locked && <SmallBtn label="Unlock" onClick={() => patch(u._id, { unlock: true })} />}
@@ -1707,13 +1709,12 @@ function UsersTab() {
 
               {editing === u._id && (
                 <PositionEditor
-                  initial={u.positions}
-                  initialCaps={u.capabilities?.length ? u.capabilities : null}
+                  initial={positionsToSelection(u.positions, u.capabilities)}
                   onCancel={() => setEditing(null)}
-                  onSave={async (next, nextCaps) => {
-                    // Always send capabilities: an empty array clears the
-                    // override, which is how "reset to defaults" is expressed.
-                    await patch(u._id, { positions: next, capabilities: nextCaps ?? [] });
+                  onSave={async (next) => {
+                    // The buttons are always sent as the explicit list; HR or
+                    // Admin with none ticked sends [] and is receive-only.
+                    await patch(u._id, selectionBody(next));
                     setEditing(null);
                   }}
                 />
@@ -1747,9 +1748,7 @@ function UsersTab() {
                         Archived
                       </span>
                     </div>
-                    <p className="mt-0.5 text-xs text-stone-400">
-                      {u.positions.map((p) => POSITIONS[p]?.en).filter(Boolean).join(" · ") || "No position"}
-                    </p>
+                    <p className="mt-0.5 text-xs text-stone-400">{selectionSummary(u)}</p>
                     <p className="mt-0.5 text-[11px] text-stone-400">
                       {u.archivedAt ? `Archived ${fmtTime(u.archivedAt)}` : ""} · reports kept
                     </p>
@@ -1771,33 +1770,25 @@ function UsersTab() {
 
 function PositionEditor({
   initial,
-  initialCaps,
   onSave,
   onCancel,
 }: {
-  initial: PositionKey[];
-  initialCaps: CapabilityKey[] | null;
-  onSave: (next: PositionKey[], caps: CapabilityKey[] | null) => void;
+  initial: Selection;
+  onSave: (next: Selection) => void;
   onCancel: () => void;
 }) {
-  const [next, setNext] = useState<PositionKey[]>(initial);
-  const [caps, setCaps] = useState<CapabilityKey[] | null>(initialCaps);
-  const toggle = (p: PositionKey) =>
-    setNext((prev) => (prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p]));
-
-  const effective = caps ?? capabilitiesFor(next).map((c) => c.key);
+  const [next, setNext] = useState<Selection>(initial);
 
   return (
     <div className="mt-3 rounded-xl bg-stone-50 p-3">
-      <PositionPicker selected={next} onToggle={toggle} caps={caps} onCapsChange={setCaps} />
+      <FunctionalityPicker value={next} onChange={setNext} />
       <div className="mt-3 flex gap-2">
         <SmallBtn
           label="Save"
           tone="green"
-          onClick={() => onSave(next, caps)}
-          // An employee with no functionalities has an empty bot menu and no way
-          // to file anything, so it is never a valid state to save.
-          disabled={next.length === 0 || effective.length === 0}
+          onClick={() => onSave(next)}
+          // Nothing ticked is no menu and no digest: deactivate instead.
+          disabled={selectionEmpty(next)}
         />
         <SmallBtn label="Cancel" onClick={onCancel} />
       </div>
@@ -1805,149 +1796,64 @@ function PositionEditor({
   );
 }
 
-/* ─────────────────────── Department-grouped role picker ────────────────────── */
-
-/** Every bot functionality this department's roles can grant, in menu order. */
-function departmentCapabilities(positions: readonly PositionKey[]): CapabilityKey[] {
-  const set = new Set<CapabilityKey>();
-  for (const p of positions) POSITIONS[p].capabilities.forEach((k) => set.add(k));
-  return (Object.keys(CAPABILITIES) as CapabilityKey[]).filter((k) => set.has(k));
-}
+/* ───────────────────────── Bot functionality picker ───────────────────────── */
 
 /**
- * Positions grant a default set of bot buttons; each button can then be ticked
- * or unticked for this one employee.
- *
- * `caps === null` means "no override — use whatever the ticked positions grant",
- * which is how every employee behaved before overrides existed. The first time a
- * box is unticked the resolved set is frozen into an explicit list.
+ * One flat list: every bot button, then HR and ADMIN. What is ticked is exactly
+ * the employee's bot menu. The department roles behind it are worked out on save
+ * (selectionToPositions) and never shown: picking roles and then buttons inside
+ * them was the confusing part.
  */
-function PositionPicker({
-  selected,
-  onToggle,
-  caps,
-  onCapsChange,
-}: {
-  selected: PositionKey[];
-  onToggle: (p: PositionKey) => void;
-  caps: CapabilityKey[] | null;
-  onCapsChange: (next: CapabilityKey[] | null) => void;
-}) {
-  const defaults = capabilitiesFor(selected).map((c) => c.key);
-  const effective = caps ?? defaults;
-
-  /**
-   * Tick or untick one bot button. The decision itself lives in positions.ts so
-   * it can be tested; this only applies the result to the two pieces of state.
-   */
-  const toggleCap = (key: CapabilityKey, groupPositions: readonly PositionKey[]) => {
-    const next = toggleCapability(key, { positions: selected, override: caps }, groupPositions);
-    for (const p of next.positions) if (!selected.includes(p)) onToggle(p);
-    onCapsChange(next.override);
+function FunctionalityPicker({ value, onChange }: { value: Selection; onChange: (next: Selection) => void }) {
+  const toggleCap = (key: CapabilityKey) => {
+    const on = value.caps.includes(key);
+    const caps = on ? value.caps.filter((k) => k !== key) : [...value.caps, key];
+    // Kept in list order, so the saved menu matches what is shown here.
+    onChange({ ...value, caps: BOT_FUNCTIONALITIES.filter((k) => caps.includes(k)) });
   };
 
+  const row = (key: string, checked: boolean, onToggle: () => void, label: string, note?: string) => (
+    <label
+      key={key}
+      className={`flex cursor-pointer items-start gap-2 rounded-md px-2 py-1.5 text-xs transition ${
+        checked ? "bg-clay-50 text-stone-900" : "text-stone-600 hover:bg-stone-50"
+      }`}
+    >
+      <input type="checkbox" checked={checked} onChange={onToggle} className="mt-0.5 accent-clay-700" />
+      <span className="min-w-0">
+        <span className="block">{label}</span>
+        {note && <span className="block text-[11px] text-stone-400">{note}</span>}
+      </span>
+    </label>
+  );
+
   return (
-    <div className="space-y-2.5">
-      {POSITION_GROUPS.map((g) => (
-        <div key={g.key} className="rounded-xl border border-stone-200 bg-stone-50/50 p-3">
-          <p className="flex items-center gap-1.5 text-xs font-bold text-stone-800">
-            <span>{g.icon}</span>
-            {g.name}
-            <span className="font-normal text-stone-400">· {g.am}</span>
-          </p>
-          {g.note && <p className="mt-0.5 text-[11px] leading-snug text-stone-400">{g.note}</p>}
-          <div className="mt-2 grid gap-1.5 sm:grid-cols-2">
-            {g.positions.map((p) => {
-              const pos = POSITIONS[p];
-              const on = selected.includes(p);
-              return (
-                <div
-                  key={p}
-                  className={`rounded-lg border p-2.5 text-xs transition ${
-                    on ? "border-clay-400 bg-clay-50" : "border-stone-200 bg-white"
-                  }`}
-                >
-                  <label className="flex cursor-pointer items-start gap-2">
-                    <input
-                      type="checkbox"
-                      checked={on}
-                      onChange={() => onToggle(p)}
-                      className="mt-0.5 accent-clay-700"
-                    />
-                    <span>
-                      <span className="block font-bold text-stone-800">{pos.en}</span>
-                      <span className="block text-stone-500">{pos.am}</span>
-                      {!pos.dailyRequired && (
-                        <span className="mt-1 inline-block rounded-full bg-stone-200 px-1.5 py-0.5 text-[10px] font-bold text-stone-500">
-                          not daily
-                        </span>
-                      )}
-                    </span>
-                  </label>
-                </div>
-              );
-            })}
-          </div>
-
-          {/* Every bot button this department can hand out, always visible and
-              always clickable — ticking one that belongs to an unheld role turns
-              that role on too. */}
-          <div className="mt-2.5 rounded-lg border border-clay-100 bg-white p-2.5">
-            <p className="text-[10px] font-bold uppercase tracking-widest text-stone-400">Bot functionalities</p>
-            <div className="mt-1.5 grid gap-1 sm:grid-cols-2">
-              {departmentCapabilities(g.positions).map((key) => {
-                const cap = CAPABILITIES[key];
-                if (!cap) return null;
-                const ticked = effective.includes(key);
-                const held = selected.some((p) => POSITIONS[p].capabilities.includes(key));
-                return (
-                  <label
-                    key={key}
-                    className={`flex cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] transition ${
-                      ticked ? "bg-clay-50 text-stone-800" : "text-stone-500 hover:bg-stone-50"
-                    }`}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={ticked}
-                      onChange={() => toggleCap(key, g.positions)}
-                      className="accent-clay-700"
-                    />
-                    <span className="min-w-0 flex-1 truncate" title={cap.button}>
-                      {cap.button}
-                    </span>
-                    {!held && !ticked && (
-                      <span className="shrink-0 text-[9px] font-bold uppercase text-stone-300">+role</span>
-                    )}
-                  </label>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-      ))}
-
-      {caps !== null && (
-        <p className="flex flex-wrap items-center gap-2 rounded-lg bg-amber-50 px-2.5 py-1.5 text-[11px] text-amber-800">
-          <span>⚠️ Custom functionality set — this employee differs from their role defaults.</span>
-          <button
-            type="button"
-            onClick={() => onCapsChange(null)}
-            className="font-bold underline"
-          >
-            Reset to defaults
-          </button>
-        </p>
-      )}
-      {/* An empty set is stored as "no override", so it reverts to the role
-          defaults rather than leaving someone with no way to report. Say that
-          plainly — the previous wording promised an empty menu the API will not
-          actually produce, and with single-button roles it is one click away. */}
-      {effective.length === 0 && selected.length > 0 && (
-        <p className="rounded-lg bg-amber-50 px-2.5 py-1.5 text-[11px] font-bold text-amber-800">
-          Nothing ticked — saving now reverts this employee to their role&apos;s default buttons. To stop
-          someone reporting, deactivate them instead.
-        </p>
+    <div className="rounded-xl border border-stone-200 bg-white p-3">
+      <p className="text-[11px] font-bold uppercase tracking-widest text-stone-500">Bot functionalities</p>
+      <p className="mt-0.5 text-[11px] text-stone-400">What is ticked is exactly this employee&apos;s bot menu.</p>
+      <div className="mt-2 grid gap-0.5 sm:grid-cols-2">
+        {BOT_FUNCTIONALITIES.map((key) =>
+          row(key, value.caps.includes(key), () => toggleCap(key), CAPABILITIES[key].button)
+        )}
+      </div>
+      <div className="mt-2 grid gap-0.5 border-t border-stone-100 pt-2 sm:grid-cols-2">
+        {row(
+          "hr",
+          value.hr,
+          () => onChange({ ...value, hr: !value.hr }),
+          "👥 የሰው ኃይል (HR)",
+          "Gets the daily report on departmental activities only."
+        )}
+        {row(
+          "admin",
+          value.admin,
+          () => onChange({ ...value, admin: !value.admin }),
+          "🛡 ADMIN",
+          "Gets the report on everything, including system status."
+        )}
+      </div>
+      {(value.hr || value.admin) && value.caps.length === 0 && (
+        <p className="mt-2 text-[11px] text-stone-500">No buttons ticked: this person only receives reports.</p>
       )}
     </div>
   );

@@ -41,7 +41,6 @@ export async function POST(req: NextRequest) {
   const positions: string[] = Array.isArray(body.positions) ? body.positions.filter(isPositionKey) : [];
 
   if (!fullName) return NextResponse.json({ error: "Full name is required." }, { status: 400 });
-  if (positions.length === 0) return NextResponse.json({ error: "Pick at least one position." }, { status: 400 });
 
   const pwProblem = passwordProblem(password);
   if (pwProblem) return NextResponse.json({ error: pwProblem }, { status: 400 });
@@ -55,6 +54,11 @@ export async function POST(req: NextRequest) {
   // Null rather than an empty array: null means "use the positions' defaults",
   // which is what an untouched employee should get.
   const caps: string[] = Array.isArray(body.capabilities) ? body.capabilities.filter(isCapabilityKey) : [];
+  // A button such as 🛡️ damaged bags has no role behind it, so a ticked button
+  // alone is enough; nothing ticked at all is not.
+  if (positions.length === 0 && caps.length === 0) {
+    return NextResponse.json({ error: "Tick at least one bot functionality, HR or Admin." }, { status: 400 });
+  }
 
   const [user] = await sql<{ id: string }[]>`
     insert into telegram_users (full_name, full_name_key, positions, capabilities, password_hash,

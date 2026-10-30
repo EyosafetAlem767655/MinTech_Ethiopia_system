@@ -629,6 +629,87 @@ export function toggleCapability(
   return { positions, override: same ? null : next };
 }
 
+/* ───────────── Flat functionality list (Settings → Employees) ────────────── */
+
+/**
+ * Every bot button the dashboard offers, in the owner's order. The employee
+ * screen is this list plus HR and ADMIN — no departments. The roles behind it
+ * are worked out from what is ticked (selectionToPositions), because roles still
+ * drive the daily-report obligation and the HR/Admin digests.
+ */
+export const BOT_FUNCTIONALITIES: CapabilityKey[] = [
+  "damage",
+  "purchase",
+  "ops",
+  "production_report",
+  "pp_bag_used",
+  "whiteness_check",
+  "raw_material_received",
+  "credit_payment",
+  "downtime",
+  "pp_bag_receipt",
+  "store_count",
+  "pp_bag_damage",
+  "base_balance",
+  "store_issue",
+  "grv",
+  "price_list",
+  "rm_credit_purchase",
+  "rm_credit_payment",
+  "stationery_issue",
+  "item_purchase",
+  "pp_bag_price",
+  "wht_holder",
+  "sales_report",
+];
+
+/**
+ * The role a ticked button brings with it — only for the buttons whose report
+ * IS that role's daily check (its submissionTables). Ticking 🧺 PP bag use alone
+ * no longer makes someone owe a daily production report; ticking 🏭 does.
+ */
+const ROLE_OF: Partial<Record<CapabilityKey, PositionKey>> = {
+  production_report: "prod_daily",
+  raw_material_received: "asset_materials",
+  sales_report: "sales_daily",
+  purchase: "asset_purchase",
+  stationery_issue: "stationery_issuer",
+  grv: "finance",
+  price_list: "finance",
+  pp_bag_price: "finance",
+  wht_holder: "finance",
+  credit_payment: "finance",
+  rm_credit_purchase: "finance",
+  rm_credit_payment: "finance",
+  item_purchase: "finance",
+};
+
+/** The roles to store for a flat selection: ticked buttons, plus HR / ADMIN. */
+export function selectionToPositions(caps: CapabilityKey[], hr: boolean, admin: boolean): PositionKey[] {
+  const out = new Set<PositionKey>();
+  for (const c of caps) {
+    const p = ROLE_OF[c];
+    if (p) out.add(p);
+  }
+  if (hr) out.add("hr");
+  if (admin) out.add("admin");
+  return POSITION_KEYS.filter((p) => out.has(p));
+}
+
+/** What the flat list shows as ticked for an employee as stored. */
+export function positionsToSelection(
+  positions: string[],
+  override?: string[] | null
+): { caps: CapabilityKey[]; hr: boolean; admin: boolean } {
+  // A receiver-only HR/Admin has no submit menu, whatever their role defaults.
+  const caps = isReceiverOnly(positions, override) ? [] : resolveCapabilities(positions, override).map((c) => c.key);
+  return {
+    caps: BOT_FUNCTIONALITIES.filter((k) => caps.includes(k)),
+    hr: positions.includes("hr"),
+    admin: positions.includes("admin"),
+  };
+}
+
 export function hasCapability(positions: string[], key: CapabilityKey): boolean {
   return capabilitiesFor(positions).some((c) => c.key === key);
 }
@@ -665,9 +746,12 @@ export function hasPosition(positions: string[], key: PositionKey): boolean {
  * True when every role the user holds is a recipient role (admin / HR). These
  * users receive the daily digests on Telegram but never submit reports — the bot
  * shows them a receiver-only menu and rejects submission attempts. Someone who
- * also holds a reporting role is NOT receiver-only and keeps their submit menu.
+ * also holds a reporting role is NOT receiver-only and keeps their submit menu,
+ * and so is an HR/Admin with bot buttons ticked for them in the dashboard
+ * (`override`): those buttons have no role of their own behind them.
  */
-export function isReceiverOnly(positions: string[]): boolean {
+export function isReceiverOnly(positions: string[], override?: string[] | null): boolean {
+  if ((override || []).some(isCapabilityKey)) return false;
   return positions.length > 0 && positions.every((p) => p === "admin" || p === "hr");
 }
 

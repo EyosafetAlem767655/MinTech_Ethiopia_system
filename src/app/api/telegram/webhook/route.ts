@@ -332,7 +332,7 @@ async function sendRoleMenu(chatId: string, user: any, text?: string) {
   // receiver-only admin it is the one thing on the menu besides logout.
   const system = isAdminUser(user) ? [SYSTEM_BUTTON] : [];
   // Admin/HR are receivers — no submit menu.
-  if (isReceiverOnly(user.positions || [])) {
+  if (isReceiverOnly(user.positions || [], user.capabilities)) {
     return sendReportMenu(chatId, system, text || MSG.receiverOnly);
   }
   return sendReportMenu(chatId, [...system, ...menuButtons(user)], text);
@@ -1723,8 +1723,8 @@ async function extractPaymentIntoDraft(
 }
 
 /** May this person file this report? The menu's rule, in one place. */
-function canUseCapability(user: { positions: string[] }, key: string): boolean {
-  return !isReceiverOnly(user.positions) && userCapabilities(user).some((c) => c.key === key);
+function canUseCapability(user: { positions: string[]; capabilities?: string[] | null }, key: string): boolean {
+  return !isReceiverOnly(user.positions, user.capabilities) && userCapabilities(user).some((c) => c.key === key);
 }
 
 /**
@@ -2049,7 +2049,7 @@ export async function POST(req: NextRequest) {
         audience: "internal",
         action: "login_success",
       });
-      const welcomeTail = isReceiverOnly(user.positions)
+      const welcomeTail = isReceiverOnly(user.positions, user.capabilities)
         ? `\n\n📊 የቀኑን ማጠቃለያ በዚህ ቦት ይቀበላሉ።`
         : `\n\n➡️ የሪፖርት ዓይነት ይምረጡ።`;
       await sendRoleMenu(
@@ -3053,7 +3053,7 @@ export async function POST(req: NextRequest) {
           detail: cap.key,
           ok: false,
         });
-        await sendRoleMenu(chatId, user, isReceiverOnly(user.positions) ? MSG.receiverOnly : MSG.noPermission);
+        await sendRoleMenu(chatId, user, isReceiverOnly(user.positions, user.capabilities) ? MSG.receiverOnly : MSG.noPermission);
         return NextResponse.json({ ok: true });
       }
 
@@ -3385,7 +3385,7 @@ export async function POST(req: NextRequest) {
     if (text && user) {
       const caps = userCapabilities(user);
 
-      if (!isReceiverOnly(user.positions) && caps.some((c) => c.key === "ops") && isOpsReportText(text)) {
+      if (!isReceiverOnly(user.positions, user.capabilities) && caps.some((c) => c.key === "ops") && isOpsReportText(text)) {
         const result = await ingestOpsReport(text, user.fullName);
         await logActivity({
           chatId,

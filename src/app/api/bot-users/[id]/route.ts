@@ -55,8 +55,11 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     let positions = before?.positions || [];
     if (wantsPositions) {
       positions = body.positions.filter(isPositionKey);
-      if (positions.length === 0) {
-        return NextResponse.json({ error: "Pick at least one position." }, { status: 400 });
+      // No role is fine when buttons are ticked (🛡️ damaged bags has none);
+      // nothing at all is not.
+      const pickedCaps = wantsCaps ? body.capabilities.filter(isCapabilityKey) : before?.capabilities || [];
+      if (positions.length === 0 && pickedCaps.length === 0) {
+        return NextResponse.json({ error: "Tick at least one bot functionality, HR or Admin." }, { status: 400 });
       }
       await sql`update telegram_users set positions = ${positions} where id = ${user.id}`;
     }
