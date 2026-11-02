@@ -1,6 +1,7 @@
 import sql from "@/lib/sql";
 import { rawMaterialOpening } from "@/lib/raw-material-opening";
-import { bagCompanyOpening, hasCompanyBags, notBeforeOpening } from "@/lib/bag-opening";
+import { hasCompanyBags, notBeforeOpening } from "@/lib/bag-opening";
+import { monthOpening } from "@/lib/month-opening";
 import {
   BAG_KIND_KEYS,
   COMPANY_BAG_KINDS,
@@ -154,6 +155,12 @@ export interface FinanceReport {
   month: string;
   /** False when asset management has not filed the opening balance yet. */
   hasBaseBalance: boolean;
+  /**
+   * Where the product and bag openings came from: filed for the month, carried
+   * from the last submission before the 1st (with that day), or nothing.
+   */
+  productsOpening: { source: "submitted" | "carried" | "none"; from: string | null };
+  bagsOpening: { source: "submitted" | "carried" | "none"; from: string | null };
   /** False when finance has not filed the month's price list yet. */
   hasPrices: boolean;
   usdRate: number | null;
@@ -197,9 +204,12 @@ function sumMaps(rows: { m: Record<string, number> | null }[]): Record<string, n
 
 export async function buildFinanceReport(month: string): Promise<FinanceReport> {
   const { start, end } = monthBounds(month);
-  // PP bags per company start from their opening (bag-opening.ts); company
-  // movements count only after it.
-  const bagOpening = await bagCompanyOpening(start, end);
+  // Products and bags open with the month's filed balance or, failing that,
+  // the last submission before the 1st (month-opening.ts). In the month company
+  // bags began, their opening is the first per-company count (bag-opening.ts)
+  // and company movements count only after it.
+  const opening = await monthOpening(month, start, end);
+  const bagOpening = opening.bagCompany;
   const after = bagOpening.after;
 
   const [
@@ -402,7 +412,7 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
 
   /* ── Finished brands ── */
   const production: ProductionFinanceRow[] = PRODUCT_ORDER.map((code) => {
-    const baseBalance = round3(n(baseRow?.products?.[code]));
+    const baseBalance = round3(n(opening.products[code]));
     const rec = round3(n(producedMap[code]));
     const total = round3(baseBalance + rec);
     const sold = round3(n(soldMap[code]));
@@ -453,7 +463,7 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
   // from that count; the kinds recorded before companies are inside it, so
   // valuing them too would count the same bags twice. A month before it
   // reads exactly as it always did.
-  const filedBags = (baseRow?.bags || {}) as Record<string, number>;
+  const filedBags = opening.bags;
   const companyEra = bagOpening.from !== null || hasCompanyBags(filedBags);
   const bagBase = bagOpening.from ? { ...filedBags, ...bagOpening.values } : filedBags;
   for (const { size, colour } of companyEra ? COMPANY_BAG_KINDS : LEGACY_BAG_KINDS) {
@@ -504,6 +514,8 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
   return {
     month,
     hasBaseBalance: Boolean(baseRow),
+    productsOpening: { source: opening.productsSource, from: opening.productsFrom },
+    bagsOpening: { source: opening.bagsSource, from: opening.bagsFrom },
     hasPrices: priceList.length > 0,
     usdRate,
     production,

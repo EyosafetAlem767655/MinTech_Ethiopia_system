@@ -1605,35 +1605,24 @@ const WHITENESS_STEPS: AssetStep[] = [
 /**
  * One transaction, in the columns of the sales sheet.
  *
- * Receipts first: the photographs are read and whatever the model could read
- * is already in the draft when the questions start. What it missed is asked
- * for as ONE fill-in block (the `paste` step, whose template lists only the
- * missing lines), and anything the block still leaves blank is asked one
- * question at a time. Every field then sits on the review card to be corrected.
+ * Typed, not read: the day is picked, then the whole row is sent as ONE
+ * copyable block (the `paste` step) to fill in and send back. Receipt photos
+ * are no longer asked for or read by a model; that cost tokens and misread
+ * figures, and the person filing has the receipt in hand anyway. Anything the
+ * block still leaves blank is asked one question at a time, and every field
+ * then sits on the review card to be corrected.
  *
- * The per-field steps below are what make that work — they carry the label,
- * the validation and the choice list the editor and the paste parser share —
- * but the flow only walks them for what the receipts and the block left out.
- * The total tonnage is not a step: it is the sum of the brand lines.
+ * The per-field steps below carry the label, the validation and the choice list
+ * the editor and the paste parser share; the flow only walks them for what the
+ * block left out. The total tonnage is not a step: it is the sum of the brands.
  */
 const SALES_INVOICE_STEPS: AssetStep[] = [
   { id: "date", prompt: "📅 የሽያጩን ቀን ይምረጡ።", type: "date" },
   {
-    id: "photos",
-    prompt:
-      `🧾 የዚህን ሽያጭ ደረሰኞች ፎቶ ይላኩ — እስከ ${MAX_FLOW_PHOTOS} ፎቶ (የሽያጭ ደረሰኝ፣ የማድረሻ ወረቀት፣ የባንክ ደረሰኝ)።\n` +
-      `<i>ፎቶዎቹ ተነብበው ቅጹ በራሱ ይሞላል — የቀረውን ብቻ ይጠየቃሉ።</i>\n` +
-      `ከጨረሱ "✅ ጨርሻለሁ" ይጫኑ።`,
-    type: "photos",
-    // The receipts ARE the evidence behind every figure on this row. A sale
-    // with no paper is not a sale this report can carry.
-    required: true,
-  },
-  {
     id: "paste",
     prompt:
-      "📋 ከደረሰኙ ያልተነበቡት መስኮች እነዚህ ናቸው። ቅጂውን ሞልተው ይመልሱት።\n" +
-      "<i>ቁጥሩን ከ = በኋላ ይፃፉ። ያልተሸጠውን ብራንድ ባዶ ይተዉት (0 ይሆናል)።</i>",
+      "📋 ከታች ያለውን ሰንጠረዥ ቅጂ (copy) ያድርጉ፣ ከደረሰኙ ላይ ሞልተው ይላኩት።\n" +
+      "<i>ቁጥሩን ከ = በኋላ ይፃፉ። ያልተሸጠውን ብራንድ ባዶ ይተዉት (0 ይሆናል)። TIN ከሌለ \"-\" ይፃፉ።</i>",
     type: "paste",
   },
   { id: SALES_KEYS.customer, label: "Deliver to", prompt: "👤 ለማን እንደተሸጠ (Deliver to / የደንበኛ ስም) ይፃፉ።", type: "text" },

@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import RangeSelector from "@/components/RangeSelector";
 import { Chart, ScrollTable } from "@/components/panels/TableChart";
 import { BrandDayBars, BrandLines } from "@/components/panels/BrandCharts";
-import { RANGES, rangeWindow, type Bucket, type RangeKey } from "@/lib/ranges";
+import { rangeDef, rangeWindow, type Bucket, type RangeKey } from "@/lib/ranges";
 import { BAG_KINDS, COMPANY_BAG_KINDS, PRODUCTION_PRODUCTS, bagLabel, orderProducts, productLabel } from "@/lib/products";
 import type { BagSize } from "@/lib/products";
 
@@ -77,7 +77,7 @@ export default function StockOnHandPanel() {
       .catch(() => setOps([]));
   }, []);
 
-  const { bucket } = RANGES[range];
+  const { bucket } = rangeDef(range);
   const win = useMemo(() => rangeWindow(range), [range]);
 
   // Filtered client-side: the endpoint already returns the full year, so
@@ -177,7 +177,7 @@ export default function StockOnHandPanel() {
 
       <RangeSelector value={range} onChange={setRange} />
       <p className="px-1 text-[11px] text-stone-400">
-        {RANGES[range].label} · {win.start.toISOString().slice(0, 10)} → {win.end.toISOString().slice(0, 10)}
+        {rangeDef(range).label} · {win.start.toISOString().slice(0, 10)} → {win.end.toISOString().slice(0, 10)}
       </p>
 
       {/* One day is a bar per brand; longer ranges a line per brand. */}

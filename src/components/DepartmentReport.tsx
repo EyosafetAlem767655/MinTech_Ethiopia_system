@@ -12,7 +12,7 @@ import {
 } from "recharts";
 import CountUp from "@/components/CountUp";
 import { DEPARTMENTS, type DepartmentKey } from "@/lib/departments";
-import { RANGES, type RangeKey } from "@/lib/ranges";
+import { isMonthRange, rangeDef, type RangeKey } from "@/lib/ranges";
 import RangeSelector from "@/components/RangeSelector";
 import type { DepartmentReport as Report, Kpi, Submission } from "@/lib/department-metrics";
 
@@ -95,7 +95,7 @@ export default function DepartmentReport({ dept }: { dept: DepartmentKey }) {
             {report.window.start === report.window.end
               ? report.window.start
               : `${report.window.start} → ${report.window.end}`}{" "}
-            · {RANGES[range].label.toLowerCase()}
+            · {isMonthRange(range) ? rangeDef(range).label : rangeDef(range).label.toLowerCase()}
           </p>
 
           {/* KPI grid */}

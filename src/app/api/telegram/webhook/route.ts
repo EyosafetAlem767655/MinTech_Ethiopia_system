@@ -9,7 +9,6 @@ import {
   classifyIngestion,
   extractReceiptGemini,
   extractDowntimeSheet,
-  extractSalesInvoice,
   verifyRequestLegitimacy,
   type GeminiReceipt,
   type IngestionExtraction,
@@ -99,7 +98,7 @@ import {
   tickedStoreItems,
 } from "@/lib/store-voucher";
 import { costsAt } from "@/lib/store-costs";
-import { SALES_KEYS, applySalesExtraction, parseSalesPaste, salesEditBlock, salesMissing } from "@/lib/sales-invoice";
+import { SALES_KEYS, parseSalesPaste, salesEditBlock, salesMissing } from "@/lib/sales-invoice";
 import { applyFlowEdit, describeFlowChanges, editableFields, renderFieldList } from "@/lib/flow-edit";
 import { dailyHeartbeat } from "@/lib/heartbeat";
 import { loadImage, loadImages, telegramFileId } from "@/lib/images";
@@ -1477,87 +1476,6 @@ async function matchGrvIntoDraft(
 }
 
 /**
- * Read one sale's receipts into the sales sheet's columns, then ask for the rest.
- *
- * What the model read goes into the draft; what it missed is asked for as ONE
- * fill-in block listing only the missing lines — not as a march through
- * sixteen questions. A read that got most of the row right should cost a
- * two-line paste, and a read that got nothing costs the whole block, which is
- * still one message. Either way the row ends on the review card to be
- * corrected, with the machine-read figures marked.
- *
- * Fenced the same way as the voucher read: bounded by RECEIPT_BUDGET_MS, every
- * failure lands in the same place, and nothing is saved here.
- */
-async function extractSalesIntoDraft(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  started_session: any,
-  chatId: string,
-  started: AssetFlowState
-): Promise<void> {
-  const images = await loadImages((started.photoFileIds || []).slice(0, MAX_FLOW_PHOTOS));
-  const { result: read, gaveUp } =
-    images.length > 0
-      ? await readWithBusyRetry(() => extractSalesInvoice(images), {
-          onWait: busyWaitNotice(chatId),
-          deadlineMs: Date.parse(started.readingSince || "") + READ_DEADLINE_MS || Date.now() + READ_DEADLINE_MS,
-        })
-      : { result: null, gaveUp: false };
-
-  const claimed = await reclaimFlow(chatId, started_session.userName, started);
-  if (!claimed) return;
-  const { session, state } = claimed;
-
-  if (gaveUp && read && !read.ok) {
-    // Still busy after three waits. The receipts are what the sheet should
-    // come from, so the photos are kept and the step stays where it is:
-    // pressing ✅ later reads them again, nothing re-sent.
-    await logError({ source: "sales-invoice", kind: "sales_receipt_read_busy", message: read.error, chatId });
-    session.assetFlow = { ...state };
-    await persist(session);
-    await sendServerDown(chatId);
-    return;
-  }
-
-  if (!read || !read.ok) {
-    const reason = read && !read.ok ? read.error : "no photo could be read back";
-    state.extraction = { checked: false, confidence: 0, notes: "", unmatched: [], filled: [], error: reason };
-    // Logged so an outage shows in Settings → Errors; the reporter is not
-    // blocked by it — the whole sheet is simply asked for by hand.
-    await logError({ source: "sales-invoice", kind: "sales_receipt_read_failed", message: reason, chatId });
-  } else {
-    const { filled } = applySalesExtraction(state.draft, read.data);
-    state.extraction = {
-      checked: true,
-      confidence: read.data.confidence,
-      notes: read.data.notes,
-      unmatched: [],
-      filled,
-    };
-  }
-
-  // Straight to the card when the receipts answered everything; otherwise the
-  // fill-in block for what they did not. The paste handler resumes at whatever
-  // the block still leaves blank, one question at a time.
-  const missing = salesMissing(state.draft);
-  state.step = missing.length === 0 ? "review" : "paste";
-  session.assetFlow = { ...state };
-  await persist(session);
-
-  if (state.extraction.checked) {
-    await sendMessage(
-      chatId,
-      `✅ ${state.extraction.filled.length} መስክ ከደረሰኙ ተነብቧል (እርግጠኝነት ${state.extraction.confidence}%)።` +
-        (state.extraction.notes ? `\n<i>${escapeHtml(state.extraction.notes)}</i>` : "") +
-        (missing.length > 0 ? `\n<i>${missing.length} መስክ ቀርቷል — ከታች ያለውን ቅጂ ሞልተው ይመልሱት።</i>` : "")
-    );
-  } else {
-    await sendMessage(chatId, "ℹ️ ደረሰኙን ማንበብ አልተቻለም። ቅጹን ሞልተው ይመልሱት።");
-  }
-  await askAssetStep(chatId, state);
-}
-
-/**
  * Read the monthly downtime sheet into the block, then ask for it back.
  *
  * The read is a PREFILL: it becomes the block the person checks and returns,
@@ -2523,6 +2441,8 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true });
       }
 
+      // A sale started before its photo step was removed resumes at the table.
+      if (state.kind === "sales_invoice" && state.step === "photos") state.step = "paste";
       const step = findStep(state.kind, state.step, state.draft);
       if (!step) {
         // Scratch state referencing a step that no longer exists (a deploy landed
@@ -2609,14 +2529,6 @@ export async function POST(req: NextRequest) {
             await sendMessage(chatId, "🧾 የቫውቸሩን/ደረሰኙን ፎቶ ቢያንስ አንድ ያስፈልጋል።", {
               reply_markup: photosKeyboard,
             });
-            return NextResponse.json({ ok: true });
-          }
-          // A sale is the one flow whose photos are still read: the receipts are the source, and what
-          // they do not answer is asked for in one block afterwards.
-          // Read after the reply: a busy provider is now waited out (a minute,
-          // up to three times), which no webhook response could sit through.
-          if (state.kind === "sales_invoice" && collected.length > 0) {
-            await startBackgroundRead(session, chatId, state, "🔎 ደረሰኞቹን እያነበብኩ ነው…", extractSalesIntoDraft);
             return NextResponse.json({ ok: true });
           }
           if (state.kind === "downtime" && collected.length > 0) {

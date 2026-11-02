@@ -10,7 +10,8 @@ import {
   type BagSize,
 } from "@/lib/products";
 import { monthBounds, monthLabel } from "@/lib/finance-report";
-import { bagCompanyOpening, hasCompanyBags, notBeforeOpening } from "@/lib/bag-opening";
+import { hasCompanyBags, notBeforeOpening } from "@/lib/bag-opening";
+import { monthOpening } from "@/lib/month-opening";
 
 /**
  * Does the floor agree with the paperwork?
@@ -88,15 +89,15 @@ const n = (v: unknown) => Number(v) || 0;
  */
 export async function reconcileBags(month = monthLabel()): Promise<ReconciliationResult> {
   const { start, end } = monthBounds(month);
-  // The per-company opening (bag-opening.ts): company movements count only
-  // after it, so the bags it already counted are not counted again.
-  const opening = await bagCompanyOpening(start, end);
+  // The month's opening, as the finance report takes it (month-opening.ts): the
+  // filed balance, else the last bag count before the 1st. In the month company
+  // bags began, the per-company bootstrap (bag-opening.ts) applies and company
+  // movements count only after it.
+  const monthOpen = await monthOpening(month, start, end);
+  const opening = monthOpen.bagCompany;
   const after = opening.after;
 
-  const [base, grvLines, sivLines, bagReceipts, usedLines, latestCount] = await Promise.all([
-    sql<{ bags: Record<string, number> }[]>`
-      select bags from monthly_base_balances where month = ${month}
-    `.catch(() => []),
+  const [grvLines, sivLines, bagReceipts, usedLines, latestCount] = await Promise.all([
     sql<{ ledger_key: string; qty: string }[]>`
       select i.ledger_key, sum(i.ledger_qty) as qty
         from goods_receiving_items i
@@ -149,7 +150,7 @@ export async function reconcileBags(month = monthLabel()): Promise<Reconciliatio
   // colour under the size. `bagLedgerKey` is the single spelling they share.
   // A per-company count taken during the month is the companies' opening (it
   // is later than any balance filed for the 1st); otherwise the filed balance.
-  const filedBase = (base[0]?.bags || {}) as Record<string, number>;
+  const filedBase = monthOpen.bags;
   const baseMap = opening.from ? { ...filedBase, ...opening.values } : filedBase;
   const received: Record<string, number> = Object.fromEntries(BAG_KIND_KEYS.map((k) => [k, 0]));
   const issued: Record<string, number> = Object.fromEntries(BAG_KIND_KEYS.map((k) => [k, 0]));

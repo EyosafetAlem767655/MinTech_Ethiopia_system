@@ -19,7 +19,7 @@ import {
 } from "@/lib/metrics";
 import { DEPARTMENTS, DEPARTMENT_KEYS, type DepartmentKey } from "@/lib/departments";
 import { eatDateLabel } from "@/lib/dates";
-import { rangeWindow, RANGES, type RangeKey } from "@/lib/ranges";
+import { rangeWindow, rangeDef, type RangeKey } from "@/lib/ranges";
 import { cashSales, creditTotals, millions, monthNetWorth } from "@/lib/finance-summary";
 
 export interface Kpi {
@@ -87,7 +87,7 @@ export async function getDepartmentReport(
       start: eatDateLabel(start),
       // end is start-of-tomorrow; label the last included day
       end: eatDateLabel(new Date(end.getTime() - 1)),
-      label: RANGES[rangeKey].label,
+      label: rangeDef(rangeKey).label,
       bucket,
     },
     metric,

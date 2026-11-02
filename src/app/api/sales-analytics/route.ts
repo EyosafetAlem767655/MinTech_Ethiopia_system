@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { SALES_ANALYTICS_RANGES, salesAnalytics } from "@/lib/sales-analytics";
-import { isRangeKey } from "@/lib/ranges";
+import { isMonthRange, isRangeKey } from "@/lib/ranges";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 30;
@@ -12,6 +12,6 @@ export async function GET(req: NextRequest) {
   // rather than 400-ing, since the value only ever comes from the tab's own
   // buttons and a stale link should still show something. The fallback is the
   // tab's own default, so a first paint without a param agrees with its pills.
-  const range = isRangeKey(raw) && SALES_ANALYTICS_RANGES.includes(raw) ? raw : "monthly";
+  const range = isRangeKey(raw) && (isMonthRange(raw) || SALES_ANALYTICS_RANGES.includes(raw)) ? raw : "monthly";
   return NextResponse.json(await salesAnalytics(range));
 }

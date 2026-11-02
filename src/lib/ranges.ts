@@ -15,7 +15,14 @@
 
 import { addDays, eatDayStart } from "@/lib/dates";
 
-export type RangeKey = "daily" | "weekly" | "monthly" | "d90" | "d180" | "yearly";
+export type FixedRangeKey = "daily" | "weekly" | "monthly" | "d90" | "d180" | "yearly";
+/**
+ * One calendar month, "m:2026-10": the 1st to the last day, in EAT, bucketed
+ * by day. Offered beside the rolling windows so any past month can be looked
+ * at on its own, not only "the last 30 days".
+ */
+export type MonthRangeKey = `m:${string}`;
+export type RangeKey = FixedRangeKey | MonthRangeKey;
 export type Bucket = "day" | "week" | "month";
 
 export interface RangeDef {
@@ -30,7 +37,7 @@ export interface RangeDef {
   bucket: Bucket;
 }
 
-export const RANGES: Record<RangeKey, RangeDef> = {
+export const RANGES: Record<FixedRangeKey, RangeDef> = {
   daily: { key: "daily", label: "Daily", short: "1D", days: 1, bucket: "day" },
   weekly: { key: "weekly", label: "Weekly", short: "7D", days: 7, bucket: "day" },
   monthly: { key: "monthly", label: "Monthly", short: "30D", days: 30, bucket: "day" },
@@ -39,11 +46,51 @@ export const RANGES: Record<RangeKey, RangeDef> = {
   yearly: { key: "yearly", label: "Yearly", short: "1Y", days: 365, bucket: "month" },
 };
 
-export const RANGE_KEYS = Object.keys(RANGES) as RangeKey[];
+export const RANGE_KEYS = Object.keys(RANGES) as FixedRangeKey[];
 export const RANGE_LIST = RANGE_KEYS.map((k) => RANGES[k]);
 
+export function isMonthRange(value: unknown): value is MonthRangeKey {
+  return typeof value === "string" && /^m:\d{4}-(0[1-9]|1[0-2])$/.test(value);
+}
+
 export function isRangeKey(value: unknown): value is RangeKey {
-  return typeof value === "string" && value in RANGES;
+  return typeof value === "string" && (value in RANGES || isMonthRange(value));
+}
+
+const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** "m:2026-10" → "Oct 2026". */
+export function monthRangeLabel(key: MonthRangeKey): string {
+  const [y, m] = key.slice(2).split("-").map(Number);
+  return `${MONTH_NAMES[m - 1]} ${y}`;
+}
+
+/** [start, end) of a calendar month in EAT: 1st 00:00 to the next 1st. */
+function monthBoundsEat(key: MonthRangeKey): { start: Date; end: Date } {
+  const [y, m] = key.slice(2).split("-").map(Number);
+  const start = new Date(Date.UTC(y, m - 1, 1) - 3 * 3_600_000);
+  const end = new Date(Date.UTC(y, m, 1) - 3 * 3_600_000);
+  return { start, end };
+}
+
+/** The definition of any range, a calendar month included. */
+export function rangeDef(key: RangeKey): RangeDef {
+  if (!isMonthRange(key)) return RANGES[key];
+  const { start, end } = monthBoundsEat(key);
+  const days = Math.round((end.getTime() - start.getTime()) / 86_400_000);
+  const label = monthRangeLabel(key);
+  return { key, label, short: label, days, bucket: "day" };
+}
+
+/** The current month and the `count - 1` before it, newest first, as range keys. */
+export function recentMonthRanges(count = 24, now = new Date()): MonthRangeKey[] {
+  const eat = new Date(now.getTime() + 3 * 3_600_000);
+  const out: MonthRangeKey[] = [];
+  for (let i = 0; i < count; i++) {
+    const d = new Date(Date.UTC(eat.getUTCFullYear(), eat.getUTCMonth() - i, 1));
+    out.push(`m:${d.toISOString().slice(0, 7)}`);
+  }
+  return out;
 }
 
 export interface RangeWindow {
@@ -58,6 +105,11 @@ export interface RangeWindow {
  * tomorrow (EAT) so the window includes today; `start` is `days` before that.
  */
 export function rangeWindow(key: RangeKey, now = new Date()): RangeWindow {
+  if (isMonthRange(key)) {
+    const { start, end } = monthBoundsEat(key);
+    const { days, bucket } = rangeDef(key);
+    return { start, end, bucket, days };
+  }
   const { days, bucket } = RANGES[key];
   const end = addDays(eatDayStart(now), 1); // start of tomorrow, EAT
   const start = addDays(end, -days);

@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Bar, BarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import RangeSelector from "@/components/RangeSelector";
 import { AXIS, Chart, ScrollTable, TOOLTIP } from "@/components/panels/TableChart";
-import { RANGES, rangeWindow, type Bucket, type RangeKey } from "@/lib/ranges";
+import { rangeDef, rangeWindow, type Bucket, type RangeKey } from "@/lib/ranges";
 
 /**
  * The purchase analysis report: what the Goods Receiving Vouchers say was bought.
@@ -92,7 +92,7 @@ export default function PurchaseAnalysis() {
       .catch(() => setLines([]));
   }, []);
 
-  const { bucket } = RANGES[range];
+  const { bucket } = rangeDef(range);
   const win = useMemo(() => rangeWindow(range), [range]);
 
   const inWindow = useMemo(() => {

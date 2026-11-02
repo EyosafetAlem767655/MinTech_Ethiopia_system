@@ -276,15 +276,15 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
   },
   sales_report: {
     key: "sales_report",
-    // One row per sale, in the columns of the sales sheet. Receipt-first: the
-    // photos are read, only what they missed is asked for (as one block), and
-    // the whole row is corrected on the review card. It was one Payment Summary
+    // One row per sale, in the columns of the sales sheet. Typed: the whole
+    // row is filled in as one copyable block (no photos, no AI read), and
+    // corrected on the review card. It was one Payment Summary
     // a day for a while, which said how much came in but not from whom or for
     // what — the questions the sales analytics exist to answer.
     button: "🧾 የሽያጭ ሪፖርት",
     captureMode: "asset_entry",
     input: "any",
-    question: "🧾 ቀኑን ይምረጡ። መቀጠል የሽያጩን ደረሰኞች ፎቶ ይላካሉ።",
+    question: "🧾 ቀኑን ይምረጡ። ከዚያ የሽያጩን ሰንጠረዥ ሞልተው ይልካሉ።",
   },
   hr: {
     key: "hr",

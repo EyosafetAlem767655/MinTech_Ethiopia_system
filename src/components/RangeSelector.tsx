@@ -1,12 +1,14 @@
 "use client";
 
-import { RANGE_LIST, type RangeKey } from "@/lib/ranges";
+import { RANGE_LIST, isMonthRange, monthRangeLabel, recentMonthRanges, type RangeKey } from "@/lib/ranges";
 
 /**
- * The global six-window time-range control shared by every department report.
+ * The global six-window time-range control shared by every department report,
+ * plus a "📅 Month" pick for one calendar month on its own.
  *
- * `keys` narrows it to a subset, in RANGES order — the sales analytics offer
- * only the four windows long enough to show a pattern.
+ * `keys` narrows the rolling windows to a subset, in RANGES order — the sales
+ * analytics offer only the windows long enough to show a pattern. The month
+ * pick is always offered: a whole month is long enough everywhere.
  */
 export default function RangeSelector({
   value,
@@ -27,8 +29,10 @@ export default function RangeSelector({
   labels?: Partial<Record<RangeKey, string>>;
 }) {
   const list = keys ? RANGE_LIST.filter((r) => keys.includes(r.key)) : RANGE_LIST;
+  const months = recentMonthRanges();
+  const monthOn = isMonthRange(value);
   return (
-    <div className="flex gap-1 rounded-full bg-clay-50 p-0.5 overflow-x-auto no-scrollbar">
+    <div className="flex items-center gap-1 rounded-full bg-clay-50 p-0.5 overflow-x-auto no-scrollbar">
       {list.map((r) => (
         <button
           key={r.key}
@@ -41,6 +45,21 @@ export default function RangeSelector({
           {labels?.[r.key] ?? r.label}
         </button>
       ))}
+      <select
+        aria-label="Pick a month"
+        value={monthOn ? value : ""}
+        onChange={(e) => e.target.value && onChange(e.target.value as RangeKey)}
+        className={`shrink-0 cursor-pointer appearance-none rounded-full border-0 px-3 py-1.5 text-[11px] font-bold outline-none transition-all duration-300 ${
+          monthOn ? "bg-white text-clay-800 shadow" : "bg-transparent text-clay-400 hover:text-clay-600"
+        }`}
+      >
+        <option value="">📅 Month</option>
+        {months.map((m) => (
+          <option key={m} value={m}>
+            {monthRangeLabel(m)}
+          </option>
+        ))}
+      </select>
     </div>
   );
 }

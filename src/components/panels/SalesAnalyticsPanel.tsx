@@ -15,7 +15,7 @@ import {
 import CountUp from "@/components/CountUp";
 import RangeSelector from "@/components/RangeSelector";
 import { productLabel } from "@/lib/products";
-import { RANGES, type RangeKey } from "@/lib/ranges";
+import { isMonthRange, rangeDef, type RangeKey } from "@/lib/ranges";
 import type { SalesAnalytics } from "@/lib/sales-analytics";
 
 /**
@@ -84,7 +84,7 @@ export default function SalesAnalyticsPanel() {
     <section className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2 px-1">
         <h2 className="font-display text-lg font-bold">📈 Customer analytics</h2>
-        <span className="text-[11px] text-stone-400">{RANGES[range].label.toLowerCase()}</span>
+        <span className="text-[11px] text-stone-400">{isMonthRange(range) ? rangeDef(range).label : rangeDef(range).label.toLowerCase()}</span>
       </div>
       <RangeSelector value={range} onChange={setRange} keys={RANGE_KEYS} />
 

@@ -4,7 +4,7 @@ import { Fragment, useEffect, useMemo, useState } from "react";
 import RangeSelector from "@/components/RangeSelector";
 import { Chart, ScrollTable } from "@/components/panels/TableChart";
 import { BrandDayBars, BrandLines } from "@/components/panels/BrandCharts";
-import { RANGES, rangeWindow, type Bucket, type RangeKey } from "@/lib/ranges";
+import { rangeDef, rangeWindow, type Bucket, type RangeKey } from "@/lib/ranges";
 import { PRODUCTION_PRODUCTS, orderProducts, productLabel } from "@/lib/products";
 
 /**
@@ -71,7 +71,7 @@ export default function ProductionPanels() {
       .catch(() => setProduction([]));
   }, []);
 
-  const { bucket } = RANGES[range];
+  const { bucket } = rangeDef(range);
   const win = useMemo(() => rangeWindow(range), [range]);
 
   // Filtered client-side: the endpoint already returns the full year, so
@@ -144,7 +144,7 @@ export default function ProductionPanels() {
       <div className="sticky top-0 z-20 -mx-4 bg-white/95 px-4 py-2 backdrop-blur sm:mx-0 sm:px-1">
         <RangeSelector value={range} onChange={setRange} />
         <p className="mt-1 px-1 text-[11px] text-stone-400">
-          {RANGES[range].label} · {win.start.toISOString().slice(0, 10)} → {win.end.toISOString().slice(0, 10)}
+          {rangeDef(range).label} · {win.start.toISOString().slice(0, 10)} → {win.end.toISOString().slice(0, 10)}
         </p>
       </div>
 

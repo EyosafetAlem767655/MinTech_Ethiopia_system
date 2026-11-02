@@ -332,9 +332,18 @@ interface Report {
   rawMaterials: RawRow[];
   rawMaterialSource?: "daily" | "vouchers";
   rawOpeningSource?: "counted" | "submitted" | "carried" | "none";
+  productsOpening?: { source: "submitted" | "carried" | "none"; from: string | null };
+  bagsOpening?: { source: "submitted" | "carried" | "none"; from: string | null };
   totals: Record<string, number>;
   availableMonths: string[];
   error?: string;
+}
+
+/** "Products: daily report of 2026-10-31" — where one opening came from. */
+function openingNote(what: string, o?: { source: string; from: string | null }): string {
+  if (!o || o.source === "none") return `${what}: nothing submitted, opens at 0`;
+  if (o.source === "submitted") return `${what}: filed balance`;
+  return `${what}: daily report of ${o.from ?? "—"}`;
 }
 
 function MonthlyTab() {
@@ -381,13 +390,18 @@ function MonthlyTab() {
 
       {!data.hasBaseBalance && (
         <p className="card border-l-4 border-l-amber-500 p-3 text-xs font-bold text-amber-800">
-          No opening balance filed for {data.month}. Every &ldquo;Total&rdquo; below is the month&rsquo;s movement
-          only, with nothing carried in
+          No opening balance filed for {data.month}, so the opening is carried in from what was last submitted:
+          {" "}
+          {openingNote("Products", data.productsOpening)} · {openingNote("PP bags", data.bagsOpening)} · Raw
+          materials:{" "}
           {data.rawOpeningSource === "counted"
-            ? " — except raw materials, which open with last month's final stock count from the daily report."
+            ? "last stock count from the daily report"
             : data.rawOpeningSource === "carried"
-              ? " — except raw materials, which open with last month's closing (opening + received − issued)."
-              : "."}
+              ? "last month's closing (opening + received − issued)"
+              : data.rawOpeningSource === "submitted"
+                ? "filed balance"
+                : "nothing submitted, opens at 0"}
+          .
         </p>
       )}
       {!data.hasPrices && (

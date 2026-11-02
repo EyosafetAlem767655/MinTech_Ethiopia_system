@@ -4,7 +4,8 @@ import { reconcileBags } from "@/lib/stock-reconciliation";
 import { alarmingCustomers, creditFigures } from "@/lib/credit";
 import { productLabel } from "@/lib/products";
 import { bandLabel, belowSpec, specFor } from "@/lib/whiteness-spec";
-import { isMonthlySheetWindow, monthlySheetMonth } from "@/lib/finance-report";
+import { isMonthlySheetWindow, monthBounds, monthlySheetMonth } from "@/lib/finance-report";
+import { monthOpening } from "@/lib/month-opening";
 
 /**
  * All dashboard numbers. Previously 10 MongoDB aggregation pipelines; now SQL.
@@ -537,15 +538,15 @@ export async function detectExceptions(
     );
   }
 
-  // 2. The month has opened with no base balance, so the finance report cannot
-  //    be computed at all. Worth the owner's attention on day one, not day 20.
+  // 2. The month has opened with no base balance AND nothing submitted before
+  //    the 1st to carry in (month-opening.ts), so the finance report opens at
+  //    zero. Worth the owner's attention on day one, not day 20.
   const month = new Date(now.getTime() + 3 * 3600_000).toISOString().slice(0, 7);
-  const filed = await sql<{ month: string }[]>`
-    select month from monthly_base_balances where month = ${month}
-  `.catch(() => [{ month }]);
-  if (filed.length === 0) {
+  const { start: openStart, end: openEnd } = monthBounds(month);
+  const opening = await monthOpening(month, openStart, openEnd).catch(() => null);
+  if (opening && opening.productsSource === "none" && opening.bagsSource === "none") {
     exceptions.push(
-      `No opening balance has been filed for ${month}, so the monthly finance report cannot be produced.`
+      `No opening balance has been filed for ${month}, and nothing was submitted before the 1st to carry in, so the monthly finance report opens at zero.`
     );
   }
 
