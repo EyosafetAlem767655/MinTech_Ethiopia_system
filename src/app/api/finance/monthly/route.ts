@@ -2,9 +2,23 @@ import { NextRequest, NextResponse } from "next/server";
 import sql from "@/lib/sql";
 import { buildFinanceReport, monthBounds, monthLabel } from "@/lib/finance-report";
 import { storeNetWorth } from "@/lib/store-net-worth";
+import { logError } from "@/lib/errors";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 30;
+export const maxDuration = 60;
+
+/** How long the store section may take before the report goes out without it. */
+const STORE_BUDGET_MS = 12_000;
+
+/** The store section, or null if it fails or is slow: the report never waits on it. */
+function storeSection(end: Date) {
+  const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), STORE_BUDGET_MS));
+  const section = storeNetWorth(end).catch((e) => {
+    console.error("storeNetWorth failed:", e);
+    return null;
+  });
+  return Promise.race([section, timeout]);
+}
 
 /** Newest first: the current month back to `first`, at most 24. */
 function monthsSince(first: string): string[] {
@@ -26,11 +40,7 @@ export async function GET(req: NextRequest) {
   try {
     const [report, store, months] = await Promise.all([
       buildFinanceReport(month),
-      // A store problem must not take the whole monthly report down.
-      storeNetWorth(monthBounds(month).end).catch((e) => {
-        console.error("storeNetWorth failed:", e);
-        return null;
-      }),
+      storeSection(monthBounds(month).end),
       // From the first month anyone filed for. A month nobody filed for is still
       // a month: it runs on what was carried in, so it stays in the picker.
       sql<{ month: string }[]>`
@@ -54,6 +64,10 @@ export async function GET(req: NextRequest) {
         { status: 503 }
       );
     }
-    throw e;
+    // Say what broke, here and under Settings → Errors. Rethrowing left the page
+    // with a bare "could not load" and nothing to go on.
+    const message = e instanceof Error ? e.message : String(e);
+    await logError({ source: "finance/monthly", kind: "monthly_report_failed", message }).catch(() => {});
+    return NextResponse.json({ error: `The monthly report failed: ${message}` }, { status: 500 });
   }
 }

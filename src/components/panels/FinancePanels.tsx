@@ -360,10 +360,18 @@ function MonthlyTab() {
   const load = useCallback(async (m: string) => {
     setData(null);
     setError("");
-    const res = await fetch(`/api/finance/monthly${m ? `?month=${m}` : ""}`);
+    const res = await fetch(`/api/finance/monthly${m ? `?month=${m}` : ""}`).catch(() => null);
+    if (!res) {
+      setError("Could not reach the server for the monthly report. Check the connection and try again.");
+      return;
+    }
     const json = await res.json().catch(() => ({}));
     if (!res.ok) {
-      setError(json.error || "Could not load the monthly report.");
+      // A timeout or crash has no JSON body, so the status is all there is to go on.
+      setError(
+        json.error ||
+          `Could not load the monthly report (HTTP ${res.status}${res.status === 504 ? ": it took too long" : ""}).`
+      );
       return;
     }
     setData(json);
