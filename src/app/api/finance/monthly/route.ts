@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import sql from "@/lib/sql";
-import { buildFinanceReport, monthLabel } from "@/lib/finance-report";
+import { buildFinanceReport, monthBounds, monthLabel } from "@/lib/finance-report";
+import { storeNetWorth } from "@/lib/store-net-worth";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 30;
@@ -23,8 +24,13 @@ export async function GET(req: NextRequest) {
   const month = /^\d{4}-\d{2}$/.test(raw) ? raw : monthLabel();
 
   try {
-    const [report, months] = await Promise.all([
+    const [report, store, months] = await Promise.all([
       buildFinanceReport(month),
+      // A store problem must not take the whole monthly report down.
+      storeNetWorth(monthBounds(month).end).catch((e) => {
+        console.error("storeNetWorth failed:", e);
+        return null;
+      }),
       // From the first month anyone filed for. A month nobody filed for is still
       // a month: it runs on what was carried in, so it stays in the picker.
       sql<{ month: string }[]>`
@@ -38,6 +44,7 @@ export async function GET(req: NextRequest) {
     const available = monthsSince(months[0]?.month ?? month);
     return NextResponse.json({
       ...report,
+      store,
       availableMonths: available.includes(month) ? available : [month, ...available],
     });
   } catch (e) {

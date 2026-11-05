@@ -336,6 +336,11 @@ interface Report {
   productsOpening?: { source: "submitted" | "carried" | "none"; from: string | null };
   bagsOpening?: { source: "submitted" | "carried" | "none"; from: string | null };
   totals: Record<string, number>;
+  store?: {
+    blocks: { key: string; label: string; icon: string; netWorth: number; unpriced: number }[];
+    total: number;
+    unpriced: number;
+  } | null;
   availableMonths: string[];
   error?: string;
 }
@@ -532,6 +537,37 @@ function MonthlyTab() {
         </p>
         <p className="font-display text-2xl font-bold text-clay-900">{fmt(data.totals.netWorth)} ETB</p>
       </div>
+
+      {data.store && (
+        <>
+          <h3 className="px-1 pt-2 text-xs font-bold uppercase tracking-widest text-stone-400">Store net worth</h3>
+          <div className="grid gap-2 sm:grid-cols-3">
+            {data.store.blocks.map((b) => (
+              <div key={b.key} className="card p-4">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-stone-400">
+                  {b.icon} {b.label}
+                </p>
+                <p className="mt-1 font-display text-xl font-bold tabular-nums text-clay-900">{fmt(b.netWorth)} ETB</p>
+                {b.unpriced > 0 && (
+                  <p className="mt-0.5 text-[11px] text-stone-400">
+                    {b.unpriced} {b.unpriced === 1 ? "item" : "items"} with stock not priced
+                  </p>
+                )}
+              </div>
+            ))}
+          </div>
+          <div className="card flex flex-wrap items-baseline justify-between gap-2 p-4">
+            <p className="text-[10px] font-bold uppercase tracking-widest text-stone-400">
+              Total store net worth · {data.month}
+            </p>
+            <p className="font-display text-2xl font-bold text-clay-900">{fmt(data.store.total)} ETB</p>
+          </div>
+          <p className="px-1 text-[11px] text-stone-400">
+            Quantity remaining × unit cost at the end of {data.month}, or today for the month in progress.
+            {data.store.unpriced > 0 && " Items with no unit cost add nothing until priced under Unit costs below."}
+          </p>
+        </>
+      )}
 
       {/* The unit costs behind the figures above, editable for the month the
           bot user could not file them. A saved price reloads the report. */}
