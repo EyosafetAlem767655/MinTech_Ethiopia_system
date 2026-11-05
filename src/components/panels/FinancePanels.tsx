@@ -327,6 +327,7 @@ interface Report {
   month: string;
   hasBaseBalance: boolean;
   hasPrices: boolean;
+  pricesFrom?: string | null;
   usdRate: number | null;
   production: ProductionRow[];
   rawMaterials: RawRow[];
@@ -406,7 +407,12 @@ function MonthlyTab() {
       )}
       {!data.hasPrices && (
         <p className="card border-l-4 border-l-amber-500 p-3 text-xs font-bold text-amber-800">
-          No price list for {data.month}, so revenue and stock net worth read zero.
+          No price list has ever been filed, so revenue and stock net worth read zero.
+        </p>
+      )}
+      {data.pricesFrom && (
+        <p className="card border-l-4 border-l-amber-500 p-3 text-xs font-bold text-amber-800">
+          Using prices last submitted in {data.pricesFrom} where {data.month} has none of its own.
         </p>
       )}
 

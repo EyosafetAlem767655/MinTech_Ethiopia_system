@@ -98,6 +98,7 @@ import {
   tickedStoreItems,
 } from "@/lib/store-voucher";
 import { costsAt } from "@/lib/store-costs";
+import { monthPrices } from "@/lib/month-prices";
 import { SALES_KEYS, parseSalesPaste, salesEditBlock, salesMissing } from "@/lib/sales-invoice";
 import { applyFlowEdit, describeFlowChanges, editableFields, renderFieldList } from "@/lib/flow-edit";
 import { dailyHeartbeat } from "@/lib/heartbeat";
@@ -1704,10 +1705,8 @@ async function startAssetFlow(
     draft[BAG_STOCK_KEY] = JSON.stringify(inStock);
   }
   if (kind === "pp_bag_price") {
-    const [row] = await sql<{ prices: Record<string, number> }[]>`
-      select prices from monthly_price_lists where month = ${monthLabel()}
-    `.catch(() => []);
-    for (const [k, v] of Object.entries(row?.prices ?? {})) {
+    const { prices } = await monthPrices(monthLabel()).catch(() => ({ prices: {} as Record<string, number> }));
+    for (const [k, v] of Object.entries(prices)) {
       if ((BAG_KIND_KEYS as readonly string[]).includes(k) && Number(v) > 0) draft[oldBagPriceKey(k)] = Number(v);
     }
   }

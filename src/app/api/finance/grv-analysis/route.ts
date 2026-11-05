@@ -12,8 +12,9 @@ export const dynamic = "force-dynamic";
  * read straight off the vouchers already filed: nobody types a purchase twice.
  *
  * A USD voucher is converted with that month's dollar rate from the price list
- * (`etb`); a month without a rate leaves `etb` null and the line is shown in
- * USD only. A voucher filed with no lines counts once, at its header total.
+ * (`etb`), or the last rate filed before it; only with no rate on file at all is
+ * `etb` null and the line shown in USD. A voucher filed with no lines counts
+ * once, at its header total.
  */
 
 interface LineRow {
@@ -53,12 +54,18 @@ export async function GET() {
   });
   if (rows === null) return NextResponse.json({ rows: [], unavailable: true });
 
-  const rates = new Map<string, number>();
-  for (const r of await sql<{ month: string; usd_rate: string | null }[]>`
-    select month, usd_rate::text from monthly_price_lists where usd_rate is not null
-  `.catch(() => [])) {
-    if (Number(r.usd_rate) > 0) rates.set(r.month, Number(r.usd_rate));
-  }
+  // Newest first. A month with no rate of its own uses the last one before it,
+  // or the earliest on file for a month before any rate was filed.
+  const rates = (
+    await sql<{ month: string; usd_rate: string | null }[]>`
+      select month, usd_rate::text from monthly_price_lists
+       where usd_rate is not null order by month desc
+    `.catch(() => [])
+  ).filter((r) => Number(r.usd_rate) > 0);
+  const rateFor = (month: string) => {
+    const r = rates.find((x) => x.month <= month) ?? rates[rates.length - 1];
+    return r ? Number(r.usd_rate) : null;
+  };
 
   const storeName = new Map(allStoreItems().map((it) => [it.key, it.name]));
 
@@ -70,7 +77,7 @@ export async function GET() {
     const total = noLines ? num(r.headerTotal) : (num(r.totalAmount) ?? (qty !== null && unitCost !== null ? qty * unitCost : null));
     const unitPrice = unitCost ?? (total !== null && qty ? total / qty : null);
     const usd = r.currency === "USD";
-    const rate = usd ? rates.get(month) ?? null : null;
+    const rate = usd ? rateFor(month) : null;
 
     // The item a line is: its store-list / ledger identity when someone matched
     // it, otherwise the description as typed (case and spacing ignored).

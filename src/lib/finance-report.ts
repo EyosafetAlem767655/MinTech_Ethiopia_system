@@ -2,6 +2,7 @@ import sql from "@/lib/sql";
 import { rawMaterialOpening } from "@/lib/raw-material-opening";
 import { hasCompanyBags, notBeforeOpening } from "@/lib/bag-opening";
 import { monthOpening } from "@/lib/month-opening";
+import { monthPrices, type MonthPrices } from "@/lib/month-prices";
 import {
   BAG_KIND_KEYS,
   COMPANY_BAG_KINDS,
@@ -161,8 +162,10 @@ export interface FinanceReport {
    */
   productsOpening: { source: "submitted" | "carried" | "none"; from: string | null };
   bagsOpening: { source: "submitted" | "carried" | "none"; from: string | null };
-  /** False when finance has not filed the month's price list yet. */
+  /** False only when no price has ever been filed, this month or before. */
   hasPrices: boolean;
+  /** The earlier month this month's prices were carried from, if any were. */
+  pricesFrom: string | null;
   usdRate: number | null;
   production: ProductionFinanceRow[];
   rawMaterials: RawMaterialFinanceRow[];
@@ -231,9 +234,10 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
     sql<{ products: Record<string, number>; raw_materials: Record<string, number>; bags: Record<string, number> }[]>`
       select products, raw_materials, bags from monthly_base_balances where month = ${month}
     `.catch(() => []),
-    sql<{ prices: Record<string, number>; usd_rate: string | null }[]>`
-      select prices, usd_rate from monthly_price_lists where month = ${month}
-    `.catch(() => []),
+    // This month's list, with anything it leaves out carried from the last one.
+    monthPrices(month).catch(
+      (): MonthPrices => ({ prices: {}, usdRate: null, filedThisMonth: false, carriedFrom: null })
+    ),
     // Produced: the guided daily production report.
     sql<{ m: Record<string, number> }[]>`
       select products as m from production_reports where date >= ${start} and date < ${end}
@@ -311,8 +315,8 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
   ]);
 
   const baseRow = base[0];
-  const prices = priceList[0]?.prices || {};
-  const usdRate = priceList[0]?.usd_rate == null ? null : n(priceList[0].usd_rate);
+  const prices = priceList.prices;
+  const usdRate = priceList.usdRate;
 
   const producedMap = sumMaps(produced);
   // One source per month, never two: the invoices when there are any, the
@@ -516,7 +520,8 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
     hasBaseBalance: Boolean(baseRow),
     productsOpening: { source: opening.productsSource, from: opening.productsFrom },
     bagsOpening: { source: opening.bagsSource, from: opening.bagsFrom },
-    hasPrices: priceList.length > 0,
+    hasPrices: Object.keys(prices).length > 0,
+    pricesFrom: priceList.carriedFrom,
     usdRate,
     production,
     rawMaterials,

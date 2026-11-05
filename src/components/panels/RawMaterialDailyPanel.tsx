@@ -183,14 +183,14 @@ function StockCheck({ check }: { check: Check }) {
                 <td className="p-1.5 tabular-nums text-stone-700">{t(r.issued)}</td>
                 <td className="p-1.5 tabular-nums font-semibold text-stone-800">{t(r.expected)}</td>
                 <td className="p-1.5 tabular-nums text-stone-800">
-                  {r.counted === null ? <span className="text-stone-300">—</span> : t(r.counted)}
+                  {r.counted === null ? <span className="text-stone-400">{t(r.expected)}</span> : t(r.counted)}
                 </td>
                 <td
                   className={`p-1.5 font-bold tabular-nums ${
                     r.gap === null ? "text-stone-300" : Math.abs(r.gap) <= 0.05 ? "text-green-700" : "text-red-700"
                   }`}
                 >
-                  {r.gap === null ? "—" : `${r.gap > 0 ? "+" : ""}${t(r.gap)}`}
+                  {r.gap === null ? "no count" : `${r.gap > 0 ? "+" : ""}${t(r.gap)}`}
                 </td>
               </tr>
             ))}
@@ -200,7 +200,7 @@ function StockCheck({ check }: { check: Check }) {
 
       <p className="text-[11px] leading-snug text-stone-400">
         {!counted
-          ? "No stock figure has been filed this month, so there is nothing to check the movements against."
+          ? "No stock figure has been filed this month yet, so Counted shows the running balance in grey and there is nothing to check the movements against."
           : hasGaps
             ? "A gap means material moved without being written down, a figure was mistyped, or the opening balance is wrong. Nothing here changes what was reported."
             : "The ground agrees with the paperwork."}{" "}

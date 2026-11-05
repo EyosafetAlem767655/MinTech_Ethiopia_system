@@ -177,8 +177,8 @@ async function handle(): Promise<NextResponse> {
   }
 
   // The month has already opened and still nobody has filed it. HR and Admin
-  // hear about it, and the dashboard raises it as an exception (see
-  // detectExceptions), because the whole monthly report is blocked without it.
+  // hear about it: the monthly report keeps running on the last figures
+  // submitted (month-opening.ts), but only a filed balance is this month's own.
   const [openMonth] = await sql<{ month: string }[]>`
     select month from monthly_base_balances where month = ${current}
   `.catch(() => []);
@@ -193,7 +193,7 @@ async function handle(): Promise<NextResponse> {
   if (!openMonth && escalationWindow) {
     const alert =
       `⚠️ <b>የ${current} የመነሻ ሚዛን አልገባም</b>\n\n` +
-      `ወሩ ተጀምሯል፤ ነገር ግን የመነሻ ሚዛን አልተመዘገበም። የወሩ የፋይናንስ ሪፖርት እስኪገባ ድረስ አይሰላም።\n\n` +
+      `ወሩ ተጀምሯል፤ ነገር ግን የመነሻ ሚዛን አልተመዘገበም። የወሩ የፋይናንስ ሪፖርት እስኪገባ ድረስ በመጨረሻ በገባው መረጃ ይሰላል።\n\n` +
       `የንብረት ክፍል "የወሩ የመነሻ ሚዛን" የሚለውን እንዲጫኑ ያስታውሱ።`;
     const recipients = employees.filter(
       (u) => hasPosition(u.positions, "hr") || hasPosition(u.positions, "admin")
@@ -208,7 +208,7 @@ async function handle(): Promise<NextResponse> {
         sendMessage(
           String(u.chat_id),
           `📊 <b>የ${current} የመነሻ ሚዛን ገና አልገባም</b>\n\n` +
-            `እባክዎ ዛሬ ያስገቡ — የወሩ ሪፖርት በዚህ ይጠብቃል።\n` +
+            `እባክዎ ዛሬ ያስገቡ — የወሩ ሪፖርት አሁን በመጨረሻ በገባው መረጃ እየተሰላ ነው።\n` +
             `<i>ቦቱ የሚልክልዎትን ቅጂ ሞልተው መመለስ ብቻ ነው።</i>`
         ).catch(() => {})
       )

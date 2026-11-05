@@ -43,7 +43,8 @@ const fmt = (n: number | null | undefined, dp = 2) =>
 
 /**
  * A null gap means nobody has counted this month, which is NOT the same as
- * everything agreeing — it says so rather than showing a reassuring dash.
+ * everything agreeing — it says "no count" rather than showing a reassuring
+ * zero, and Counted shows the running balance in grey so the table has no holes.
  */
 export function BagStockCheck({ recon }: { recon: Reconciliation | null }) {
   if (!recon) return null;
@@ -81,14 +82,14 @@ export function BagStockCheck({ recon }: { recon: Reconciliation | null }) {
                 <td className="p-1.5 tabular-nums text-stone-700">{fmt(r.issued, 0)}</td>
                 <td className="p-1.5 tabular-nums font-semibold text-stone-800">{fmt(r.expected, 0)}</td>
                 <td className="p-1.5 tabular-nums text-stone-800">
-                  {r.counted === null ? <span className="text-stone-300">—</span> : fmt(r.counted, 0)}
+                  {r.counted === null ? <span className="text-stone-400">{fmt(r.expected, 0)}</span> : fmt(r.counted, 0)}
                 </td>
                 <td
                   className={`p-1.5 font-bold tabular-nums ${
                     r.gap === null ? "text-stone-300" : r.gap === 0 ? "text-green-700" : "text-red-700"
                   }`}
                 >
-                  {r.gap === null ? "—" : `${r.gap > 0 ? "+" : ""}${fmt(r.gap, 0)}`}
+                  {r.gap === null ? "no count" : `${r.gap > 0 ? "+" : ""}${fmt(r.gap, 0)}`}
                 </td>
               </tr>
             ))}
@@ -98,7 +99,7 @@ export function BagStockCheck({ recon }: { recon: Reconciliation | null }) {
 
       <p className="text-[11px] leading-snug text-stone-400">
         {!counted
-          ? "Production has not filed a bag count this month, so there is nothing to check the vouchers against."
+          ? "Production has not filed a bag count this month yet, so Counted shows the running balance in grey and there is nothing to check the vouchers against."
           : hasGaps
             ? "A gap means bags moved without a voucher, a voucher was filed twice, or the count is off. The counted figure is recorded as reported — nothing here changes it."
             : "The floor agrees with the vouchers."}{" "}

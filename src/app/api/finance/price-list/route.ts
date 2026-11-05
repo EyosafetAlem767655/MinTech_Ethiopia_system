@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import sql from "@/lib/sql";
+import { monthPrices, type MonthPrices } from "@/lib/month-prices";
 import { monthLabel, priceListItems } from "@/lib/finance-report";
 
 export const dynamic = "force-dynamic";
@@ -22,17 +23,21 @@ const MONTH = /^\d{4}-\d{2}$/;
 export async function GET(req: NextRequest) {
   const raw = req.nextUrl.searchParams.get("month") || "";
   const month = MONTH.test(raw) ? raw : monthLabel();
-  const [row] = await sql<
-    { prices: Record<string, number>; usd_rate: string | null; reported_by: string; source: string; updated_at: string }[]
-  >`
-    select prices, usd_rate, reported_by, source, updated_at
-      from monthly_price_lists where month = ${month}
-  `.catch(() => []);
+  const [[row], carried] = await Promise.all([
+    sql<{ reported_by: string; source: string; updated_at: string }[]>`
+      select reported_by, source, updated_at from monthly_price_lists where month = ${month}
+    `.catch(() => []),
+    // What the month runs on: its own list, with the rest carried from the last.
+    monthPrices(month).catch(
+      (): MonthPrices => ({ prices: {}, usdRate: null, filedThisMonth: false, carriedFrom: null })
+    ),
+  ]);
   return NextResponse.json({
     month,
     items: priceListItems(),
-    prices: row?.prices ?? {},
-    usdRate: row?.usd_rate == null ? null : Number(row.usd_rate),
+    prices: carried.prices,
+    usdRate: carried.usdRate,
+    carriedFrom: carried.carriedFrom,
     reportedBy: row?.reported_by ?? null,
     source: row?.source ?? null,
     updatedAt: row?.updated_at ?? null,

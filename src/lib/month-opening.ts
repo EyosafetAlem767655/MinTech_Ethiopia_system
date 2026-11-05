@@ -7,10 +7,11 @@ import type { BagCounts } from "@/lib/products";
  *
  * A beginning balance filed for the month (monthly_base_balances) is used as
  * filed. Without one, the opening is whatever was last submitted before the
- * 1st: the newest daily row whose stock (or bag) section is filled in, taken
- * exactly as submitted. The owner's rule: "just pass on the data". It is not
- * moved on by later movements, and a counted figure is not preferred over a
- * typed one. A month nobody filed for used to open at zero on every line.
+ * 1st: the newest daily row whose stock (or bag) section is filled in, or an
+ * earlier month's filed balance if that is newer, taken exactly as submitted.
+ * The owner's rule: "just pass on the data". It is not moved on by later
+ * movements, and a counted figure is not preferred over a typed one. A month
+ * nobody filed for used to open at zero on every line.
  *
  * Taken a whole row at a time, never value by value: a day's save drops zeros,
  * so a product missing from the newest row WAS zero that day, and reaching
@@ -27,7 +28,7 @@ export interface MonthOpening {
   bags: Record<string, number>;
   productsSource: "submitted" | "carried" | "none";
   bagsSource: "submitted" | "carried" | "none";
-  /** The day the carried figures were submitted for (date_label), if carried. */
+  /** The day or month the carried figures were submitted for, if carried. */
   productsFrom: string | null;
   bagsFrom: string | null;
   /**
@@ -52,24 +53,36 @@ function flattenBags(bags: BagCounts | null | undefined): Record<string, number>
   return out;
 }
 
+/** Was this daily row submitted on or after the 1st of `month`, which a filed balance opens? */
+function newerThanMonth(date: Date | undefined, month: string): boolean {
+  if (!date) return false;
+  const [y, m] = month.split("-").map(Number);
+  return new Date(date).getTime() >= Date.UTC(y, m - 1, 1) - 3 * 3_600_000;
+}
+
 /** `start`/`end` are the month's bounds (finance-report.ts `monthBounds`). */
 export async function monthOpening(month: string, start: Date, end: Date): Promise<MonthOpening> {
-  const [filedRows, stockRows, bagRows] = await Promise.all([
+  const [filedRows, earlierRows, stockRows, bagRows] = await Promise.all([
     sql<{ products: Record<string, number> | null; bags: Record<string, number> | null }[]>`
       select products, bags from monthly_base_balances where month = ${month}
     `.catch(() => []),
-    sql<{ date_label: string; stock: Record<string, number> }[]>`
-      select date_label, stock from daily_ops_reports
+    sql<{ month: string; products: Record<string, number> | null; bags: Record<string, number> | null }[]>`
+      select month, products, bags from monthly_base_balances where month < ${month} order by month desc
+    `.catch(() => []),
+    sql<{ date_label: string; date: Date; stock: Record<string, number> }[]>`
+      select date_label, date, stock from daily_ops_reports
        where date < ${start} and stock is not null and stock::text <> '{}'
        order by date desc limit 1
     `.catch(() => []),
-    sql<{ date_label: string; bags: BagCounts }[]>`
-      select date_label, bags from daily_ops_reports
+    sql<{ date_label: string; date: Date; bags: BagCounts }[]>`
+      select date_label, date, bags from daily_ops_reports
        where date < ${start} and bags is not null and bags::text <> '{}'
        order by date desc limit 1
     `.catch(() => []),
   ]);
   const filed = filedRows[0];
+  const earlierProducts = earlierRows.find((r) => filled(r.products));
+  const earlierBags = earlierRows.find((r) => filled(r.bags));
 
   let products: Record<string, number> = {};
   let productsSource: MonthOpening["productsSource"] = "none";
@@ -77,6 +90,10 @@ export async function monthOpening(month: string, start: Date, end: Date): Promi
   if (filed && filled(filed.products)) {
     products = filed.products as Record<string, number>;
     productsSource = "submitted";
+  } else if (earlierProducts && !newerThanMonth(stockRows[0]?.date, earlierProducts.month)) {
+    products = earlierProducts.products as Record<string, number>;
+    productsSource = "carried";
+    productsFrom = earlierProducts.month;
   } else if (stockRows[0]) {
     for (const [k, v] of Object.entries(stockRows[0].stock || {})) products[k] = n(v);
     productsSource = "carried";
@@ -89,6 +106,10 @@ export async function monthOpening(month: string, start: Date, end: Date): Promi
   if (filed && filled(filed.bags)) {
     bags = filed.bags as Record<string, number>;
     bagsSource = "submitted";
+  } else if (earlierBags && !newerThanMonth(bagRows[0]?.date, earlierBags.month)) {
+    bags = earlierBags.bags as Record<string, number>;
+    bagsSource = "carried";
+    bagsFrom = earlierBags.month;
   } else if (bagRows[0]) {
     bags = flattenBags(bagRows[0].bags);
     bagsSource = "carried";

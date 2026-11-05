@@ -66,6 +66,8 @@ interface PriceListData {
   items: { key: string; label: string; unit: string }[];
   prices: Record<string, number>;
   usdRate: number | null;
+  /** The earlier month prices were carried from, when this month lacks some. */
+  carriedFrom?: string | null;
   reportedBy: string | null;
   source: string | null;
   updatedAt: string | null;
@@ -131,6 +133,7 @@ export function PriceListEditor({ month, onSaved }: { month: string; onSaved: ()
           {data.reportedBy
             ? `Last set by ${data.reportedBy} (${data.source === "app" ? "dashboard" : "bot"})`
             : "Not filed yet for this month"}
+          {data.carriedFrom ? ` · gaps use prices last submitted in ${data.carriedFrom}` : ""}
         </p>
       </div>
       <div className="overflow-x-auto">
