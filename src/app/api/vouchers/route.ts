@@ -101,7 +101,14 @@ export async function GET() {
   // database without migration 0019 the whole section threw and rendered blank,
   // which is exactly what "the bag counts don't show at all" looked like.
   const unavailable = grv === null || siv === null;
-  const reconciliation = unavailable ? null : await reconcileBags().catch(() => null);
+  let reconciliationError = "";
+  const reconciliation = unavailable
+    ? null
+    : await reconcileBags().catch((e) => {
+        console.error("reconcileBags failed:", e);
+        reconciliationError = e instanceof Error ? e.message : String(e);
+        return null;
+      });
 
   return NextResponse.json({
     grv: grv ?? [],
@@ -109,6 +116,7 @@ export async function GET() {
     siv: siv ?? [],
     sivItems: sivItems ?? [],
     reconciliation,
+    reconciliationError,
     unavailable,
   });
 }

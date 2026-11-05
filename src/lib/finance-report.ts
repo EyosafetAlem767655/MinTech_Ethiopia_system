@@ -190,6 +190,8 @@ export interface FinanceReport {
   rawMaterialSource: "production" | "daily" | "vouchers";
   /** Raw material opening: filed for this month, or carried from last month's closing. */
   rawOpeningSource: "counted" | "submitted" | "carried" | "none";
+  /** The calculation failed for a month it covers, so the rows are the old reports'. */
+  rawLedgerFailed: boolean;
   /** Kept apart and priced apart; null hides the section when there is none. */
   grade1: {
     rawMaterials: RawMaterialFinanceRow[];
@@ -335,8 +337,10 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
 
   // From October 2026 raw material is calculated from production. Null before
   // that, and those months read their reports exactly as they were signed off.
+  let rawLedgerFailed = false;
   const ledger = await rawMaterialLedger(month).catch((e): RawLedger | null => {
     console.error("rawMaterialLedger failed:", e);
+    rawLedgerFailed = true;
     return null;
   });
 
@@ -555,6 +559,7 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
     rawMaterials,
     rawMaterialSource: ledger ? "production" : usesDailyRaw ? "daily" : "vouchers",
     rawOpeningSource: ledger?.normal.openingSource ?? rawOpening?.source ?? (baseRow ? "submitted" : "none"),
+    rawLedgerFailed,
     grade1: grade1Section(ledger, prices),
     totals: {
       baseBalance: round3(production.reduce((a, r) => a + r.baseBalance, 0)),

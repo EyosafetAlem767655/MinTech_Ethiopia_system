@@ -6,6 +6,7 @@ import { useCanEdit, useIsSuper } from "@/lib/use-role";
 import { PriceListEditor, StoreCostEditor } from "@/components/panels/UnitCostEditors";
 import { type PurchaseRequestRef } from "@/components/panels/PurchaseForm";
 import PurchaseAnalysis from "@/components/panels/PurchaseAnalysis";
+import { SectionError, SectionLoading, errorText, getJson } from "@/components/SectionStatus";
 import { purchaseDeptLabel } from "@/lib/purchase-departments";
 import {
   ALARM_TONNES,
@@ -341,11 +342,7 @@ interface Report {
     products: { code: string; label: string; produced: number; delivered: number; stock: number; unitPrice: number; netWorth: number }[];
     netWorth: number;
   } | null;
-  store?: {
-    blocks: { key: string; label: string; icon: string; netWorth: number; unpriced: number }[];
-    total: number;
-    unpriced: number;
-  } | null;
+  rawLedgerFailed?: boolean;
   availableMonths: string[];
   error?: string;
 }
@@ -401,6 +398,74 @@ function MonthlyLoading({ month }: { month: string }) {
         </div>
       ))}
     </div>
+  );
+}
+
+interface StoreWorth {
+  blocks: { key: string; label: string; icon: string; netWorth: number; unpriced: number }[];
+  total: number;
+  unpriced: number;
+}
+
+/**
+ * The store's net worth per block. Fetched on its own, so however long it takes
+ * the rest of the report is not held up, and it always says what state it is in:
+ * loading, failed with a reason, or the figures. It is never simply absent.
+ */
+function StoreNetWorthSection({ month }: { month: string }) {
+  const [store, setStore] = useState<StoreWorth | null>(null);
+  const [failed, setFailed] = useState("");
+  const [attempt, setAttempt] = useState(0);
+
+  useEffect(() => {
+    let alive = true;
+    setStore(null);
+    setFailed("");
+    getJson<StoreWorth>(`/api/finance/store-worth?month=${month}`)
+      .then((d) => alive && setStore(d))
+      .catch((e) => alive && setFailed(errorText(e)));
+    return () => {
+      alive = false;
+    };
+  }, [month, attempt]);
+
+  return (
+    <>
+      <h3 className="px-1 pt-2 text-xs font-bold uppercase tracking-widest text-stone-400">Store net worth</h3>
+      {failed && (
+        <SectionError title="Store net worth" message={failed} onRetry={() => setAttempt((a) => a + 1)} />
+      )}
+      {!failed && !store && <SectionLoading title="store net worth" />}
+      {store && (
+        <>
+          <div className="grid gap-2 sm:grid-cols-3">
+            {store.blocks.map((b) => (
+              <div key={b.key} className="card p-4">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-stone-400">
+                  {b.icon} {b.label}
+                </p>
+                <p className="mt-1 font-display text-xl font-bold tabular-nums text-clay-900">{fmt(b.netWorth)} ETB</p>
+                {b.unpriced > 0 && (
+                  <p className="mt-0.5 text-[11px] text-stone-400">
+                    {b.unpriced} {b.unpriced === 1 ? "item" : "items"} with stock not priced
+                  </p>
+                )}
+              </div>
+            ))}
+          </div>
+          <div className="card flex flex-wrap items-baseline justify-between gap-2 p-4">
+            <p className="text-[10px] font-bold uppercase tracking-widest text-stone-400">
+              Total store net worth · {month}
+            </p>
+            <p className="font-display text-2xl font-bold text-clay-900">{fmt(store.total)} ETB</p>
+          </div>
+          <p className="px-1 text-[11px] text-stone-400">
+            Quantity remaining × unit cost at the end of {month}, or today for the month in progress.
+            {store.unpriced > 0 && " Items with no unit cost add nothing until priced under Unit costs below."}
+          </p>
+        </>
+      )}
+    </>
   );
 }
 
@@ -586,6 +651,12 @@ function MonthlyTab() {
           No price list has ever been filed, so revenue and stock net worth read zero.
         </p>
       )}
+      {data.rawLedgerFailed && (
+        <p className="card border-l-4 border-l-red-500 p-3 text-xs font-bold text-red-700">
+          Raw material could not be calculated from production just now, so its rows below show the old reported
+          figures. Reload the page to try again.
+        </p>
+      )}
       {data.pricesFrom && (
         <p className="card border-l-4 border-l-amber-500 p-3 text-xs font-bold text-amber-800">
           Using prices last submitted in {data.pricesFrom} where {data.month} has none of its own.
@@ -711,36 +782,7 @@ function MonthlyTab() {
         <p className="font-display text-2xl font-bold text-clay-900">{fmt(data.totals.netWorth)} ETB</p>
       </div>
 
-      {data.store && (
-        <>
-          <h3 className="px-1 pt-2 text-xs font-bold uppercase tracking-widest text-stone-400">Store net worth</h3>
-          <div className="grid gap-2 sm:grid-cols-3">
-            {data.store.blocks.map((b) => (
-              <div key={b.key} className="card p-4">
-                <p className="text-[10px] font-bold uppercase tracking-widest text-stone-400">
-                  {b.icon} {b.label}
-                </p>
-                <p className="mt-1 font-display text-xl font-bold tabular-nums text-clay-900">{fmt(b.netWorth)} ETB</p>
-                {b.unpriced > 0 && (
-                  <p className="mt-0.5 text-[11px] text-stone-400">
-                    {b.unpriced} {b.unpriced === 1 ? "item" : "items"} with stock not priced
-                  </p>
-                )}
-              </div>
-            ))}
-          </div>
-          <div className="card flex flex-wrap items-baseline justify-between gap-2 p-4">
-            <p className="text-[10px] font-bold uppercase tracking-widest text-stone-400">
-              Total store net worth · {data.month}
-            </p>
-            <p className="font-display text-2xl font-bold text-clay-900">{fmt(data.store.total)} ETB</p>
-          </div>
-          <p className="px-1 text-[11px] text-stone-400">
-            Quantity remaining × unit cost at the end of {data.month}, or today for the month in progress.
-            {data.store.unpriced > 0 && " Items with no unit cost add nothing until priced under Unit costs below."}
-          </p>
-        </>
-      )}
+      <StoreNetWorthSection month={data.month} />
 
       {/* Only when Grade 1 was submitted, and apart from every total above:
           it has its own stone, its own prices and its own net worth. */}

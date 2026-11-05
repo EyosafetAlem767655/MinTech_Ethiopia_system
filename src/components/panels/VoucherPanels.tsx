@@ -57,6 +57,7 @@ interface Payload {
   siv: Voucher[];
   sivItems: Item[];
   reconciliation: Reconciliation | null;
+  reconciliationError: string;
   unavailable?: boolean;
 }
 
@@ -95,6 +96,7 @@ export default function VoucherPanels({ showStockCheck = true }: { showStockChec
           siv: Array.isArray(d?.siv) ? d.siv : [],
           sivItems: Array.isArray(d?.sivItems) ? d.sivItems : [],
           reconciliation: d?.reconciliation ?? null,
+          reconciliationError: d?.reconciliationError ?? "",
           unavailable: Boolean(d?.unavailable),
         })
       )
@@ -121,6 +123,11 @@ export default function VoucherPanels({ showStockCheck = true }: { showStockChec
   return (
     <div className="space-y-4">
       {showStockCheck && <BagStockCheck recon={data.reconciliation} />}
+      {showStockCheck && data.reconciliationError && (
+        <p className="card border-l-4 border-l-red-500 p-3 text-xs text-red-700">
+          <b>The PP bag stock check could not be worked out:</b> {data.reconciliationError}
+        </p>
+      )}
 
       <div className="flex gap-1.5 px-1">
         {(

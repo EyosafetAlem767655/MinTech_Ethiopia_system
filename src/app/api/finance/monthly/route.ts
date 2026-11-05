@@ -1,24 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import sql from "@/lib/sql";
-import { buildFinanceReport, monthBounds, monthLabel } from "@/lib/finance-report";
-import { storeNetWorth } from "@/lib/store-net-worth";
+import { buildFinanceReport, monthLabel } from "@/lib/finance-report";
 import { logError } from "@/lib/errors";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
-
-/** How long the store section may take before the report goes out without it. */
-const STORE_BUDGET_MS = 12_000;
-
-/** The store section, or null if it fails or is slow: the report never waits on it. */
-function storeSection(end: Date) {
-  const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), STORE_BUDGET_MS));
-  const section = storeNetWorth(end).catch((e) => {
-    console.error("storeNetWorth failed:", e);
-    return null;
-  });
-  return Promise.race([section, timeout]);
-}
 
 /** Newest first: the current month back to `first`, at most 24. */
 function monthsSince(first: string): string[] {
@@ -38,9 +24,8 @@ export async function GET(req: NextRequest) {
   const month = /^\d{4}-\d{2}$/.test(raw) ? raw : monthLabel();
 
   try {
-    const [report, store, months] = await Promise.all([
+    const [report, months] = await Promise.all([
       buildFinanceReport(month),
-      storeSection(monthBounds(month).end),
       // From the first month anyone filed for. A month nobody filed for is still
       // a month: it runs on what was carried in, so it stays in the picker.
       sql<{ month: string }[]>`
@@ -54,7 +39,6 @@ export async function GET(req: NextRequest) {
     const available = monthsSince(months[0]?.month ?? month);
     return NextResponse.json({
       ...report,
-      store,
       availableMonths: available.includes(month) ? available : [month, ...available],
     });
   } catch (e) {
