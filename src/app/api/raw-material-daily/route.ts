@@ -1,48 +1,27 @@
 import { NextResponse } from "next/server";
-import sql from "@/lib/sql";
-import { isRangeKey, rangeWindow } from "@/lib/ranges";
-import { rawMaterialCheck } from "@/lib/raw-material-stock";
+import { monthLabel } from "@/lib/finance-report";
+import { ledgerMonths, rawMaterialLedger } from "@/lib/raw-material-usage";
+import { logError } from "@/lib/errors";
 
 export const dynamic = "force-dynamic";
 
 /**
- * GET — the daily raw-material reports in a window, plus this month's stock
- * check.
+ * GET ?month=YYYY-MM — the month's raw material: opening, received, used
+ * (produced tons + 5%) and what remains, day by day, with Grade 1 apart.
  *
- * Filtered in SQL rather than client-side: a year of daily rows is a legitimate
- * thing to ask for, and a flat cap would silently drop the oldest days from a
- * window the panel says it is showing in full.
+ * Worked out from the reports on every request, so correcting a production
+ * report corrects this without anything being re-filed.
  */
 export async function GET(req: Request) {
-  const param = new URL(req.url).searchParams.get("range") || "monthly";
-  const { start } = rangeWindow(isRangeKey(param) ? param : "monthly");
-
-  const rows = await sql<Record<string, unknown>[]>`
-    select id as _id, date, date_label as "dateLabel", received, issued, stock,
-           reported_by as "reportedBy", created_at as "createdAt"
-      from raw_material_daily
-     where date >= ${start}
-     order by date desc
-     limit 500
-  `.catch((e) => {
-    // The table arrives in 0033. An empty panel that says so beats a 500 on the
-    // whole asset tab.
-    if ((e as { code?: string })?.code !== "42P01") throw e;
-    return null;
-  });
-
-  if (rows === null) return NextResponse.json({ rows: [], check: null, unavailable: true });
-
-  // The latest submission of any date: the count is filed about once a month,
-  // so the panel shows the last one rather than a day-by-day table.
-  const [latest] = await sql<Record<string, unknown>[]>`
-    select id as _id, date, date_label as "dateLabel", received, issued, stock,
-           reported_by as "reportedBy", created_at as "createdAt"
-      from raw_material_daily
-     order by date desc, created_at desc
-     limit 1
-  `;
-
-  const check = await rawMaterialCheck().catch(() => null);
-  return NextResponse.json({ rows, latest: latest ?? null, check });
+  const current = monthLabel();
+  const raw = new URL(req.url).searchParams.get("month") || "";
+  const months = ledgerMonths(current);
+  const month = months.includes(raw) ? raw : current;
+  try {
+    return NextResponse.json({ months, ledger: await rawMaterialLedger(month) });
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    await logError({ source: "raw-material-daily", kind: "raw_material_ledger_failed", message }).catch(() => {});
+    return NextResponse.json({ months, ledger: null, error: `Raw material could not be worked out: ${message}` }, { status: 500 });
+  }
 }

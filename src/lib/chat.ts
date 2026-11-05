@@ -16,6 +16,7 @@ import { splitByCompliance } from "@/lib/compliance";
 import { buildFinanceReport, monthLabel } from "@/lib/finance-report";
 import { reconcileBags } from "@/lib/stock-reconciliation";
 import { rawMaterialCheck } from "@/lib/raw-material-stock";
+import { rawMaterialLedger } from "@/lib/raw-material-usage";
 import { ALARM_TONNES, creditFigures, customerExposure } from "@/lib/credit";
 import { STALE_DAYS, groupStatuses, itemStatuses, recentCounts, storeMovements } from "@/lib/store-inventory";
 import { costsAt } from "@/lib/store-costs";
@@ -752,11 +753,13 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<unk
       const month = typeof args.month === "string" && /^\d{4}-\d{2}$/.test(args.month)
         ? args.month
         : monthLabel();
-      const [bags, materials] = await Promise.all([
+      const [bags, ledger, materials] = await Promise.all([
         reconcileBags(month).catch(() => null),
+        rawMaterialLedger(month).catch(() => null),
         rawMaterialCheck(month).catch(() => null),
       ]);
-      return { month, bags, rawMaterials: materials };
+      // From October 2026 raw material used is produced tons + 5%, not reported.
+      return { month, bags, rawMaterials: ledger ?? materials };
     }
     case "get_credit_exposure": {
       try {

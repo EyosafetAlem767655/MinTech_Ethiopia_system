@@ -144,14 +144,14 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
     question: "⚪ የነጭነት ምርመራ መረጃውን በደረጃ እናስገባለን።",
   },
   // The key is unchanged so no session, roster row or registry entry has to move
-  // with the report; what it collects is now the DAY (received, issued and
-  // counted) rather than one truckload.
+  // with the report. What it collects is now only what ARRIVED: raw material
+  // used is worked out from production (raw-material-usage.ts).
   raw_material_received: {
     key: "raw_material_received",
-    button: "🧱 የቀኑ የጥሬ ዕቃ ሪፖርት",
+    button: "🧱 የጥሬ ዕቃ ገቢ",
     captureMode: "asset_entry",
     input: "any",
-    question: "🧱 የቀኑን የጥሬ ዕቃ ገቢ፣ ወጪና ክምችት እናስገባለን።",
+    question: "🧱 አዲስ የገባውን ጥሬ ዕቃ እናስመዘግባለን።",
   },
   credit_payment: {
     key: "credit_payment",
@@ -398,9 +398,9 @@ export const POSITIONS: Record<PositionKey, Position> = {
   asset_materials: {
     key: "asset_materials",
     department: "asset_management",
-    en: "Raw materials weight report",
-    am: "የጥሬ ዕቃ ክብደት ሪፖርት",
-    description: "Reports raw materials received and issued, every day, and keeps the store vouchers.",
+    en: "Raw materials received",
+    am: "የጥሬ ዕቃ ገቢ",
+    description: "Reports raw material when it arrives, and keeps the store vouchers.",
     // Deliberately just the two guided flows. The free-text daily report, stock
     // status and material count were left over from before those flows existed
     // and only duplicated, less reliably, what the guided steps now capture.
@@ -417,7 +417,9 @@ export const POSITIONS: Record<PositionKey, Position> = {
       "store_issue",
       "base_balance",
     ],
-    dailyRequired: true,
+    // Raw material is filed when it arrives, not every day: use is worked out
+    // from production. So nothing here is owed on a given day.
+    dailyRequired: false,
     // store_issue_vouchers is deliberately absent: nothing leaves the warehouse
     // on some days, and a table nobody filed would mark this role non-compliant
     // for every quiet day. material_issues stays so historic days still count.

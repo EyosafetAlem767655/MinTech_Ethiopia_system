@@ -21,6 +21,8 @@ import {
   productLabel,
   type BagSize,
   type LedgerKind,
+  G1,
+  g1Key,
 } from "@/lib/products";
 import { upsertOpsDay, opsDateLabel } from "@/lib/ops-report";
 import { runAfter } from "@/lib/after";
@@ -97,6 +99,8 @@ import {
 import {
   BAG_PREFIX,
   BRAND_PREFIX,
+  G1_BRAND_PREFIX,
+  G1_MATERIAL_PREFIX,
   MATERIAL_PREFIX,
   bagFinanceKey,
   baseBalanceTemplate,
@@ -107,7 +111,14 @@ import {
 } from "@/lib/finance-paste";
 import { monthLabel, nextMonth, priceListItems } from "@/lib/finance-report";
 import { PURCHASE_DEPARTMENTS } from "@/lib/purchase-departments";
-import { rawMaterialTemplate, sectionMap } from "@/lib/raw-material-paste";
+import {
+  RECEIVED_PREFIX,
+  grade1RawTemplate,
+  grade1Received,
+  materialKey as rawKey,
+  rawMaterialTemplate,
+  sectionMap,
+} from "@/lib/raw-material-paste";
 import {
   STORE_BLOCKS,
   STORE_GROUPS,
@@ -306,8 +317,28 @@ const RAW_MATERIAL_STEPS: AssetStep[] = [
       "📋 የሚከተለውን ቅጂ ሞልተው ይመልሱት።\n\n" +
       "<i>ቁጥሩን ከ = በኋላ በቶን ይፃፉ። ለምሳሌ፦</i>\n" +
       "<code>Dolomite = 12.5</code>\n" +
-      "<i>የሌለውን 0 ይፃፉ ወይም ባዶ ይተዉት። የክፍሉን ርዕስ (--- Received ---) አይሰርዙ።</i>",
+      "<i>ያልገባውን 0 ይፃፉ ወይም ባዶ ይተዉት። የክፍሉን ርዕስ (--- Received ---) አይሰርዙ።</i>",
     type: "paste",
+  },
+  // Grade 1 raw material arrives and is priced apart. "No" goes straight to the
+  // review card; the ids are the production flow's, each flow has its own steps.
+  {
+    id: "grade1",
+    label: "Grade 1?",
+    prompt: "⭐ Grade 1 ጥሬ ዕቃ ገብቷል? (Is there a grade one raw material?)",
+    type: "choice",
+    choices: [
+      { label: "✅ አዎ", value: "yes" },
+      { label: "❌ የለም", value: "no" },
+    ],
+  },
+  {
+    id: "grade1Paste",
+    prompt:
+      "⭐ <b>Grade 1</b> — የሚከተለውን ቅጂ በGrade 1 ጥሬ ዕቃ ብቻ ሞልተው ይመልሱት።\n" +
+      "<i>ቁጥሩን ከ = በኋላ በቶን ይፃፉ።</i>",
+    type: "paste",
+    when: (d) => d.grade1 === "yes",
   },
 ];
 
@@ -1735,7 +1766,7 @@ export function pasteTemplate(
     return ppBagPriceTemplate(prices);
   }
   if (kind === "sales_invoice") return salesTemplate(draft);
-  if (kind === "raw_material") return rawMaterialTemplate();
+  if (kind === "raw_material") return step === GRADE1_PASTE_STEP ? grade1RawTemplate() : rawMaterialTemplate();
   if (kind === "pp_bag_receipt") return ppBagTemplate();
   if (kind === "downtime") {
     // What the sheet read, ready to be checked — or just the header to type under.
@@ -1826,6 +1857,9 @@ export function draftKeyLabel(key: string): string {
   if (key.startsWith(PROD_PREFIX)) return `ምርት · ${productLabel(key.slice(PROD_PREFIX.length))}`;
   if (key.startsWith(STOCK_PREFIX)) return `ክምችት · ${productLabel(key.slice(STOCK_PREFIX.length))}`;
   if (key.startsWith(DELIVERED_PREFIX)) return `Delivered · ${productLabel(key.slice(DELIVERED_PREFIX.length))}`;
+  if (key.startsWith(RECEIVED_PREFIX)) return `ገቢ · ${key.slice(RECEIVED_PREFIX.length).replace(G1, "⭐ ")}`;
+  if (key.startsWith(G1_BRAND_PREFIX)) return `⭐ ምርቶች · ${productLabel(key.slice(G1_BRAND_PREFIX.length))}`;
+  if (key.startsWith(G1_MATERIAL_PREFIX)) return `⭐ ጥሬ ዕቃ · ${key.slice(G1_MATERIAL_PREFIX.length)}`;
   if (key.startsWith(BRAND_PREFIX)) return `ምርቶች · ${productLabel(key.slice(BRAND_PREFIX.length))}`;
   if (key.startsWith(MATERIAL_PREFIX)) return `ጥሬ ዕቃ · ${key.slice(MATERIAL_PREFIX.length)}`;
   // Both paste families namespace bags the same way, so one branch serves both.
@@ -1968,6 +2002,22 @@ function jsonMap(draft: Record<string, string | number>, prefix: string, keys: r
   return out;
 }
 
+/** Optional Grade 1 lines of a monthly form, under their stored "g1:" keys. */
+function grade1Lines(draft: Record<string, string | number>, prefix: string, keys: readonly string[]) {
+  return Object.fromEntries(Object.entries(jsonMap(draft, prefix, keys)).map(([k, v]) => [g1Key(k), v]));
+}
+
+/** The Grade 1 prices of a price list, for its review card. Only what was filled. */
+function grade1PriceLines(d: Record<string, string | number>): string[] {
+  const line = (key: string, label: string) =>
+    d[key] === undefined ? [] : [`${label}: <b>${money(Number(d[key]) || 0)}</b>`];
+  const rows = [
+    ...FINANCE_RAW_MATERIALS.flatMap((m) => line(`${G1_MATERIAL_PREFIX}${m}`, m)),
+    ...PRODUCT_ORDER.flatMap((c) => line(`${G1_BRAND_PREFIX}${c}`, productLabel(c))),
+  ];
+  return rows.length > 0 ? ["", "⭐ <b>Grade 1</b>", ...rows] : [];
+}
+
 /** The day's Grade 1 part, as production_reports.grade1 stores it. */
 function grade1Map(draft: Record<string, string | number>) {
   return {
@@ -2005,24 +2055,20 @@ export function assetPreview(state: AssetFlowState): string {
   const head = `<b>${FLOW_TITLE[state.kind]}</b>\n`;
 
   if (state.kind === "raw_material") {
-    // Three blocks, each totalled. Stock is deliberately NOT totalled against
-    // the other two on the card: it is a level counted on the ground, and the
-    // only comparison worth making (opening + received − issued against it) is
-    // the stock check on the dashboard, which knows the opening balance.
-    const block = (label: string, section: "received" | "issued" | "stock") => {
-      const map = sectionMap(d, section);
-      const lines = FINANCE_RAW_MATERIALS.map((m) => `  • ${m}: ${qty(map[m])}`).join("\n");
-      const total = FINANCE_RAW_MATERIALS.reduce((a, m) => a + map[m], 0);
+    // What arrived, and nothing else: what was used comes from production.
+    const block = (label: string, value: (m: string) => number) => {
+      const lines = FINANCE_RAW_MATERIALS.map((m) => `  • ${m}: ${qty(value(m))}`).join("\n");
+      const total = FINANCE_RAW_MATERIALS.reduce((a, m) => a + value(m), 0);
       return `${label}\n${lines}\n  <b>ድምር: ${qty(total)}</b>\n`;
     };
+    const received = sectionMap(d, "received");
     return (
       head +
       `📅 Date: ${esc(d.date)}\n\n` +
-      block("📥 <b>ገቢ (Received, ቶን)</b>", "received") +
-      "\n" +
-      block("🏭 <b>ወጪ / ለምርት (Issue, ቶን)</b>", "issued") +
-      "\n" +
-      block("📦 <b>ክምችት (Stock, ቶን)</b>", "stock")
+      block("📥 <b>ገቢ (Received, ቶን)</b>", (m) => received[m]) +
+      (d[GRADE1_STEP] === "yes"
+        ? "\n" + block("⭐ <b>Grade 1 ገቢ (ቶን)</b>", (m) => Number(d[rawKey("received", g1Key(m))]) || 0)
+        : "")
     );
   }
 
@@ -2276,6 +2322,10 @@ export function assetPreview(state: AssetFlowState): string {
     const bags = COMPANY_BAG_KINDS.map(({ size, colour }) =>
       cell(bagFinanceKey(size, colour), `${bagLabel(size, colour)} PP`)
     );
+    // Optional: shown only if filled, and a blank is never counted as missing.
+    const grade1 = FINANCE_RAW_MATERIALS.filter((m) => d[`${G1_MATERIAL_PREFIX}${m}`] !== undefined).map(
+      (m) => `${m}: <b>${qty(Number(d[`${G1_MATERIAL_PREFIX}${m}`]) || 0)}</b> ቶን`
+    );
 
     return [
       `📊 <b>የ${nextMonthOf(d)} የመነሻ ሚዛን</b>`,
@@ -2288,6 +2338,7 @@ export function assetPreview(state: AssetFlowState): string {
       "",
       "<b>ከረጢት</b>",
       ...bags,
+      ...(grade1.length > 0 ? ["", "⭐ <b>Grade 1 ጥሬ ዕቃ</b>", ...grade1] : []),
       ...(blanks.length > 0
         ? ["", `⚠️ <b>${blanks.length} መስመር ባዶ ነው</b> — በ0 ይመዘገባል።`, "<i>ቅጂውን ሞልተው ድጋሚ መላክ ይችላሉ።</i>"]
         : []),
@@ -2489,6 +2540,7 @@ export function assetPreview(state: AssetFlowState): string {
       ...rows,
       "",
       `💱 1 USD = <b>${money(Number(d.usdRate) || 0)}</b> ብር`,
+      ...grade1PriceLines(d),
     ].join("\n");
   }
 
@@ -2675,21 +2727,18 @@ export async function saveAssetReport(
 
   if (state.kind === "raw_material") {
     // Upserted on the day, like the ops report: filing the same day twice is a
-    // correction, not a second reading. All three blocks are replaced together
-    // — they were answered together, and merging them per material would leave
-    // yesterday's stock standing beside today's received.
+    // correction, not a second reading. What an older report of that day said
+    // about issue and stock is left as it was filed.
     const date = reportDate(d.date);
     const [row] = await sql<{ id: string }[]>`
       insert into raw_material_daily (date, date_label, received, issued, stock, reported_by, source)
       values (${date}, ${eatDateLabel(date)},
-              ${sql.json(sectionMap(d, "received"))},
-              ${sql.json(sectionMap(d, "issued"))},
-              ${sql.json(sectionMap(d, "stock"))},
+              ${sql.json({ ...sectionMap(d, "received"), ...(d[GRADE1_STEP] === "yes" ? grade1Received(d) : {}) })},
+              ${sql.json({})},
+              ${sql.json({})},
               ${reportedBy}, 'telegram')
       on conflict (date_label) do update set
         received = excluded.received,
-        issued = excluded.issued,
-        stock = excluded.stock,
         reported_by = excluded.reported_by,
         updated_at = now()
       returning id`;
@@ -3104,7 +3153,7 @@ export async function saveAssetReport(
       insert into monthly_base_balances (month, products, raw_materials, bags, reported_by, source)
       values (${month},
               ${sql.json(jsonMap(d, BRAND_PREFIX, PRODUCT_ORDER))},
-              ${sql.json(jsonMap(d, MATERIAL_PREFIX, FINANCE_RAW_MATERIALS))},
+              ${sql.json({ ...jsonMap(d, MATERIAL_PREFIX, FINANCE_RAW_MATERIALS), ...grade1Lines(d, G1_MATERIAL_PREFIX, FINANCE_RAW_MATERIALS) })},
               ${sql.json(jsonMap(d, BAG_PREFIX, BAG_KIND_KEYS))},
               ${reportedBy}, 'telegram')
       on conflict (month) do update set
@@ -3298,6 +3347,8 @@ export async function saveAssetReport(
       ...jsonMap(d, BRAND_PREFIX, PRODUCT_ORDER),
       ...jsonMap(d, MATERIAL_PREFIX, FINANCE_RAW_MATERIALS),
       ...jsonMap(d, BAG_PREFIX, BAG_KIND_KEYS),
+      ...grade1Lines(d, G1_MATERIAL_PREFIX, FINANCE_RAW_MATERIALS),
+      ...grade1Lines(d, G1_BRAND_PREFIX, PRODUCT_ORDER),
     };
     const [row] = await sql<{ id: string }[]>`
       insert into monthly_price_lists (month, prices, usd_rate, reported_by, source)

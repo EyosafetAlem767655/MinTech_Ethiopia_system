@@ -4,208 +4,211 @@ import { useEffect, useState } from "react";
 import { FINANCE_RAW_MATERIALS } from "@/lib/products";
 
 /**
- * The daily raw-material report: what came in, what production used, and what
- * was counted on the ground.
+ * Raw material, worked out from production: what the month opened with, what
+ * arrived, what each day's tons used (+ 5% wastage), and what is left.
  *
- * It replaces the per-truck intake table (supplier, delivery note, plate,
- * M.R.V). Those rows still exist and are still readable under Settings →
- * Submissions; nothing was deleted. What changed is what the store files each
- * day, and this is the shape of it.
- *
- * The report is filed about once a month, so the panel shows the LATEST
- * submission only, not a day-by-day table. Every day's row is still kept and
- * readable under Settings → Submissions. The check below does the only
- * comparison worth making.
+ * Nobody files what was used or counts stock daily. Asset management files only
+ * what arrives; older daily reports stay under Settings → Submissions. Grade 1
+ * has its own stone and is shown apart, only when there is some.
  */
 
-interface Row {
-  _id: string;
-  date: string;
-  dateLabel: string;
-  received: Record<string, number>;
-  issued: Record<string, number>;
-  stock: Record<string, number>;
-  reportedBy: string;
+type Tons = Record<string, number>;
+
+interface Day {
+  day: string;
+  produced: Tons;
+  used: Tons;
+  received: Tons;
+  remaining: Tons;
 }
 
-interface CheckRow {
-  material: string;
-  baseBalance: number;
-  received: number;
-  issued: number;
-  expected: number;
-  counted: number | null;
-  gap: number | null;
+interface Stream {
+  opening: Tons;
+  openingSource: "counted" | "submitted" | "carried" | "none";
+  openingFrom: string | null;
+  received: Tons;
+  used: Tons;
+  closing: Tons;
+  days: Day[];
 }
 
-interface Check {
+interface Ledger {
   month: string;
-  countedOn: string | null;
-  rows: CheckRow[];
-  discrepancies: CheckRow[];
-  openingSource?: "counted" | "submitted" | "carried" | "none";
-  openingFrom?: string | null;
+  normal: Stream;
+  grade1: Stream | null;
 }
 
-const fmtDate = (d: string) => new Date(d).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
-const num = (n?: number | null) =>
-  n === null || n === undefined || n === 0 ? "" : (Math.round(n * 1000) / 1000).toLocaleString();
-const t = (n: number | null) =>
-  n === null ? "—" : `${(Math.round(n * 1000) / 1000).toLocaleString()}`;
+const fmtDay = (d: string) => new Date(`${d}T00:00:00Z`).toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: "UTC" });
+const t = (n: number) => (Math.round(n * 1000) / 1000).toLocaleString();
+const moved = (n: number) => (n === 0 ? <span className="text-stone-300">0</span> : t(n));
+
+function openingNote(s: Stream): string {
+  if (s.openingSource === "submitted") return "beginning balance filed for this month";
+  if (s.openingSource === "counted") return `last stock count before the month${s.openingFrom ? ` (${s.openingFrom})` : ""}`;
+  if (s.openingSource === "carried") return `calculated closing of ${s.openingFrom ?? "last month"}`;
+  return "nothing filed yet, opens at 0";
+}
+
+function StreamTables({ stream }: { stream: Stream }) {
+  return (
+    <>
+      <section className="card space-y-2 p-3">
+        <p className="text-[11px] text-stone-500">Opening: {openingNote(stream)}</p>
+        <div className="-mx-1 overflow-x-auto">
+          <table className="w-full min-w-[420px] text-right text-xs">
+            <thead className="text-[10px] uppercase tracking-wide text-stone-500">
+              <tr>
+                <th className="p-1.5 text-left font-bold">Material</th>
+                <th className="p-1.5 font-bold">Opening</th>
+                <th className="p-1.5 font-bold">📥 Received</th>
+                <th className="p-1.5 font-bold">🏭 Used</th>
+                <th className="p-1.5 font-bold">📦 Remaining</th>
+              </tr>
+            </thead>
+            <tbody>
+              {FINANCE_RAW_MATERIALS.map((m) => (
+                <tr key={m} className="border-t border-clay-50">
+                  <td className="p-1.5 text-left font-semibold text-stone-800">{m}</td>
+                  <td className="p-1.5 tabular-nums text-stone-500">{t(stream.opening[m])}</td>
+                  <td className="p-1.5 tabular-nums text-stone-700">{t(stream.received[m])}</td>
+                  <td className="p-1.5 tabular-nums text-stone-700">{t(stream.used[m])}</td>
+                  <td
+                    className={`p-1.5 font-bold tabular-nums ${stream.closing[m] < 0 ? "text-red-700" : "text-stone-800"}`}
+                  >
+                    {t(stream.closing[m])}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      {stream.days.length > 0 && (
+        <div className="card overflow-x-auto p-0">
+          <table className="w-full min-w-[640px] text-right text-xs">
+            <thead className="bg-clay-50/70 text-[10px] uppercase tracking-wide text-stone-500">
+              <tr>
+                <th rowSpan={2} className="p-2 text-left font-bold">
+                  Day
+                </th>
+                <th colSpan={3} className="border-l border-clay-100 p-1 text-center font-bold">
+                  Used (tons + 5%)
+                </th>
+                <th colSpan={3} className="border-l border-clay-100 p-1 text-center font-bold">
+                  Received
+                </th>
+                <th colSpan={3} className="border-l border-clay-100 p-1 text-center font-bold">
+                  Remaining
+                </th>
+              </tr>
+              <tr>
+                {[0, 1, 2].flatMap((block) =>
+                  FINANCE_RAW_MATERIALS.map((m, i) => (
+                    <th key={`${block}${m}`} className={`p-1.5 font-bold ${i === 0 ? "border-l border-clay-100" : ""}`}>
+                      {m}
+                    </th>
+                  ))
+                )}
+              </tr>
+            </thead>
+            <tbody>
+              {stream.days.map((d) => (
+                <tr key={d.day} className="border-t border-clay-50">
+                  <td className="whitespace-nowrap p-2 text-left font-semibold text-stone-800">{fmtDay(d.day)}</td>
+                  {FINANCE_RAW_MATERIALS.map((m, i) => (
+                    <td key={m} className={`p-1.5 tabular-nums ${i === 0 ? "border-l border-clay-50" : ""}`}>
+                      {moved(d.used[m])}
+                    </td>
+                  ))}
+                  {FINANCE_RAW_MATERIALS.map((m, i) => (
+                    <td key={m} className={`p-1.5 tabular-nums ${i === 0 ? "border-l border-clay-50" : ""}`}>
+                      {moved(d.received[m])}
+                    </td>
+                  ))}
+                  {FINANCE_RAW_MATERIALS.map((m, i) => (
+                    <td
+                      key={m}
+                      className={`p-1.5 font-semibold tabular-nums ${i === 0 ? "border-l border-clay-50" : ""} ${
+                        d.remaining[m] < 0 ? "text-red-700" : "text-stone-800"
+                      }`}
+                    >
+                      {t(d.remaining[m])}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </>
+  );
+}
 
 export default function RawMaterialDailyPanel() {
-  const [latest, setLatest] = useState<Row | null | undefined>(undefined);
-  const [check, setCheck] = useState<Check | null>(null);
-  const [unavailable, setUnavailable] = useState(false);
+  const [month, setMonth] = useState("");
+  const [months, setMonths] = useState<string[]>([]);
+  const [ledger, setLedger] = useState<Ledger | null | undefined>(undefined);
+  const [error, setError] = useState("");
 
   useEffect(() => {
     let alive = true;
-    fetch(`/api/raw-material-daily`)
-      .then((r) => (r.ok ? r.json() : null))
+    setLedger(undefined);
+    fetch(`/api/raw-material-daily${month ? `?month=${month}` : ""}`)
+      .then((r) => r.json().catch(() => null))
       .then((d) => {
         if (!alive) return;
-        setLatest(d?.latest ?? null);
-        setCheck(d?.check ?? null);
-        setUnavailable(Boolean(d?.unavailable));
+        setMonths(d?.months ?? []);
+        setLedger(d?.ledger ?? null);
+        setError(d?.error ?? "");
       })
       .catch(() => {
-        if (alive) setLatest(null);
+        if (alive) setLedger(null);
       });
     return () => {
       alive = false;
     };
-  }, []);
-
-  if (latest === undefined) return <div className="card h-64 animate-pulse bg-clay-50" />;
+  }, [month]);
 
   return (
     <section className="space-y-3">
-      <div className="flex flex-wrap items-baseline justify-between gap-2 px-1">
-        <h2 className="font-display text-lg font-bold">🧱 Raw material · latest</h2>
-        <p className="text-[11px] text-stone-400">tonnes · the last submission</p>
-      </div>
-
-      {unavailable && (
-        <p className="card p-3 text-xs text-amber-700">
-          The daily raw-material table is not in the database yet — apply migration 0033.
-        </p>
-      )}
-
-      {/* The count is filed about once a month, so the last submission is the
-          figure worth reading; a day-by-day table was mostly empty days. */}
-      {latest === null ? (
-        !unavailable && <p className="card p-3 text-xs text-stone-500">No raw-material report has been submitted yet.</p>
-      ) : (
-        <section className="card space-y-2 p-3">
-          <p className="text-[11px] text-stone-500">
-            Submitted for <b className="text-stone-800">{fmtDate(latest.date)}</b> by {latest.reportedBy}
-          </p>
-          <div className="-mx-1 overflow-x-auto">
-            <table className="w-full min-w-[360px] text-right text-xs">
-              <thead className="text-[10px] uppercase tracking-wide text-stone-500">
-                <tr>
-                  <th className="p-1.5 text-left font-bold">Material</th>
-                  <th className="p-1.5 font-bold">📥 Received</th>
-                  <th className="p-1.5 font-bold">🏭 Issue</th>
-                  <th className="p-1.5 font-bold">📦 Stock</th>
-                </tr>
-              </thead>
-              <tbody>
-                {FINANCE_RAW_MATERIALS.map((m) => (
-                  <tr key={m} className="border-t border-clay-50">
-                    <td className="p-1.5 text-left font-semibold text-stone-800">{m}</td>
-                    <td className="p-1.5 tabular-nums text-stone-700">{num(latest.received?.[m]) || "—"}</td>
-                    <td className="p-1.5 tabular-nums text-stone-700">{num(latest.issued?.[m]) || "—"}</td>
-                    <td className="p-1.5 font-semibold tabular-nums text-stone-800">{num(latest.stock?.[m]) || "—"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      )}
-
-      {check && <StockCheck check={check} />}
-    </section>
-  );
-}
-
-/**
- * Opening + received − issued, against what was counted on the ground.
- *
- * The same shape as the PP bag stock check, for the same reason: two records of
- * one quantity, and the gap between them is the number worth looking at.
- */
-function StockCheck({ check }: { check: Check }) {
-  const counted = check.countedOn !== null;
-  const hasGaps = check.discrepancies.length > 0;
-
-  return (
-    <section className="card space-y-2 p-3">
-      <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h3 className="font-display text-sm font-bold">⚖️ Raw material stock check · {check.month}</h3>
-        <p className="text-[11px] text-stone-400">
-          {counted ? `Counted ${fmtDate(check.countedOn!)}` : "No stock counted this month"}
-        </p>
-      </div>
-      {check.openingSource && (
-        <p className="text-[11px] text-stone-500">
-          Opening:{" "}
-          {check.openingSource === "counted"
-            ? `last stock count in the daily report (${check.openingFrom ? fmtDate(check.openingFrom) : "before the 1st"}), plus anything received or issued after it`
-            : check.openingSource === "submitted"
-            ? `beginning balance submitted for ${check.month}`
-            : check.openingSource === "carried"
-              ? `carried from last month's closing${check.openingFrom ? ` (from the ${check.openingFrom} beginning balance + daily reports since)` : " (daily reports)"}`
-              : "no beginning balance submitted yet"}
-        </p>
-      )}
-
-      <div className="-mx-1 overflow-x-auto">
-        <table className="w-full min-w-[460px] text-right text-xs">
-          <thead className="text-[10px] uppercase tracking-wide text-stone-500">
-            <tr>
-              <th className="p-1.5 text-left font-bold">Material</th>
-              <th className="p-1.5 font-bold">Opening</th>
-              <th className="p-1.5 font-bold">Received</th>
-              <th className="p-1.5 font-bold">Issued</th>
-              <th className="p-1.5 font-bold">Expected</th>
-              <th className="p-1.5 font-bold">Counted</th>
-              <th className="p-1.5 font-bold">Gap</th>
-            </tr>
-          </thead>
-          <tbody>
-            {check.rows.map((r) => (
-              <tr key={r.material} className="border-t border-clay-50">
-                <td className="p-1.5 text-left font-semibold text-stone-800">{r.material}</td>
-                <td className="p-1.5 tabular-nums text-stone-500">{t(r.baseBalance)}</td>
-                <td className="p-1.5 tabular-nums text-stone-700">{t(r.received)}</td>
-                <td className="p-1.5 tabular-nums text-stone-700">{t(r.issued)}</td>
-                <td className="p-1.5 tabular-nums font-semibold text-stone-800">{t(r.expected)}</td>
-                <td className="p-1.5 tabular-nums text-stone-800">
-                  {r.counted === null ? <span className="text-stone-400">{t(r.expected)}</span> : t(r.counted)}
-                </td>
-                <td
-                  className={`p-1.5 font-bold tabular-nums ${
-                    r.gap === null ? "text-stone-300" : Math.abs(r.gap) <= 0.05 ? "text-green-700" : "text-red-700"
-                  }`}
-                >
-                  {r.gap === null ? "no count" : `${r.gap > 0 ? "+" : ""}${t(r.gap)}`}
-                </td>
-              </tr>
+      <div className="flex flex-wrap items-center justify-between gap-2 px-1">
+        <div>
+          <h2 className="font-display text-lg font-bold">🧱 Raw material</h2>
+          <p className="text-[11px] text-stone-400">tonnes · used = produced tons + 5% wastage</p>
+        </div>
+        {months.length > 0 && (
+          <select
+            aria-label="Month"
+            value={month || ledger?.month || months[0]}
+            onChange={(e) => setMonth(e.target.value)}
+            className="rounded-lg border border-clay-100 bg-white px-2 py-1 text-xs font-bold"
+          >
+            {months.map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
             ))}
-          </tbody>
-        </table>
+          </select>
+        )}
       </div>
 
-      <p className="text-[11px] leading-snug text-stone-400">
-        {!counted
-          ? "No stock figure has been filed this month yet, so Counted shows the running balance in grey and there is nothing to check the movements against."
-          : hasGaps
-            ? "A gap means material moved without being written down, a figure was mistyped, or the opening balance is wrong. Nothing here changes what was reported."
-            : "The ground agrees with the paperwork."}{" "}
-        Expected is the opening balance plus everything received, less everything issued, for {check.month}.
-      </p>
+      {ledger === undefined && <div className="card h-64 animate-pulse bg-clay-50" />}
+      {ledger === null && (
+        <p className="card p-3 text-xs text-amber-700">{error || "Raw material could not be loaded. Please try again."}</p>
+      )}
+      {ledger && (
+        <>
+          <StreamTables stream={ledger.normal} />
+          {ledger.grade1 && (
+            <>
+              <h3 className="px-1 pt-2 text-xs font-bold uppercase tracking-widest text-stone-400">⭐ Grade 1</h3>
+              <StreamTables stream={ledger.grade1} />
+            </>
+          )}
+        </>
+      )}
     </section>
   );
 }

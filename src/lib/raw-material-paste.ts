@@ -1,17 +1,14 @@
-import { FINANCE_RAW_MATERIALS } from "@/lib/products";
+import { FINANCE_RAW_MATERIALS, g1Key } from "@/lib/products";
 
 /**
- * The fill-in template for the daily raw-material report, and its parser.
+ * The fill-in template for raw material received, and its parser.
  *
- * Nine figures — three materials, read three ways — which is nine messages if
- * asked one at a time, every day. The bot sends this block instead: one message
- * out, one message back, in the exact shape the plant wrote the request in.
+ * Only what arrived is asked for: what production used is worked out from the
+ * tons it reported (raw-material-usage.ts), and nothing counts stock daily.
  *
- * Sections are load-bearing, not decoration. The SAME THREE NAMES appear three
- * times, so without a header to switch context the Stock block would overwrite
- * the Issue block, which would overwrite Received — and a day would be recorded
- * as having consumed everything it received. This is the same trap
- * production-paste.ts documents for its three product tables.
+ * The parser still knows the old Issue and Stock sections. Someone may paste
+ * the old three-part block from memory, and without a header to switch context
+ * those lines would land on Received. They are read and ignored, not added.
  *
  * Pure by design — no `sql`, no network — so the parser is testable on its own
  * and the flow engine stays small.
@@ -39,26 +36,20 @@ export function materialKey(section: RawSection, material: string): string {
 // recognises is a header people delete — which would leave the parser unable to
 // tell what was received from what was consumed.
 const H_RECEIVED = "--- Received ---";
-const H_ISSUED = "--- Issue ---";
-const H_STOCK = "--- Stock ---";
 
 /**
  * The blank template the bot sends.
  *
  * Values are left empty rather than pre-filled with 0 so the block is quick to
- * fill in on a phone — and a line left empty IS zero here: none arrived, none
- * was used, none is left.
+ * fill in on a phone — and a line left empty IS zero here: none arrived.
  */
 export function rawMaterialTemplate(): string {
-  const lines = FINANCE_RAW_MATERIALS.map((m) => `${m}=`).join("\n");
-  return [
-    H_RECEIVED,
-    lines,
-    H_ISSUED,
-    lines,
-    H_STOCK,
-    lines,
-  ].join("\n");
+  return [H_RECEIVED, FINANCE_RAW_MATERIALS.map((m) => `${m}=`).join("\n")].join("\n");
+}
+
+/** The same block for Grade 1 raw material, which is received and priced apart. */
+export function grade1RawTemplate(): string {
+  return ["--- ⭐ Grade 1 Received ---", FINANCE_RAW_MATERIALS.map((m) => `${m}=`).join("\n")].join("\n");
 }
 
 /* ─────────────────────────────── Parsing ──────────────────────────────────── */
@@ -185,6 +176,27 @@ export function parseRawMaterialPaste(text: string): ParsedRawMaterial {
   }
 
   return { values, unknown, invalid };
+}
+
+/** A filled Grade 1 block: what it received lands under the Grade 1 keys only. */
+export function parseGrade1RawPaste(text: string): ParsedRawMaterial {
+  const parsed = parseRawMaterialPaste(text);
+  const values: Record<string, string | number> = {};
+  for (const m of FINANCE_RAW_MATERIALS) {
+    const v = parsed.values[materialKey("received", m)];
+    if (v !== undefined) values[materialKey("received", g1Key(m))] = v;
+  }
+  return { ...parsed, values };
+}
+
+/** Grade 1 received, under its stored keys, leaving out the zeros. */
+export function grade1Received(draft: Record<string, string | number>): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const m of FINANCE_RAW_MATERIALS) {
+    const v = Number(draft[materialKey("received", g1Key(m))]) || 0;
+    if (v !== 0) out[g1Key(m)] = v;
+  }
+  return out;
 }
 
 /** The three figures of one section, as the save and the review card read them. */

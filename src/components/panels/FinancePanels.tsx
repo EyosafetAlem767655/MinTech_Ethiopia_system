@@ -331,11 +331,16 @@ interface Report {
   usdRate: number | null;
   production: ProductionRow[];
   rawMaterials: RawRow[];
-  rawMaterialSource?: "daily" | "vouchers";
+  rawMaterialSource?: "production" | "daily" | "vouchers";
   rawOpeningSource?: "counted" | "submitted" | "carried" | "none";
   productsOpening?: { source: "submitted" | "carried" | "none"; from: string | null };
   bagsOpening?: { source: "submitted" | "carried" | "none"; from: string | null };
   totals: Record<string, number>;
+  grade1?: {
+    rawMaterials: RawRow[];
+    products: { code: string; label: string; produced: number; delivered: number; stock: number; unitPrice: number; netWorth: number }[];
+    netWorth: number;
+  } | null;
   store?: {
     blocks: { key: string; label: string; icon: string; netWorth: number; unpriced: number }[];
     total: number;
@@ -352,14 +357,139 @@ function openingNote(what: string, o?: { source: string; from: string | null }):
   return `${what}: daily report of ${o.from ?? "—"}`;
 }
 
+/**
+ * What Finance opens on while the report is worked out.
+ *
+ * The report can take a while and this is the tab's landing view, so it says in
+ * words what is happening: a blank pulsing box reads as a broken page. The
+ * outline below it is the shape of what is coming. There is no percentage,
+ * because nothing reports real progress.
+ */
+function MonthlyLoading({ month }: { month: string }) {
+  const [slow, setSlow] = useState(false);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setSlow(true), 10_000);
+    return () => clearTimeout(timer);
+  }, []);
+
+  return (
+    <div className="space-y-3" role="status" aria-live="polite">
+      <div className="card flex items-start gap-3 border-l-4 border-l-clay-500 p-4">
+        <span className="mt-0.5 inline-block animate-spin text-lg leading-none text-clay-600" aria-hidden="true">
+          ⟳
+        </span>
+        <div className="min-w-0">
+          <p className="text-sm font-bold text-stone-800">
+            Loading the monthly report{month ? ` for ${month}` : ""}…
+          </p>
+          <p className="mt-0.5 text-xs text-stone-500">
+            {slow
+              ? "Still working. This can take up to a minute, please stay on this page."
+              : "Adding up production, sales, stock and store values. This can take a moment."}
+          </p>
+        </div>
+      </div>
+      {["Production", "Raw materials & bags", "Store net worth"].map((title) => (
+        <div key={title} aria-hidden="true">
+          <h3 className="px-1 pb-2 text-xs font-bold uppercase tracking-widest text-stone-300">{title}</h3>
+          <div className="card space-y-2 p-3">
+            {[0, 1, 2].map((row) => (
+              <div key={row} className="h-4 animate-pulse rounded bg-clay-50" />
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function Grade1Section({ grade1, month }: { grade1: NonNullable<Report["grade1"]>; month: string }) {
+  return (
+    <>
+      <h3 className="px-1 pt-2 text-xs font-bold uppercase tracking-widest text-stone-400">⭐ Grade 1</h3>
+      {grade1.rawMaterials.length > 0 && (
+        <div className="card overflow-x-auto p-0">
+          <table className="w-full min-w-[640px] text-right text-xs">
+            <thead className="bg-clay-50/70 text-[10px] uppercase tracking-wide text-stone-500">
+              <tr>
+                <th className="p-2 text-left font-bold">Raw material</th>
+                <th className="p-2 font-bold">Base bal.</th>
+                <th className="p-2 font-bold">Received</th>
+                <th className="p-2 font-bold">Used</th>
+                <th className="p-2 font-bold">Stock</th>
+                <th className="p-2 font-bold">Unit price</th>
+                <th className="p-2 font-bold">Net worth</th>
+              </tr>
+            </thead>
+            <tbody>
+              {grade1.rawMaterials.map((r) => (
+                <tr key={r.code} className="border-t border-clay-50">
+                  <td className="p-2 text-left font-semibold text-stone-800">{r.label}</td>
+                  <td className="p-2 tabular-nums">{fmt(r.baseBalance, 3)}</td>
+                  <td className="p-2 tabular-nums">{fmt(r.received, 3)}</td>
+                  <td className="p-2 tabular-nums">{fmt(r.issue, 3)}</td>
+                  <td className="p-2 tabular-nums font-semibold">{fmt(r.stock, 3)}</td>
+                  <td className="p-2 tabular-nums">{fmt(r.unitPrice)}</td>
+                  <td className="p-2 tabular-nums font-bold text-clay-900">{fmt(r.netWorth)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {grade1.products.length > 0 && (
+        <div className="card overflow-x-auto p-0">
+          <table className="w-full min-w-[560px] text-right text-xs">
+            <thead className="bg-clay-50/70 text-[10px] uppercase tracking-wide text-stone-500">
+              <tr>
+                <th className="p-2 text-left font-bold">Product</th>
+                <th className="p-2 font-bold">Produced</th>
+                <th className="p-2 font-bold">Delivered</th>
+                <th className="p-2 font-bold">Stock</th>
+                <th className="p-2 font-bold">Unit price</th>
+                <th className="p-2 font-bold">Net worth</th>
+              </tr>
+            </thead>
+            <tbody>
+              {grade1.products.map((r) => (
+                <tr key={r.code} className="border-t border-clay-50">
+                  <td className="p-2 text-left font-semibold text-stone-800">{r.label}</td>
+                  <td className="p-2 tabular-nums">{fmt(r.produced, 3)}</td>
+                  <td className="p-2 tabular-nums">{fmt(r.delivered, 3)}</td>
+                  <td className="p-2 tabular-nums font-semibold">{fmt(r.stock, 3)}</td>
+                  <td className="p-2 tabular-nums">{fmt(r.unitPrice)}</td>
+                  <td className="p-2 tabular-nums font-bold text-clay-900">{fmt(r.netWorth)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <div className="card flex flex-wrap items-baseline justify-between gap-2 p-4">
+        <p className="text-[10px] font-bold uppercase tracking-widest text-stone-400">
+          ⭐ Grade 1 net worth · {month}
+        </p>
+        <p className="font-display text-2xl font-bold text-clay-900">{fmt(grade1.netWorth)} ETB</p>
+      </div>
+      <p className="px-1 text-[11px] text-stone-400">
+        Valued at Grade 1 prices, and not part of the totals above. Stock is what production last reported for Grade 1.
+      </p>
+    </>
+  );
+}
+
 function MonthlyTab() {
   const [month, setMonth] = useState("");
+  const [months, setMonths] = useState<string[]>([]);
   const [data, setData] = useState<Report | null>(null);
   const [error, setError] = useState("");
 
   const load = useCallback(async (m: string) => {
     setData(null);
     setError("");
+    // Shown straight away, so the picker and the loading line name the month asked for.
+    if (m) setMonth(m);
     const res = await fetch(`/api/finance/monthly${m ? `?month=${m}` : ""}`).catch(() => null);
     if (!res) {
       setError("Could not reach the server for the monthly report. Check the connection and try again.");
@@ -376,31 +506,64 @@ function MonthlyTab() {
     }
     setData(json);
     setMonth(json.month);
+    setMonths(json.availableMonths);
   }, []);
 
   useEffect(() => {
     load("");
   }, [load]);
 
-  if (error) return <p className="card border-l-4 border-l-red-500 p-4 text-xs font-bold text-red-700">{error}</p>;
-  if (!data) return <div className="card h-56 animate-pulse bg-clay-50" />;
-
-  return (
-    <section className="space-y-3">
-      <div className="flex flex-wrap items-center justify-between gap-2 px-1">
-        <h2 className="font-display text-lg font-bold">📊 Monthly report</h2>
+  // Stays on screen through every state, so the tab never loses its title. The
+  // picker waits while loading: a second pick would race the first answer.
+  const header = (
+    <div className="flex flex-wrap items-center justify-between gap-2 px-1">
+      <h2 className="font-display text-lg font-bold">📊 Monthly report</h2>
+      {months.length > 0 && (
         <select
           value={month}
+          disabled={!data && !error}
           onChange={(e) => load(e.target.value)}
-          className="rounded-lg border border-clay-100 bg-white px-2 py-1 text-xs font-bold"
+          className="rounded-lg border border-clay-100 bg-white px-2 py-1 text-xs font-bold disabled:opacity-50"
         >
-          {data.availableMonths.map((m) => (
+          {months.map((m) => (
             <option key={m} value={m}>
               {m}
             </option>
           ))}
         </select>
-      </div>
+      )}
+    </div>
+  );
+
+  if (error) {
+    return (
+      <section className="space-y-3">
+        {header}
+        <div className="card border-l-4 border-l-red-500 p-4">
+          <p className="text-xs font-bold text-red-700">{error}</p>
+          <button
+            onClick={() => load(month)}
+            className="mt-2 rounded-lg bg-clay-700 px-3 py-1.5 text-xs font-bold text-white transition active:scale-[0.98]"
+          >
+            Try again
+          </button>
+        </div>
+      </section>
+    );
+  }
+
+  if (!data) {
+    return (
+      <section className="space-y-3">
+        {header}
+        <MonthlyLoading month={month} />
+      </section>
+    );
+  }
+
+  return (
+    <section className="space-y-3">
+      {header}
 
       {!data.hasBaseBalance && (
         <p className="card border-l-4 border-l-amber-500 p-3 text-xs font-bold text-amber-800">
@@ -411,7 +574,7 @@ function MonthlyTab() {
           {data.rawOpeningSource === "counted"
             ? "last stock count from the daily report"
             : data.rawOpeningSource === "carried"
-              ? "last month's closing (opening + received − issued)"
+              ? "last month's closing (opening + received − used)"
               : data.rawOpeningSource === "submitted"
                 ? "filed balance"
                 : "nothing submitted, opens at 0"}
@@ -488,7 +651,9 @@ function MonthlyTab() {
             and the store issue voucher both describe material movement, and a
             month reads one of them, never both — so it says which. */}
         <p className="text-[10px] text-stone-400">
-          {data.rawMaterialSource === "daily"
+          {data.rawMaterialSource === "production"
+            ? "received from 🧱 · issue = produced tons + 5%"
+            : data.rawMaterialSource === "daily"
             ? "in/out from the daily raw-material report"
             : "in/out from receipts and store issue vouchers"}
         </p>
@@ -576,6 +741,10 @@ function MonthlyTab() {
           </p>
         </>
       )}
+
+      {/* Only when Grade 1 was submitted, and apart from every total above:
+          it has its own stone, its own prices and its own net worth. */}
+      {data.grade1 && <Grade1Section grade1={data.grade1} month={data.month} />}
 
       {/* The unit costs behind the figures above, editable for the month the
           bot user could not file them. A saved price reloads the report. */}

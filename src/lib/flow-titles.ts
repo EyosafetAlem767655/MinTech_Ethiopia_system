@@ -48,7 +48,7 @@ export type AssetFlowKind =
   | "sales_invoice";
 
 export const FLOW_TITLE: Record<AssetFlowKind, string> = {
-  raw_material: "🧱 የቀኑ የጥሬ ዕቃ ሪፖርት",
+  raw_material: "🧱 የጥሬ ዕቃ ገቢ",
   delivery: "🚛 የማድረሻ ሪፖርት",
   tool_request: "🛒 የግዢ ጥያቄ",
   pp_bag_damage: "💔 የPP ከረጢት ብልሽት ሪፖርት",

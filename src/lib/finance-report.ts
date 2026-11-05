@@ -1,5 +1,6 @@
 import sql from "@/lib/sql";
 import { rawMaterialOpening } from "@/lib/raw-material-opening";
+import { rawMaterialLedger, type RawLedger } from "@/lib/raw-material-usage";
 import { hasCompanyBags, notBeforeOpening } from "@/lib/bag-opening";
 import { monthOpening } from "@/lib/month-opening";
 import { monthPrices, type MonthPrices } from "@/lib/month-prices";
@@ -16,6 +17,7 @@ import {
   bagSizeTotals,
   parseBagLedgerKey,
   productLabel,
+  g1Key,
   rollUpMaterials,
   type BagCounts,
 } from "@/lib/products";
@@ -152,6 +154,17 @@ export interface RawMaterialFinanceRow {
   netWorth: number;
 }
 
+export interface Grade1ProductRow {
+  code: string;
+  label: string;
+  produced: number;
+  delivered: number;
+  /** Production's last reported Grade 1 stock. */
+  stock: number;
+  unitPrice: number;
+  netWorth: number;
+}
+
 export interface FinanceReport {
   month: string;
   /** False when asset management has not filed the opening balance yet. */
@@ -174,9 +187,15 @@ export interface FinanceReport {
    * implied: the two sources can disagree, and a reader comparing two months
    * has to be able to see which one each was built from.
    */
-  rawMaterialSource: "daily" | "vouchers";
+  rawMaterialSource: "production" | "daily" | "vouchers";
   /** Raw material opening: filed for this month, or carried from last month's closing. */
   rawOpeningSource: "counted" | "submitted" | "carried" | "none";
+  /** Kept apart and priced apart; null hides the section when there is none. */
+  grade1: {
+    rawMaterials: RawMaterialFinanceRow[];
+    products: Grade1ProductRow[];
+    netWorth: number;
+  } | null;
   totals: {
     baseBalance: number;
     received: number;
@@ -314,6 +333,13 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
     rawMaterialOpening(month).catch(() => null),
   ]);
 
+  // From October 2026 raw material is calculated from production. Null before
+  // that, and those months read their reports exactly as they were signed off.
+  const ledger = await rawMaterialLedger(month).catch((e): RawLedger | null => {
+    console.error("rawMaterialLedger failed:", e);
+    return null;
+  });
+
   const baseRow = base[0];
   const prices = priceList.prices;
   const usdRate = priceList.usdRate;
@@ -440,10 +466,12 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
 
   /* ── Raw materials, then the two bag sizes ── */
   const rawMaterials: RawMaterialFinanceRow[] = FINANCE_RAW_MATERIALS.map((code) => {
-    const baseBalance = round3(n((rawOpening?.values ?? baseRow?.raw_materials)?.[code]));
-    const rec = round3(n(receivedMap[code]));
+    const baseBalance = ledger
+      ? ledger.normal.opening[code]
+      : round3(n((rawOpening?.values ?? baseRow?.raw_materials)?.[code]));
+    const rec = ledger ? ledger.normal.received[code] : round3(n(receivedMap[code]));
     const total = round3(baseBalance + rec);
-    const issue = round3(n(issuedMaterials[code]));
+    const issue = ledger ? ledger.normal.used[code] : round3(n(issuedMaterials[code]));
     const unitPrice = round2(n(prices[code]));
     const stock = round3(total - issue);
     return {
@@ -525,8 +553,9 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
     usdRate,
     production,
     rawMaterials,
-    rawMaterialSource: usesDailyRaw ? "daily" : "vouchers",
-    rawOpeningSource: rawOpening?.source ?? (baseRow ? "submitted" : "none"),
+    rawMaterialSource: ledger ? "production" : usesDailyRaw ? "daily" : "vouchers",
+    rawOpeningSource: ledger?.normal.openingSource ?? rawOpening?.source ?? (baseRow ? "submitted" : "none"),
+    grade1: grade1Section(ledger, prices),
     totals: {
       baseBalance: round3(production.reduce((a, r) => a + r.baseBalance, 0)),
       received: round3(totalProduced),
@@ -538,6 +567,64 @@ export async function buildFinanceReport(month: string): Promise<FinanceReport> 
       netWorth: round2(productionNetWorth + rawMaterialNetWorth),
     },
   };
+}
+
+/** Grade 1 at its own prices, or null when the month has none. */
+function grade1Section(ledger: RawLedger | null, prices: Record<string, number>): FinanceReport["grade1"] {
+  if (!ledger || (!ledger.grade1 && !ledger.finished)) return null;
+
+  const g1 = ledger.grade1;
+  const rawMaterials: RawMaterialFinanceRow[] = g1
+    ? FINANCE_RAW_MATERIALS.filter((m) => g1.opening[m] || g1.received[m] || g1.used[m]).map((m) => {
+        const total = round3(g1.opening[m] + g1.received[m]);
+        const stock = g1.closing[m];
+        const unitPrice = round2(n(prices[g1Key(m)]));
+        return {
+          code: g1Key(m),
+          label: m,
+          unit: "t" as const,
+          baseBalance: g1.opening[m],
+          received: g1.received[m],
+          total,
+          issue: g1.used[m],
+          stock,
+          unitPrice,
+          netWorth: round2(stock * unitPrice),
+        };
+      })
+    : [];
+
+  const finished = ledger.finished;
+  const products: Grade1ProductRow[] = finished
+    ? PRODUCT_ORDER.filter((c) => n(finished.produced[c]) || n(finished.delivered[c]) || n(finished.stock[c])).map((c) => {
+        const stock = round3(n(finished.stock[c]));
+        const unitPrice = round2(n(prices[g1Key(c)]));
+        return {
+          code: g1Key(c),
+          label: productLabel(c),
+          produced: round3(n(finished.produced[c])),
+          delivered: round3(n(finished.delivered[c])),
+          stock,
+          unitPrice,
+          netWorth: round2(stock * unitPrice),
+        };
+      })
+    : [];
+
+  if (rawMaterials.length === 0 && products.length === 0) return null;
+  return {
+    rawMaterials,
+    products,
+    netWorth: round2([...rawMaterials, ...products].reduce((a, r) => a + r.netWorth, 0)),
+  };
+}
+
+/** Grade 1 prices, for the dashboard editor. Apart from the list the bot walks: nobody is asked them one by one. */
+export function grade1PriceItems(): { key: string; label: string; unit: string }[] {
+  return [
+    ...FINANCE_RAW_MATERIALS.map((m) => ({ key: g1Key(m), label: `⭐ ${m} (raw)`, unit: "ETB/ton" })),
+    ...PRODUCT_ORDER.map((c) => ({ key: g1Key(c), label: `⭐ ${productLabel(c)}`, unit: "ETB/ton" })),
+  ];
 }
 
 /**

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import sql from "@/lib/sql";
 import { monthPrices, type MonthPrices } from "@/lib/month-prices";
-import { monthLabel, priceListItems } from "@/lib/finance-report";
+import { grade1PriceItems, monthLabel, priceListItems } from "@/lib/finance-report";
 
 export const dynamic = "force-dynamic";
 
@@ -34,7 +34,7 @@ export async function GET(req: NextRequest) {
   ]);
   return NextResponse.json({
     month,
-    items: priceListItems(),
+    items: [...priceListItems(), ...grade1PriceItems()],
     prices: carried.prices,
     usdRate: carried.usdRate,
     carriedFrom: carried.carriedFrom,
@@ -59,7 +59,7 @@ export async function PUT(req: NextRequest) {
   const month = String(body.month || "");
   if (!MONTH.test(month)) return NextResponse.json({ error: "Choose a month (YYYY-MM)." }, { status: 400 });
 
-  const allowed = new Set(priceListItems().map((i) => i.key));
+  const allowed = new Set([...priceListItems(), ...grade1PriceItems()].map((i) => i.key));
   const changes = Object.entries(body.prices || {});
   const unknown = changes.filter(([k]) => !allowed.has(k)).map(([k]) => k);
   if (unknown.length) {

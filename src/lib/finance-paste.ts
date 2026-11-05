@@ -31,8 +31,10 @@ export const BRAND_PREFIX = "brand:";
 export const MATERIAL_PREFIX = "material:";
 export const BAG_PREFIX = "bag:";
 export const USD_RATE_KEY = "usdRate";
+export const G1_BRAND_PREFIX = "g1brand:";
+export const G1_MATERIAL_PREFIX = "g1material:";
 
-export type FinanceSection = "brands" | "materials" | "bags";
+export type FinanceSection = "brands" | "materials" | "bags" | "g1brands" | "g1materials";
 
 // English, matching the daily production template. The opening balance is filled
 // in the same way — copy the block back with numbers in it — and one wording
@@ -44,6 +46,12 @@ const H_BAGS = "--- PP Bag count ---";
 const H_BRANDS_PRICE = "--- ምርቶች (ብር/ቶን) ---";
 const H_MATERIALS_PRICE = "--- ጥሬ ዕቃ (ብር/ቶን) ---";
 const H_BAGS_PRICE = "--- ከረጢት (ብር/ቁጥር) ---";
+
+// Optional and last. Grade 1 is rare, so a blank section asks nothing: its
+// balance carries from the calculated figure and its price from the last filed.
+const H_G1_MATERIALS = "--- ⭐ Grade 1 Raw material(Ton) ---";
+const H_G1_MATERIALS_PRICE = "--- ⭐ Grade 1 ጥሬ ዕቃ (ብር/ቶን) ---";
+const H_G1_BRANDS_PRICE = "--- ⭐ Grade 1 ምርቶች (ብር/ቶን) ---";
 
 /** Draft key for one item, namespaced by which table it belongs to. */
 export function brandKey(code: string): string {
@@ -65,9 +73,12 @@ export function bagFinanceKey(size: BagSize, colour: string): string {
 
 /* ────────────────────────────────── templates ─────────────────────────────── */
 
+const brandLines = () => PRODUCT_ORDER.map((c) => `${productLabel(c)}=`).join("\n");
+const materialLines = () => FINANCE_RAW_MATERIALS.map((m) => `${m}=`).join("\n");
+
 function block(headers: [string, string, string]): string {
-  const brands = PRODUCT_ORDER.map((c) => `${productLabel(c)}=`).join("\n");
-  const materials = FINANCE_RAW_MATERIALS.map((m) => `${m}=`).join("\n");
+  const brands = brandLines();
+  const materials = materialLines();
   // Six lines, one per kind. Two size lines would ask for a figure the parser
   // deliberately refuses to read, because a bare "25KG" does not say which of
   // its three colours it is.
@@ -84,7 +95,7 @@ function block(headers: [string, string, string]): string {
  * be recorded as a real measurement.
  */
 export function baseBalanceTemplate(): string {
-  return block([H_BRANDS, H_MATERIALS, H_BAGS]);
+  return [block([H_BRANDS, H_MATERIALS, H_BAGS]), H_G1_MATERIALS, materialLines()].join("\n");
 }
 
 /**
@@ -105,7 +116,14 @@ export function ppBagPriceTemplate(prices: Record<string, number> = {}): string 
 }
 
 export function priceListTemplate(): string {
-  return [block([H_BRANDS_PRICE, H_MATERIALS_PRICE, H_BAGS_PRICE]), "USD=" ].join("\n");
+  return [
+    block([H_BRANDS_PRICE, H_MATERIALS_PRICE, H_BAGS_PRICE]),
+    "USD=",
+    H_G1_MATERIALS_PRICE,
+    materialLines(),
+    H_G1_BRANDS_PRICE,
+    brandLines(),
+  ].join("\n");
 }
 
 /* ─────────────────────────────────── parsing ──────────────────────────────── */
@@ -150,7 +168,11 @@ function detectSection(line: string): FinanceSection | undefined {
   if (/[=:]/.test(line)) return undefined;
 
   const n = norm(line);
-  // Bags first: the header names a bag AND a count, and "count" is not a word
+  // Grade 1 first: its headers repeat the words of the normal ones.
+  if (n.includes("grade1")) {
+    return n.includes(norm("ምርቶ")) || n.includes(norm("ምርት")) || n.includes("product") ? "g1brands" : "g1materials";
+  }
+  // Bags next: the header names a bag AND a count, and "count" is not a word
   // any other section uses.
   if (n.includes(norm("ከረጢት")) || n.includes("bag")) return "bags";
   if (n.includes(norm("ጥሬ")) || n.includes("raw") || n.includes("material")) return "materials";
@@ -240,6 +262,18 @@ export function parseFinancePaste(text: string, opts: { usdRate?: boolean } = {}
       const n = parseNumber(value);
       if (n === null) invalid.push(line);
       else values[bagFinanceKey(bag.size, bag.colour)] = n;
+      continue;
+    }
+
+    if (section === "g1materials" || section === "g1brands") {
+      const code = section === "g1materials" ? LOOKUP.materials.get(nk) : LOOKUP.brands.get(nk);
+      if (!code) {
+        unknown.push(line);
+        continue;
+      }
+      const n = parseNumber(value);
+      if (n === null) invalid.push(line);
+      else values[`${section === "g1materials" ? G1_MATERIAL_PREFIX : G1_BRAND_PREFIX}${code}`] = n;
       continue;
     }
 

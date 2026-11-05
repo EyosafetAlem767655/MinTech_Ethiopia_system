@@ -371,6 +371,14 @@ export const RAW_MATERIALS = ["Talc", "Kuni", "Chips", "Guji", "Lime Stone"] as 
 export const FINANCE_RAW_MATERIALS = ["Dolomite", "Lime Stone", "Talc"] as const;
 export type FinanceRawMaterial = (typeof FINANCE_RAW_MATERIALS)[number];
 
+/**
+ * Grade 1 rides beside the normal figures under its own key ("g1:Dolomite",
+ * "g1:ETL15"), in the balance, the price list and what was received. Anything
+ * that reads only the plain names never sees it.
+ */
+export const G1 = "g1:";
+export const g1Key = (name: string) => `${G1}${name}`;
+
 const DOLOMITE_SOURCES = ["Kuni", "Chips", "Guji"] as const;
 
 /** Which finance line an asset-management raw material rolls up into. */

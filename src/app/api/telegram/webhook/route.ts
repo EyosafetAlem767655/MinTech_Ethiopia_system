@@ -81,7 +81,7 @@ import { archiveView, databaseView, errorsView, jobsView, overviewView, systemKe
 import { insertRow } from "@/lib/insert";
 import { runAfter } from "@/lib/after";
 import { whitenessAlert } from "@/lib/whiteness-alert";
-import { parseRawMaterialPaste } from "@/lib/raw-material-paste";
+import { parseGrade1RawPaste, parseRawMaterialPaste } from "@/lib/raw-material-paste";
 import { parsePpBagPaste } from "@/lib/pp-bag-paste";
 import { parseHoursBlock, setHoursCells } from "@/lib/downtime-sheet";
 import { INVOICES_KEY, chosenInvoice, encodeInvoices, openCreditInvoices } from "@/lib/credit-bot";
@@ -2827,7 +2827,9 @@ export async function POST(req: NextRequest) {
             : state.kind === "sales_invoice"
               ? parseSalesPaste(val)
               : state.kind === "raw_material"
-                ? parseRawMaterialPaste(val)
+                ? state.step === GRADE1_PASTE_STEP
+                  ? parseGrade1RawPaste(val)
+                  : parseRawMaterialPaste(val)
                 : state.kind === "pp_bag_receipt"
                   ? parsePpBagPaste(val)
                 : parseFinancePaste(val, { usdRate: state.kind === "price_list" });
