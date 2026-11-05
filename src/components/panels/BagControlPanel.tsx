@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { SectionError, SectionLoading, errorText, getJson } from "@/components/SectionStatus";
 import DecideBtn from "@/components/DecideButton";
 
 /** M1 bag inventory, evidence-backed damage claims and reconciliation. Folded
@@ -67,13 +68,29 @@ export default function BagControlPanel() {
   const [busy, setBusy] = useState<Record<string, boolean>>({});
   const [error, setError] = useState("");
 
+  const [loaded, setLoaded] = useState(false);
+  const [failed, setFailed] = useState("");
+
   const load = useCallback(() => {
-    fetch("/api/lots").then((r) => r.json()).then((d) => Array.isArray(d) && setLots(d)).catch(() => {});
-    fetch("/api/claims").then((r) => r.json()).then((d) => Array.isArray(d) && setClaims(d)).catch(() => {});
-    fetch("/api/dashboard").then((r) => r.json()).then((d) => d.tripwires && setTripwires(d.tripwires)).catch(() => {});
+    setFailed("");
+    Promise.all([getJson<Lot[]>("/api/lots"), getJson<Claim[]>("/api/claims")])
+      .then(([l, c]) => {
+        setLots(Array.isArray(l) ? l : []);
+        setClaims(Array.isArray(c) ? c : []);
+        setLoaded(true);
+      })
+      .catch((e) => setFailed(errorText(e)));
   }, []);
 
   useEffect(load, [load]);
+
+  // Only when its tab is opened: nothing else on this page needs it.
+  useEffect(() => {
+    if (tab !== "tripwires" || tripwires || failed) return;
+    getJson<{ tripwires: Tripwires }>("/api/tripwires")
+      .then((d) => setTripwires(d.tripwires))
+      .catch((e) => setFailed(errorText(e)));
+  }, [tab, tripwires, failed]);
 
   const decide = useCallback(
     async (id: string, action: "cosign" | "verify" | "reject") => {
@@ -101,6 +118,9 @@ export default function BagControlPanel() {
 
   const openClaims = claims.filter((c) => c.status === "pending" || c.status === "cosign_required");
   const gaps = lots.filter((lot) => (lot.balance?.gap || 0) > 0);
+
+  if (failed && !loaded) return <SectionError title="Bag control" message={failed} onRetry={load} />;
+  if (!loaded) return <SectionLoading title="bag control" />;
 
   return (
     <section className="space-y-3">
@@ -273,6 +293,10 @@ export default function BagControlPanel() {
         </div>
       )}
 
+      {tab === "tripwires" && !tripwires && failed && (
+        <SectionError title="Tripwires" message={failed} onRetry={() => setFailed("")} />
+      )}
+      {tab === "tripwires" && !tripwires && !failed && <SectionLoading title="tripwires" />}
       {tab === "tripwires" && tripwires && (
         <div className="space-y-4">
           {(

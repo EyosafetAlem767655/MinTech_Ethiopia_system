@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { SectionError, SectionLoading, errorText, getJson } from "@/components/SectionStatus";
 import DecideBtn from "@/components/DecideButton";
 import {
   PURCHASE_DEPARTMENT_ORDER,
@@ -232,13 +233,15 @@ export default function ToolRequestsPanel() {
   // ✓ Bought opens the purchase form; the request is marked bought when it saves.
   const [buying, setBuying] = useState<Row | null>(null);
 
+  const [failed, setFailed] = useState("");
+
   const load = useCallback(async () => {
+    setFailed("");
     try {
-      const res = await fetch("/api/tool-requests");
-      const data = res.ok ? await res.json() : [];
+      const data = await getJson<Row[]>("/api/tool-requests");
       setRows(Array.isArray(data) ? data : []);
-    } catch {
-      setRows([]);
+    } catch (e) {
+      setFailed(errorText(e));
     }
   }, []);
 
@@ -295,7 +298,8 @@ export default function ToolRequestsPanel() {
     });
   }, [rows]);
 
-  if (!rows) return <div className="card h-40 animate-pulse bg-clay-50" />;
+  if (failed && !rows) return <SectionError title="Purchase requests" message={failed} onRetry={load} />;
+  if (!rows) return <SectionLoading title="purchase requests" />;
 
   const open = rows.filter((r) => r.status === "pending").length;
   const selected = openId ? rows.find((r) => r._id === openId) ?? null : null;

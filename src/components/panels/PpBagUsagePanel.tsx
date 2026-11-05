@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { SectionError, SectionLoading, errorText, getJson } from "@/components/SectionStatus";
 import { BAG_KINDS, COMPANY_BAG_KINDS, bagLabel, bagLedgerKey } from "@/lib/products";
 
 /**
@@ -40,12 +41,16 @@ const COMPANY_COLUMNS = new Set(COMPANY_BAG_KINDS.map(({ size, colour }) => bagL
 export default function PpBagUsagePanel() {
   const [rows, setRows] = useState<Row[] | null>(null);
 
-  useEffect(() => {
-    fetch("/api/pp-bag-usage")
-      .then((r) => (r.ok ? r.json() : []))
+  const [failed, setFailed] = useState("");
+
+  const load = useCallback(() => {
+    setFailed("");
+    getJson<Row[]>("/api/pp-bag-usage")
       .then((d) => setRows(Array.isArray(d) ? d : []))
-      .catch(() => setRows([]));
+      .catch((e) => setFailed(errorText(e)));
   }, []);
+
+  useEffect(load, [load]);
 
   /** One day, one row: the six kinds across, plus whatever refs were quoted. */
   const table = useMemo(() => {
@@ -68,7 +73,8 @@ export default function PpBagUsagePanel() {
     });
   }, [rows]);
 
-  if (!table) return <div className="card h-40 animate-pulse bg-clay-50" />;
+  if (failed) return <SectionError title="PP bag usage" message={failed} onRetry={load} />;
+  if (!table) return <SectionLoading title="PP bag usage" />;
 
   const columnTotal = (key: string) => table.reduce((a, r) => a + (r.byKind[key] || 0), 0);
   // Only kinds actually used (each company's, and history where it is shown).

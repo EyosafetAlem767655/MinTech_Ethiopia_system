@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ledgerLabel, parseBagLedgerKey } from "@/lib/products";
+import { SectionError, SectionLoading, errorText, getJson } from "@/components/SectionStatus";
 import { BagStockCheck, type Reconciliation } from "@/components/panels/BagStockCheck";
 
 /**
@@ -79,9 +80,11 @@ export default function VoucherPanels({ showStockCheck = true }: { showStockChec
   const [data, setData] = useState<Payload | null>(null);
   const [tab, setTab] = useState<"grv" | "siv">("grv");
 
-  useEffect(() => {
-    fetch("/api/vouchers")
-      .then((r) => (r.ok ? r.json() : null))
+  const [failed, setFailed] = useState("");
+
+  const load = useCallback(() => {
+    setFailed("");
+    getJson<Partial<Payload> | null>("/api/vouchers")
       .then((d) =>
         setData({
           // Normalised on arrival. The panel reads `.length` while rendering its
@@ -95,10 +98,10 @@ export default function VoucherPanels({ showStockCheck = true }: { showStockChec
           unavailable: Boolean(d?.unavailable),
         })
       )
-      .catch(() =>
-        setData({ grv: [], grvItems: [], siv: [], sivItems: [], reconciliation: null, unavailable: true })
-      );
+      .catch((e) => setFailed(errorText(e)));
   }, []);
+
+  useEffect(load, [load]);
 
   const itemsByVoucher = useMemo(() => {
     const map = new Map<string, Item[]>();
@@ -110,7 +113,8 @@ export default function VoucherPanels({ showStockCheck = true }: { showStockChec
     return map;
   }, [data]);
 
-  if (!data) return <div className="card h-64 animate-pulse bg-clay-50" />;
+  if (failed) return <SectionError title="The vouchers" message={failed} onRetry={load} />;
+  if (!data) return <SectionLoading title="the vouchers" />;
 
   const vouchers = tab === "grv" ? data.grv : data.siv;
 

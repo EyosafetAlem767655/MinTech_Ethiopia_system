@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import RangeSelector from "@/components/RangeSelector";
+import { SectionError, SectionLoading, errorText, getJson } from "@/components/SectionStatus";
 import { Chart, ScrollTable } from "@/components/panels/TableChart";
 import { BrandDayBars, BrandLines } from "@/components/panels/BrandCharts";
 import { rangeDef, rangeWindow, type Bucket, type RangeKey } from "@/lib/ranges";
@@ -70,12 +71,16 @@ export default function StockOnHandPanel() {
   const [range, setRange] = useState<RangeKey>("monthly");
   const [ops, setOps] = useState<OpsRow[] | null>(null);
 
-  useEffect(() => {
-    fetch("/api/ops-reports")
-      .then((r) => (r.ok ? r.json() : { reports: [] }))
+  const [failed, setFailed] = useState("");
+
+  const load = useCallback(() => {
+    setFailed("");
+    getJson<{ reports?: OpsRow[] }>("/api/ops-reports")
       .then((d) => setOps(Array.isArray(d?.reports) ? d.reports : []))
-      .catch(() => setOps([]));
+      .catch((e) => setFailed(errorText(e)));
   }, []);
+
+  useEffect(load, [load]);
 
   const { bucket } = rangeDef(range);
   const win = useMemo(() => rangeWindow(range), [range]);
@@ -166,7 +171,8 @@ export default function StockOnHandPanel() {
     return used.length > 0 ? used : COMPANY_BAG_KINDS;
   }, [bagDays]);
 
-  if (ops === null) return <div className="card h-64 animate-pulse bg-clay-50" />;
+  if (failed) return <SectionError title="Stock on hand" message={failed} onRetry={load} />;
+  if (ops === null) return <SectionLoading title="stock on hand" />;
 
   return (
     <section className="space-y-3">

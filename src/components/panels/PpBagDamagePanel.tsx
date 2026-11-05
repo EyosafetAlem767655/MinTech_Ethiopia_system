@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { SectionError, SectionLoading, errorText, getJson } from "@/components/SectionStatus";
 import DecideBtn from "@/components/DecideButton";
 
 /**
@@ -102,13 +103,15 @@ export default function PpBagDamagePanel() {
   const [busy, setBusy] = useState<Record<string, boolean>>({});
   const [error, setError] = useState("");
 
+  const [failed, setFailed] = useState("");
+
   const load = useCallback(async () => {
+    setFailed("");
     try {
-      const res = await fetch("/api/pp-bag-damage");
-      const data = res.ok ? await res.json() : [];
+      const data = await getJson<Row[]>("/api/pp-bag-damage");
       setRows(Array.isArray(data) ? data : []);
-    } catch {
-      setRows([]);
+    } catch (e) {
+      setFailed(errorText(e));
     }
   }, []);
 
@@ -138,7 +141,8 @@ export default function PpBagDamagePanel() {
     [load]
   );
 
-  if (!rows) return <div className="card h-40 animate-pulse bg-clay-50" />;
+  if (failed && !rows) return <SectionError title="PP bag damage" message={failed} onRetry={load} />;
+  if (!rows) return <SectionLoading title="PP bag damage" />;
 
   const totalBags = rows.reduce((a, r) => a + (Number(r.quantity) || 0), 0);
   const flagged = rows.filter((r) => r.flags?.length > 0).length;

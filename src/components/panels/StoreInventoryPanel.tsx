@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { SectionError, SectionLoading, errorText, getJson } from "@/components/SectionStatus";
 import { STORE_BLOCKS, STORE_GROUPS, drumNote, type StoreItem } from "@/lib/store-items";
 
 /**
@@ -61,15 +62,19 @@ export default function StoreInventoryPanel() {
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [q, setQ] = useState("");
 
-  useEffect(() => {
-    fetch("/api/store-inventory")
-      .then((r) => (r.ok ? r.json() : null))
+  const [failed, setFailed] = useState("");
+
+  const load = useCallback(() => {
+    setFailed("");
+    getJson<{ items?: ItemStatus[]; groups?: GroupStatus[] }>("/api/store-inventory")
       .then((d) => {
         setItems(Array.isArray(d?.items) ? d.items : []);
         setGroups(Array.isArray(d?.groups) ? d.groups : []);
       })
-      .catch(() => setItems([]));
+      .catch((e) => setFailed(errorText(e)));
   }, []);
+
+  useEffect(load, [load]);
 
   const groupByKey = useMemo(() => new Map(groups.map((g) => [g.group, g])), [groups]);
 
@@ -82,7 +87,8 @@ export default function StoreInventoryPanel() {
     );
   }, [items, q]);
 
-  if (!items) return <div className="card h-40 animate-pulse bg-clay-50" />;
+  if (failed) return <SectionError title="The store" message={failed} onRetry={load} />;
+  if (!items) return <SectionLoading title="the store" />;
 
   const byGroup = (group: string) => items.filter((s) => s.item.group === group);
   const valueOf = (rows: ItemStatus[]) => rows.reduce((a, s) => a + (s.value ?? 0), 0);

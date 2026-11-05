@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { SectionError, SectionLoading } from "@/components/SectionStatus";
 import { FINANCE_RAW_MATERIALS } from "@/lib/products";
 
 /**
@@ -151,6 +152,7 @@ export default function RawMaterialDailyPanel() {
   const [months, setMonths] = useState<string[]>([]);
   const [ledger, setLedger] = useState<Ledger | null | undefined>(undefined);
   const [error, setError] = useState("");
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     let alive = true;
@@ -169,7 +171,7 @@ export default function RawMaterialDailyPanel() {
     return () => {
       alive = false;
     };
-  }, [month]);
+  }, [month, attempt]);
 
   return (
     <section className="space-y-3">
@@ -194,13 +196,22 @@ export default function RawMaterialDailyPanel() {
         )}
       </div>
 
-      {ledger === undefined && <div className="card h-64 animate-pulse bg-clay-50" />}
+      {ledger === undefined && <SectionLoading title="raw material" />}
       {ledger === null && (
-        <p className="card p-3 text-xs text-amber-700">{error || "Raw material could not be loaded. Please try again."}</p>
+        <SectionError
+          title="Raw material"
+          message={error || "The server did not answer."}
+          onRetry={() => setAttempt((a) => a + 1)}
+        />
       )}
       {ledger && (
         <>
           <StreamTables stream={ledger.normal} />
+          {ledger.normal.days.length === 0 && (
+            <p className="card p-3 text-xs text-stone-500">
+              Nothing was produced or received in {ledger.month} yet, so there are no days to show.
+            </p>
+          )}
           {ledger.grade1 && (
             <>
               <h3 className="px-1 pt-2 text-xs font-bold uppercase tracking-widest text-stone-400">⭐ Grade 1</h3>

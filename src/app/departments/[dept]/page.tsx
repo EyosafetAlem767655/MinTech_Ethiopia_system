@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import type { ComponentType } from "react";
 import DepartmentReport from "@/components/DepartmentReport";
+import { LazySection } from "@/components/SectionStatus";
 import { isDepartmentKey, type DepartmentKey } from "@/lib/departments";
 import BagControlPanel from "@/components/panels/BagControlPanel";
 import RawMaterialDailyPanel from "@/components/panels/RawMaterialDailyPanel";
@@ -95,6 +96,21 @@ const PANELS: Record<DepartmentKey, ComponentType[]> = {
 };
 
 /**
+ * The asset page is a long list of reports, each with its own requests. Started
+ * together they queue on the same few database connections and all arrive late,
+ * so each starts as it is scrolled to. The title stands in until then.
+ */
+const ASSET_TITLES = new Map<ComponentType, string>([
+  [VoucherPanels, "Vouchers"],
+  [StockOnHandPanel, "Stock on hand"],
+  [PpBagUsagePanel, "PP bag usage"],
+  [PpBagDamagePanel, "PP bag damage"],
+  [ToolRequestsPanel, "Purchase requests"],
+  [StoreInventoryPanel, "Store"],
+  [BagControlPanel, "Bag control"],
+]);
+
+/**
  * Departments shown as their submitted reports alone — no KPI row, no generic
  * trend, no contributor strip. Production joined them once its KPIs lost their
  * source: they counted shift reports, downtime and truckloads, none of which
@@ -135,11 +151,20 @@ export default function DepartmentPage() {
       {/* Detailed module reports. One column on a phone, exactly as before; a
           two-column grid from lg up, with the wide tables spanning both. */}
       <div className="mt-4 space-y-8 lg:grid lg:grid-cols-2 lg:items-start lg:gap-8 lg:space-y-0">
-        {panels.map((Panel, i) => (
-          <div key={i} className={FULL_WIDTH.has(Panel) ? "lg:col-span-2" : ""}>
-            <Panel />
-          </div>
-        ))}
+        {panels.map((Panel, i) => {
+          const title = dept === "asset_management" ? ASSET_TITLES.get(Panel) : undefined;
+          return (
+            <div key={i} className={FULL_WIDTH.has(Panel) ? "lg:col-span-2" : ""}>
+              {title ? (
+                <LazySection title={title}>
+                  <Panel />
+                </LazySection>
+              ) : (
+                <Panel />
+              )}
+            </div>
+          );
+        })}
       </div>
     </main>
   );
