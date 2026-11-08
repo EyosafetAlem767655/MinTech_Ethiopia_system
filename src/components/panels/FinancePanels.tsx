@@ -201,7 +201,7 @@ function RmCreditTab() {
                 <tr>
                   <th className="p-2 text-left font-bold">Date</th>
                   <th className="p-2 text-left font-bold">Quarry owner</th>
-                  <th className="p-2 text-left font-bold">Agent · Driver</th>
+                  <th className="p-2 text-left font-bold">Agent</th>
                   <th className="p-2 text-left font-bold">Truck</th>
                   <th className="p-2 text-left font-bold">Material</th>
                   <th className="p-2 font-bold">Tonnes</th>
@@ -229,9 +229,7 @@ function RmCreditTab() {
                     >
                       <td className="p-2 text-left font-semibold text-stone-800">{fmtDate(l.date)}</td>
                       <td className="p-2 text-left text-stone-700">{l.quarryOwner || l.supplier}</td>
-                      <td className="p-2 text-left text-[11px] text-stone-500">
-                        {l.salesAgent || "—"} · {l.driverName || "—"}
-                      </td>
+                      <td className="p-2 text-left text-[11px] text-stone-500">{l.salesAgent || "—"}</td>
                       <td className="p-2 text-left text-stone-500">{l.truckPlate || "—"}</td>
                       <td className="p-2 text-left text-stone-700">{l.material}</td>
                       <td className="p-2 tabular-nums text-stone-700">{fmt(l.tonnes, 3)}</td>
@@ -859,6 +857,60 @@ interface CreditData {
   unavailable: boolean;
 }
 
+/**
+ * One customer's name however it was typed: case, punctuation, "&"/"and" and
+ * company suffixes ignored, so "Netsanet asefa" and "Netsanet Asefa", or
+ * "Gidabo Soap" and "Gidabo soap PLC", are one customer.
+ */
+function customerKey(name: string): string {
+  return String(name || "")
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/\b(p\.?\s?l\.?\s?c|plc|share company|s\.?\s?c|ltd|limited)\b/g, " ")
+    .replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
+interface CustomerGroup {
+  key: string;
+  /** The spelling used most, to show. */
+  name: string;
+  rows: CreditRow[];
+  qty: number;
+  credit: number;
+  paid: number;
+  outstanding: number;
+  /** The most urgent open sale, for the countdown. */
+  worst: CreditRow | null;
+}
+
+/** Sales grouped by customer, the biggest debt first. */
+function groupByCustomer(rows: CreditRow[]): CustomerGroup[] {
+  const by = new Map<string, CreditRow[]>();
+  for (const r of rows) {
+    const k = customerKey(r.customer) || r.customer;
+    by.set(k, [...(by.get(k) ?? []), r]);
+  }
+  return [...by.entries()]
+    .map(([key, list]) => {
+      const counts = new Map<string, number>();
+      for (const r of list) counts.set(r.customer, (counts.get(r.customer) ?? 0) + 1);
+      const name = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+      const open = list.filter((r) => r.status !== "settled").sort((a, b) => a.daysLeft - b.daysLeft);
+      const sum = (f: (r: CreditRow) => number) => list.reduce((a, r) => a + f(r), 0);
+      return {
+        key,
+        name,
+        rows: list.slice().sort((a, b) => +new Date(b.date) - +new Date(a.date)),
+        qty: sum((r) => r.qty),
+        credit: sum((r) => r.credit),
+        paid: sum((r) => r.paid),
+        outstanding: sum((r) => r.outstanding),
+        worst: open[0] ?? null,
+      };
+    })
+    .sort((a, b) => b.outstanding - a.outstanding || a.name.localeCompare(b.name));
+}
+
 const CREDIT_TONE: Record<CreditStatus, string> = {
   settled: "bg-stone-100 text-stone-500",
   overdue: "bg-red-100 text-red-800",
@@ -878,6 +930,9 @@ function CreditTab() {
   const [showSettled, setShowSettled] = useState(false);
   const [openId, setOpenId] = useState<string | null>(null);
   const [error, setError] = useState("");
+  // Grouped by customer by default: "how much does this customer owe me" is the question.
+  const [byCustomer, setByCustomer] = useState(true);
+  const [openCustomer, setOpenCustomer] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -906,6 +961,7 @@ function CreditTab() {
   const alarms = data.customers.filter((c) => c.alarm);
   const visible = showSettled ? data.rows : data.rows.filter((r) => r.status !== "settled");
   const selected = openId ? data.rows.find((r) => r._id === openId) ?? null : null;
+  const groups = groupByCustomer(visible);
 
   return (
     <section className="space-y-3">
@@ -951,22 +1007,125 @@ function CreditTab() {
         <CreditTile label="On alarm" value={String(data.totals.alarms)} tone={alarms.length ? "text-red-700" : "text-stone-500"} />
       </div>
 
-      <div className="flex items-center justify-between px-1">
-        <p className="text-[11px] text-stone-400">Tap a row to record a payment.</p>
-        <button
-          onClick={() => setShowSettled((s) => !s)}
-          className={`rounded-full px-3 py-1 text-[11px] font-bold transition ${
-            showSettled ? "bg-clay-700 text-white" : "bg-stone-100 text-stone-600"
-          }`}
-        >
-          {showSettled ? "Hiding nothing" : "Show settled"}
-        </button>
+      <div className="flex flex-wrap items-center justify-between gap-2 px-1">
+        <p className="text-[11px] text-stone-400">
+          {byCustomer ? "Tap a customer to see their sales; tap a sale to record a payment." : "Tap a row to record a payment."}
+        </p>
+        <div className="flex items-center gap-1.5">
+          <div className="flex gap-0.5 rounded-full bg-stone-100 p-0.5">
+            {([
+              [true, "By customer"],
+              [false, "By sale"],
+            ] as const).map(([v, label]) => (
+              <button
+                key={label}
+                onClick={() => setByCustomer(v)}
+                aria-pressed={byCustomer === v}
+                className={`rounded-full px-3 py-1 text-[11px] font-bold transition ${
+                  byCustomer === v ? "bg-white text-clay-800 shadow" : "text-stone-500"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <button
+            onClick={() => setShowSettled((s) => !s)}
+            className={`rounded-full px-3 py-1 text-[11px] font-bold transition ${
+              showSettled ? "bg-clay-700 text-white" : "bg-stone-100 text-stone-600"
+            }`}
+          >
+            {showSettled ? "Hiding nothing" : "Show settled"}
+          </button>
+        </div>
       </div>
 
       {visible.length === 0 ? (
         <p className="card p-4 text-sm text-stone-400">
           {data.rows.length === 0 ? "No credit sales yet." : "Nothing outstanding. 🎉"}
         </p>
+      ) : byCustomer ? (
+        <div className="card overflow-x-auto p-0">
+          <table className="w-full min-w-[760px] text-right text-xs">
+            <thead className="bg-clay-50/70 text-[10px] uppercase tracking-wide text-stone-500">
+              <tr>
+                <th className="p-2 text-left font-bold">Customer</th>
+                <th className="p-2 font-bold">Sales</th>
+                <th className="p-2 font-bold">Qty (t)</th>
+                <th className="p-2 font-bold">Credit</th>
+                <th className="p-2 font-bold">Paid</th>
+                <th className="p-2 font-bold">Owes in total</th>
+                <th className="p-2 font-bold">Most urgent</th>
+              </tr>
+            </thead>
+            <tbody>
+              {groups.map((g) => (
+                <Fragment key={g.key}>
+                  <tr
+                    onClick={() => setOpenCustomer((o) => (o === g.key ? null : g.key))}
+                    aria-expanded={openCustomer === g.key}
+                    className="cursor-pointer border-t border-clay-50 transition-colors hover:bg-clay-50/60"
+                  >
+                    <td className="max-w-[220px] p-2 text-left font-semibold text-stone-800">
+                      <span className="mr-1 text-stone-400">{openCustomer === g.key ? "▾" : "▸"}</span>
+                      {g.name}
+                    </td>
+                    <td className="p-2 tabular-nums text-stone-600">{g.rows.length}</td>
+                    <td className="p-2 tabular-nums text-stone-600">{fmt(g.qty, 2)}</td>
+                    <td className="p-2 tabular-nums text-stone-700">{fmt(g.credit, 0)}</td>
+                    <td className="p-2 tabular-nums text-green-700">{g.paid > 0 ? fmt(g.paid, 0) : ""}</td>
+                    <td className="p-2 font-bold tabular-nums text-clay-900">{fmt(g.outstanding, 0)}</td>
+                    <td className="p-2">
+                      {g.worst ? (
+                        <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${CREDIT_TONE[g.worst.status]}`}>
+                          {daysLeftLabel(g.worst)}
+                        </span>
+                      ) : (
+                        <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${CREDIT_TONE.settled}`}>✓ Settled</span>
+                      )}
+                    </td>
+                  </tr>
+                  {openCustomer === g.key &&
+                    g.rows.map((r) => (
+                      <tr
+                        key={r._id}
+                        onClick={() => setOpenId(r._id)}
+                        className="cursor-pointer border-t border-clay-50/60 bg-clay-50/30 transition-colors hover:bg-clay-50/70"
+                      >
+                        <td className="p-2 pl-7 text-left text-[11px] text-stone-600">
+                          {fmtDate(r.date)}
+                          {r.deliveryNo ? <span className="ml-1 text-stone-400">· Fs {r.deliveryNo}</span> : null}
+                        </td>
+                        <td className="p-2" />
+                        <td className="p-2 tabular-nums text-[11px] text-stone-600">{fmt(r.qty, 2)}</td>
+                        <td className="p-2 tabular-nums text-[11px] text-stone-700">{fmt(r.credit, 0)}</td>
+                        <td className="p-2 tabular-nums text-[11px] text-green-700">{r.paid > 0 ? fmt(r.paid, 0) : ""}</td>
+                        <td className="p-2 tabular-nums text-[11px] font-semibold text-clay-900">{fmt(r.outstanding, 0)}</td>
+                        <td className="p-2">
+                          <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${CREDIT_TONE[r.status]}`}>
+                            {r.status === "settled" ? "✓ Settled" : daysLeftLabel(r)}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                </Fragment>
+              ))}
+            </tbody>
+            <tfoot className="border-t-2 border-clay-100 bg-clay-50/50 font-bold">
+              <tr>
+                <td className="p-2 text-left text-stone-800">
+                  {groups.length} customer{groups.length === 1 ? "" : "s"}
+                </td>
+                <td className="p-2 tabular-nums">{visible.length}</td>
+                <td className="p-2 tabular-nums">{fmt(groups.reduce((a, g) => a + g.qty, 0), 2)}</td>
+                <td className="p-2 tabular-nums">{fmt(groups.reduce((a, g) => a + g.credit, 0), 0)}</td>
+                <td className="p-2 tabular-nums text-green-700">{fmt(groups.reduce((a, g) => a + g.paid, 0), 0)}</td>
+                <td className="p-2 tabular-nums text-clay-900">{fmt(groups.reduce((a, g) => a + g.outstanding, 0), 0)}</td>
+                <td className="p-2" />
+              </tr>
+            </tfoot>
+          </table>
+        </div>
       ) : (
         <div className="card overflow-x-auto p-0">
           <table className="w-full min-w-[760px] text-right text-xs">
