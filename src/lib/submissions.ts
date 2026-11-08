@@ -315,11 +315,15 @@ export const SUBMISSIONS: Record<SubmissionCollection, SubmissionSpec> = {
       TEXT("delivery_no", "Deli"),
       TEXT("bank", "Bank"),
       TEXT("reported_by", "By"),
+      // The 📋 Sales data manager's review (0047): "approved" or "edited", and who.
+      // Clearing the review status takes the review off the sale.
+      TEXT("review_status", "Review (approved / edited)"),
+      TEXT("reviewed_by", "Reviewed by"),
     ],
     // `qty` is the sum of the brand tonnages in `products`, so it is shown but
     // not editable — changing it alone would leave the row disagreeing with its
     // own brand lines. A wrong tonnage is corrected by re-filing the sale.
-    editableKeys: ["customer", "invoice_cash", "invoice_credit", "delivery_no", "bank"],
+    editableKeys: ["customer", "invoice_cash", "invoice_credit", "delivery_no", "bank", "review_status", "reviewed_by"],
   },
   damage_claim: {
     table: "damage_claims",

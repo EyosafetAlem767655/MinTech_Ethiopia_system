@@ -61,7 +61,7 @@ interface Row {
   photoFileId: string | null;
   legitimacy: Legitimacy | null;
   status: string;
-  /** "purchased" once a GRV received it (or it was marked bought); else the status. */
+  /** "executed" once approved, marked bought, or received on a GRV; else the status. */
   displayStatus?: string;
   purchased?: { grvNo: string | null; date: string; line: string } | null;
   requestedBy: string;
@@ -78,7 +78,7 @@ const STATUS_TONE: Record<string, string> = {
   pending: "bg-amber-100 text-amber-800",
   approved: "bg-blue-100 text-blue-800",
   bought: "bg-green-100 text-green-700",
-  purchased: "bg-green-100 text-green-700",
+  executed: "bg-green-100 text-green-700",
   rejected: "bg-red-100 text-red-800",
   disregarded: "bg-stone-100 text-stone-600",
   deferred: "bg-purple-100 text-purple-700",
@@ -223,13 +223,13 @@ function KindBadge({ kind }: { kind: Row["kind"] }) {
 function StatusBadge({ status, row }: { status: string; row?: Row }) {
   const shown = row?.displayStatus ?? status;
   const p = row?.purchased;
-  const title = p ? `On GRV${p.grvNo ? ` ${p.grvNo}` : ""} · ${fmtDate(p.date)} · ${p.line}` : undefined;
+  const title = p ? `Received on GRV${p.grvNo ? ` ${p.grvNo}` : ""} · ${fmtDate(p.date)} · ${p.line}` : undefined;
   return (
     <span
       title={title}
       className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${STATUS_TONE[shown] || "bg-stone-100 text-stone-600"}`}
     >
-      {shown === "purchased" ? "✓ Purchased" : shown}
+      {shown === "executed" ? (p ? `✓ Executed · GRV${p.grvNo ? ` ${p.grvNo}` : ""}` : "✓ Executed") : shown}
     </span>
   );
 }
@@ -358,7 +358,7 @@ export default function ToolRequestsPanel() {
 
           <div className="card overflow-x-auto p-0">
             <p className="px-3 pt-2 text-[10px] text-stone-400">
-              Approve or reject on the row. Tap the row itself for the full request, the photo, the AI check
+              Execute or reject on the row. Tap the row itself for the full request, the photo, the AI check
               and every earlier request for the same item.
             </p>
             <table className="w-full min-w-[720px] text-right text-xs">
@@ -441,7 +441,7 @@ export default function ToolRequestsPanel() {
                               <DecideBtn
                                 label="✓"
                                 tone="blue"
-                                title="Approve"
+                                title="Execute"
                                 busy={!!busy[r._id]}
                                 onClick={() => decide(r._id, "approve")}
                               />
@@ -551,7 +551,7 @@ function RequestModal({
           {field("Notes", row.notes)}
           {row.purchased
             ? field(
-                "Purchased",
+                "Received on GRV",
                 `GRV${row.purchased.grvNo ? ` ${row.purchased.grvNo}` : ""} · ${fmtWhen(row.purchased.date)} · ${row.purchased.line}`
               )
             : null}
@@ -615,7 +615,7 @@ function RequestModal({
 
         {OPEN_STATUSES.has(row.status) && (
           <div className="mt-4 flex flex-wrap gap-1.5">
-            <DecideBtn label="✓ Approve" tone="blue" busy={busy} onClick={() => onDecide(row._id, "approve")} />
+            <DecideBtn label="✓ Execute" tone="blue" busy={busy} onClick={() => onDecide(row._id, "approve")} />
             <DecideBtn label="✓ Bought" tone="green" busy={busy} onClick={() => onBought(row)} />
             <DecideBtn label="⏸ Defer" tone="purple" busy={busy} onClick={() => onDecide(row._id, "deferred")} />
             <DecideBtn label="✗ Reject" tone="red" busy={busy} onClick={() => onDecide(row._id, "reject")} />

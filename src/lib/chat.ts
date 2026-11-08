@@ -1,5 +1,5 @@
 import type OpenAI from "openai";
-import { geminiGenerate, type GeminiContent } from "@/lib/llm";
+import { geminiGenerate, hasTextBackup, textBackupGenerate, type GeminiContent } from "@/lib/llm";
 import { CHART_INSTRUCTIONS } from "@/lib/chat-charts";
 
 /**
@@ -997,6 +997,21 @@ export async function companyChat(
       timeoutMs: CHAT_TIMEOUT_MS,
     });
 
+    // A busy spike is usually seconds long: one pause and one more go at the
+    // round, on whichever model is free, before giving up on it.
+    if (!res.ok && /503|429|high demand|overloaded|unavailable/i.test(res.error || "")) {
+      await new Promise((r) => setTimeout(r, 2000));
+      const again = await geminiGenerate(convo, {
+        systemInstruction: systemPrompt,
+        tools,
+        toolConfig: round === 0 ? { functionCallingConfig: { mode: "ANY" } } : undefined,
+        temperature: 0.2,
+        maxOutputTokens: CHAT_MAX_TOKENS,
+        timeoutMs: CHAT_TIMEOUT_MS,
+      });
+      if (again.ok) Object.assign(res, again);
+    }
+
     // A transport failure must not hang or blank the chat — break out and try to
     // answer below with whatever data was already gathered.
     if (!res.ok) {
@@ -1069,11 +1084,58 @@ export async function companyChat(
   );
   if (final.ok && final.text.trim()) return final.text;
 
+  // Gemini could not finish. Hand the question, and whatever data was already
+  // fetched, to the text backup as plain text: no tool parts, which it would
+  // have to translate and which are exactly what fails when crossing over.
+  const backup = await textBackupGenerate(asPlainText(convo), {
+    systemInstruction: systemPrompt,
+    maxOutputTokens: CHAT_MAX_TOKENS,
+    temperature: 0.2,
+  }).catch(() => null);
+  if (backup?.ok && backup.text.trim()) return backup.text;
+
   // Throw rather than returning prose: the route must be able to tell a failure
   // from an answer, so it does not spend one of the day's ten questions on it.
   const why = final.error || lastError || "empty response";
-  console.error("chat final pass failed:", why, toolsRan ? "(tools had run)" : "(no tools ran)");
+  console.error("chat final pass failed:", why, toolsRan ? "(tools had run)" : "(no tools ran)", backup?.error ?? "");
+  if (/503|429|high demand|overloaded|unavailable/i.test(why)) {
+    throw new Error(
+      hasTextBackup()
+        ? "Every AI model is busy right now, the backup included. Please ask again in a minute."
+        : "Every Gemini model is busy right now, and the backup model (NVIDIA Nemotron) is not set up: " +
+          "add NIVIDA_API_KEY in Vercel so the assistant can answer when Gemini is busy. Please ask again in a minute."
+    );
+  }
   throw new Error(`The assistant could not complete the answer: ${why}`);
+}
+
+/**
+ * The conversation as plain turns: tool calls and results written out as text,
+ * so a provider that never saw Gemini's function parts can still read the data.
+ */
+function asPlainText(convo: GeminiContent[]): GeminiContent[] {
+  const out: GeminiContent[] = [];
+  for (const turn of convo) {
+    const text = (turn.parts as Record<string, unknown>[])
+      .map((p) => {
+        if (typeof p.text === "string") return p.text;
+        const call = p.functionCall as { name?: string; args?: unknown } | undefined;
+        if (call) return `(looked up ${call.name} with ${JSON.stringify(call.args ?? {})})`;
+        const res = p.functionResponse as { name?: string; response?: unknown } | undefined;
+        if (res) return `Data from ${res.name}:\n${JSON.stringify(res.response).slice(0, 12000)}`;
+        return "";
+      })
+      .filter(Boolean)
+      .join("\n");
+    if (!text) continue;
+    const role = turn.role === "model" ? "model" : "user";
+    const last = out[out.length - 1];
+    // Providers want turns to alternate; two of a kind are joined.
+    if (last && last.role === role) last.parts = [{ text: `${(last.parts[0] as { text: string }).text}\n${text}` }];
+    else out.push({ role, parts: [{ text }] });
+  }
+  out.push({ role: "user", parts: [{ text: "Answer my question now using the data above." }] });
+  return out;
 }
 
 /**

@@ -58,10 +58,10 @@ export const PURCHASE_DEPARTMENT_ORDER: string[] = [
  * is a part for the machines, which the technical team buys, so the dashboard
  * shows it under Technical. Add a word here to widen it.
  */
-export const PRODUCTION_ITEM_WORDS = ["pp", "bag", "bags", "sack", "sacks", "ጆንያ", "ከረጢት", "sewing", "thread", "ክር"];
+export const PRODUCTION_ITEM_WORDS = ["ppbag", "bag", "sack", "ጆንያ", "ከረጢት", "ባግ", "sewing", "thread", "ክር"];
 
 /** Words that make a "bag" a machine part: "Filter bag 3475" is the technical team's. */
-export const TECHNICAL_ITEM_WORDS = ["filter", "filters"];
+export const TECHNICAL_ITEM_WORDS = ["filter"];
 
 /**
  * The department a request is SHOWN under.
@@ -73,13 +73,14 @@ export const TECHNICAL_ITEM_WORDS = ["filter", "filters"];
  */
 export function displayDepartment(department: string | null | undefined, title: string | null | undefined): string | null {
   if (department !== "production") return department ?? null;
-  const words = String(title || "")
+  // Matched inside the squashed title, not word by word: requests are typed
+  // "PPBAGS", "PP-bags", "pp bag 25kg" and "polybag" alike.
+  const squashed = String(title || "")
     .toLowerCase()
-    .split(/[^\p{L}\p{N}]+/u)
-    .filter(Boolean);
+    .replace(/[^\p{L}\p{N}]+/gu, "");
   // A filter bag is a dust-collector part, not a bag production fills.
-  if (words.some((w) => TECHNICAL_ITEM_WORDS.includes(w))) return "technical";
-  return words.some((w) => PRODUCTION_ITEM_WORDS.includes(w)) ? "production" : "technical";
+  if (TECHNICAL_ITEM_WORDS.some((w) => squashed.includes(w))) return "technical";
+  return PRODUCTION_ITEM_WORDS.some((w) => squashed.includes(w)) ? "production" : "technical";
 }
 
 /** English name for a stored value, falling back to the value itself. */

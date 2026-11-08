@@ -709,6 +709,23 @@ export async function geminiAttempt(
  * Returns null when there is nothing to cross to (no key), which is different
  * from an attempt that failed: the caller reports the two cases differently.
  */
+/**
+ * The text backup on its own, for a caller that has already been through the
+ * Gemini chain: plain text in, plain text out, no tools. Null when no NVIDIA key
+ * is configured, so the caller can say so instead of quoting Google's 503.
+ */
+export async function textBackupGenerate(
+  contents: GeminiContent[],
+  opts: { systemInstruction?: string; maxOutputTokens?: number; temperature?: number } = {}
+): Promise<GeminiCallResult | null> {
+  return crossProvider(contents, opts);
+}
+
+/** True when a text backup (NVIDIA Nemotron) is configured at all. */
+export function hasTextBackup(): boolean {
+  return Boolean(nvidiaKey());
+}
+
 async function crossProvider(
   contents: GeminiContent[],
   opts: NonNullable<Parameters<typeof geminiAttempt>[1]>

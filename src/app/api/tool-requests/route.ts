@@ -86,8 +86,10 @@ export async function GET() {
       const created = new Date(String(r.createdAt)).getTime();
       // The voucher must be no older than a day before the request: an item
       // bought last year is not this request's purchase.
+      // Any request still open, approved or bought: a GRV that received the item
+      // executes it, whether or not anyone pressed a button.
       const line =
-        status === "approved" || status === "bought"
+        ["pending", "deferred", "approved", "bought"].includes(status)
           ? received.find(
               (g) => new Date(g.date).getTime() >= created - 86_400_000 && similarItem(String(r.title || ""), g.description)
             )
@@ -98,8 +100,9 @@ export async function GET() {
         departmentFiled: r.department ?? null,
         department: displayDepartment(r.department as string | null, r.title as string | null),
         purchased: line ? { grvNo: line.grv_no, date: line.date, line: line.description } : null,
-        // "Purchased" replaces "approved" once a GRV received it, and is the name for "bought".
-        displayStatus: line || status === "bought" ? "purchased" : status,
+        // "Executed" is the owner's word for an approved request, for one marked
+        // bought, and for one a GRV received. The stored status is unchanged.
+        displayStatus: line || status === "bought" || status === "approved" ? "executed" : status,
         quantity: r.quantity == null ? null : Number(r.quantity),
         amount: r.amount == null ? null : Number(r.amount),
       };

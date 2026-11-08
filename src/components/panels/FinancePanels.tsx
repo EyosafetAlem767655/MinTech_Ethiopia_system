@@ -1717,7 +1717,7 @@ interface RequestRow extends PurchaseRequestRef {
   department?: string | null;
   machine?: string | null;
   status: string;
-  /** "purchased" once a GRV received it; see /api/tool-requests. */
+  /** "executed" once approved or received on a GRV; see /api/tool-requests. */
   displayStatus?: string;
   requestedBy: string;
   createdAt: string;
@@ -1727,7 +1727,7 @@ const REQUEST_TONE: Record<string, string> = {
   pending: "bg-amber-100 text-amber-800",
   approved: "bg-blue-100 text-blue-800",
   bought: "bg-green-100 text-green-700",
-  purchased: "bg-green-100 text-green-700",
+  executed: "bg-green-100 text-green-700",
   rejected: "bg-red-100 text-red-800",
   disregarded: "bg-stone-100 text-stone-600",
   deferred: "bg-purple-100 text-purple-700",
@@ -1765,7 +1765,7 @@ function PurchaseStatusTab() {
 
   const byRequest = new Map<string, ItemPurchase>();
   for (const p of purchases) if (p.requestId && !byRequest.has(p.requestId)) byRequest.set(p.requestId, p);
-  const open = requests.filter((r) => BUYABLE.has(r.status) && r.displayStatus !== "purchased");
+  const open = requests.filter((r) => BUYABLE.has(r.status) && r.displayStatus !== "executed");
   const shownRequests = showClosed ? requests : open;
 
   return (
@@ -1776,7 +1776,7 @@ function PurchaseStatusTab() {
       <div className="flex items-center justify-between px-1 pt-2">
         <p className="text-[11px] font-bold uppercase tracking-widest text-clay-500">
           Purchase requests · {open.length} open ·{" "}
-          {requests.filter((r) => (r.displayStatus ?? r.status) === "purchased").length} purchased
+          {requests.filter((r) => (r.displayStatus ?? r.status) === "executed").length} executed
         </p>
         <label className="flex items-center gap-1.5 text-[11px] text-stone-500">
           <input type="checkbox" checked={showClosed} onChange={(e) => setShowClosed(e.target.checked)} />
@@ -1824,7 +1824,7 @@ function PurchaseStatusTab() {
                           REQUEST_TONE[r.displayStatus ?? r.status] || "bg-stone-100 text-stone-600"
                         }`}
                       >
-                        {(r.displayStatus ?? r.status) === "purchased" ? "✓ Purchased" : r.status}
+                        {(r.displayStatus ?? r.status) === "executed" ? "✓ Executed" : r.status}
                       </span>
                     </td>
                     <td className="p-2">
