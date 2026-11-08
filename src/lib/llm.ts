@@ -721,6 +721,21 @@ export async function textBackupGenerate(
   return crossProvider(contents, opts);
 }
 
+/**
+ * NVIDIA Nemotron with tools, on its own: the assistant's main model. Takes the
+ * conversation in Gemini's shape (tool calls and results as parts) and answers in
+ * Gemini's result shape, so the chat loop is the same whichever model replies.
+ * Null when no NVIDIA key is configured.
+ */
+export async function nemotronGenerate(
+  contents: GeminiContent[],
+  opts: NonNullable<Parameters<typeof geminiAttempt>[1]> = {}
+): Promise<GeminiCallResult | null> {
+  if (!nvidiaKey()) return null;
+  const tools = opts.tools ? toOpenAiTools(opts.tools) : [];
+  return openAiAttempt(textAI(), TEXT_MODEL, contents, opts, tools, false);
+}
+
 /** True when a text backup (NVIDIA Nemotron) is configured at all. */
 export function hasTextBackup(): boolean {
   return Boolean(nvidiaKey());

@@ -5,8 +5,8 @@
 --   * 6/11 EC-90 production is 12 t (the voucher's figure; the owner confirmed).
 --   * 5/11: its production and stock were already entered (seed 0018) and match
 --     4/11 + production - delivered, so only its delivered and FGR are added.
---   * 7/11: 40kg Green Great Wall fell 8,100 -> 5,100; the 3,000 are recorded as
---     used that day (owner's decision), so the bag check shows no gap.
+--   * 7/11: 40kg Green Great Wall fell 8,100 -> 5,100. The 3,000 used are on file
+--     from the team, so this seed no longer enters them (seed 0021).
 --   * The rows seed 0018 wrote carried an internal marker in their FGR column;
 --     it is cleared (5/11 gets its real FGR 9679/9723).
 --
@@ -73,21 +73,8 @@ select (v.day || 'T00:00:00Z')::timestamptz, v.fgr, coalesce(
     where (p.date at time zone 'Africa/Addis_Ababa')::date = (v.day)::date
  );
 
-/* 7/11: 3,000 Great Wall 40kg Green bags used. */
-insert into pp_bag_usage (date_label, date, reported_by, source)
-values ('7/11/2026', '2026-11-07T00:00:00Z', coalesce(
-  (select full_name from telegram_users
-    where full_name ilike 'yohannes%' and archived_at is null
-    order by ('prod_daily' = any(positions)) desc, full_name
-    limit 1),
-  'Yohannes'), 'app')
-on conflict (date_label) do nothing;
-
-delete from pp_bag_usage_items where reference_no = 'entered by hand (7/11)';
-
-insert into pp_bag_usage_items (usage_id, position, ledger_key, reference_no, quantity)
-select u.id, 99, 'kg40:Green@great-wall', 'entered by hand (7/11)', 3000
-  from pp_bag_usage u where u.date_label = '7/11/2026';
+/* 7/11: the 3,000 Great Wall 40kg Green bags used are on file from the team
+   (see seed 0021), so they are no longer entered here. */
 
 /* Tick him on the attendance calendar for 6, 7 and 8 Nov (5/11 is ticked by 0018). */
 delete from bot_activity where detail = 'Entered by hand (phone lost, 6-8 Nov)';
@@ -106,7 +93,7 @@ select coalesce(u.chat_id, 'manual'), w.name, u.id, coalesce(u.positions, '{}'),
 
 commit;
 
--- Check: 3 new production reports (153.09 t), 3 days ticked, 3,000 bags used.
+-- Check: 3 new production reports (153.09 t), 3 days ticked.
 select reported_by, count(*) as reports,
        sum((select coalesce(sum(value::numeric), 0) from jsonb_each_text(products))) as tons
   from production_reports

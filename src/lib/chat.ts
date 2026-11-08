@@ -1,14 +1,12 @@
 import type OpenAI from "openai";
-import { geminiGenerate, hasTextBackup, textBackupGenerate, type GeminiContent } from "@/lib/llm";
+import { geminiGenerate, hasTextBackup, nemotronGenerate, type GeminiCallResult, type GeminiContent } from "@/lib/llm";
 import { CHART_INSTRUCTIONS } from "@/lib/chat-charts";
 
 /**
- * The model the assistant asks first. Gemini 2.0 Flash, by the owner's choice:
- * it answers quickly and calls tools well, where the newest models spend the
- * time thinking and were the ones found busy. If it is busy or gone, the usual
- * fallbacks follow (other Gemini models, then NVIDIA Nemotron).
+ * The assistant runs on NVIDIA Nemotron (NIVIDA_API_KEY), by the owner's
+ * decision: Gemini kept answering "high demand" or timing out mid-question.
+ * Gemini is only the backup now, asked when Nemotron fails.
  */
-const CHAT_MODEL = (process.env.CHAT_MODEL || "").trim() || "gemini-2.0-flash";
 import {
   damageTripwires,
   getDailySeries,
@@ -971,49 +969,45 @@ export async function companyChat(
   while (convo.length > 0 && convo[0].role !== "user") convo.shift();
   if (convo.length === 0) return "I could not produce an answer.";
 
-  // Up to five model passes inside the route's maxDuration of 180s, with room
-  // for the DB queries between them.
-  const CHAT_TIMEOUT_MS = 25000;
-  // Gemini 3 spends output tokens THINKING before it writes, from the same
-  // budget. At 900 the thinking ate most of it and answers stopped mid-sentence.
+  // The route allows 180s. Rounds stop starting after BUDGET_MS, so the final
+  // answer always has time to be written.
+  const startedAt = Date.now();
+  const BUDGET_MS = 110_000;
+  const GEMINI_TIMEOUT_MS = 25000;
   const CHAT_MAX_TOKENS = 8192;
   const tools = geminiTools();
   let lastError = "";
   let toolsRan = false;
 
-  // Four rounds: a question like "compare this month's sales with credit and
-  // stock" needs one tool to find the period and more to read each side.
-  for (let round = 0; round < 4; round++) {
-    const res = await geminiGenerate(convo, {
-      model: CHAT_MODEL,
+  /** One model pass: Nemotron first, Gemini only if Nemotron fails. */
+  const ask = async (contents: GeminiContent[], round: number): Promise<GeminiCallResult> => {
+    const primary = await nemotronGenerate(contents, {
       systemInstruction: systemPrompt,
       tools,
-      // Round one MUST query something. Left on AUTO, a small model happily
-      // answers from thin air — which is exactly the "the AI can't see the
-      // database" complaint, and flatly against this prompt's own rules.
+      temperature: 0.2,
+      maxOutputTokens: CHAT_MAX_TOKENS,
+    }).catch((e): GeminiCallResult => ({ ok: false, text: "", calls: [], error: String(e), model: "nemotron" }));
+    if (primary?.ok) return primary;
+    const backup = await geminiGenerate(contents, {
+      systemInstruction: systemPrompt,
+      tools,
+      // Round one MUST query something; left on AUTO a model answers from thin air.
       toolConfig: round === 0 ? { functionCallingConfig: { mode: "ANY" } } : undefined,
       temperature: 0.2,
       maxOutputTokens: CHAT_MAX_TOKENS,
-      timeoutMs: CHAT_TIMEOUT_MS,
+      timeoutMs: GEMINI_TIMEOUT_MS,
     });
+    if (backup.ok || !primary) return backup;
+    return { ...backup, error: `Nemotron: ${primary.error} · Gemini: ${backup.error}` };
+  };
 
-    // A busy spike is usually seconds long: one pause and one more go at the
-    // round, on whichever model is free, before giving up on it.
-    if (!res.ok && /503|429|high demand|overloaded|unavailable/i.test(res.error || "")) {
-      await new Promise((r) => setTimeout(r, 2000));
-      const again = await geminiGenerate(convo, {
-        systemInstruction: systemPrompt,
-        tools,
-        toolConfig: round === 0 ? { functionCallingConfig: { mode: "ANY" } } : undefined,
-        temperature: 0.2,
-        maxOutputTokens: CHAT_MAX_TOKENS,
-        timeoutMs: CHAT_TIMEOUT_MS,
-      });
-      if (again.ok) Object.assign(res, again);
-    }
+  // Four rounds: a question like "compare this month's sales with credit and
+  // stock" needs one tool to find the period and more to read each side.
+  for (let round = 0; round < 4 && Date.now() - startedAt < BUDGET_MS; round++) {
+    const res = await ask(convo, round);
 
-    // A transport failure must not hang or blank the chat — break out and try to
-    // answer below with whatever data was already gathered.
+    // A failure must not hang or blank the chat — break out and answer below
+    // with whatever data was already gathered.
     if (!res.ok) {
       lastError = res.error || "unknown error";
       console.error("chat tool round failed:", lastError);
@@ -1031,12 +1025,8 @@ export async function companyChat(
     for (const c of res.calls) {
       modelParts.push({
         functionCall: { name: c.name, args: c.args },
-        // Carried back exactly as it came. Gemini 3 mints a reasoning token for
-        // each call and refuses the next turn without it — "Function call is
-        // missing a thought_signature in functionCall parts" — so every
-        // question that actually reached the database used to fail on the round
-        // after its first tool call. A provider with no such concept returns
-        // none, and the key is simply absent.
+        // Gemini 3 refuses the next turn without the reasoning token it minted
+        // for each call; Nemotron mints none, and the key is simply absent.
         ...(c.thoughtSignature ? { thoughtSignature: c.thoughtSignature } : {}),
       });
     }
@@ -1059,51 +1049,44 @@ export async function companyChat(
     convo.push({ role: "user", parts: responses });
   }
 
-  // Final pass: keep the full conversation (including any tool results already
-  // fetched) so the answer is grounded, and nudge the model to reply in prose.
-  //
-  // `tools` MUST be passed even though we want no more calls. By now `convo`
-  // holds functionCall/functionResponse parts, and Gemini rejects those outright
-  // when no functionDeclarations accompany them — a 400 that fired on precisely
-  // the requests where data HAD been fetched, making the assistant look blind to
-  // the database. NONE forbids further calls without removing the declarations.
-  const final = await geminiGenerate(
+  // Final pass: the question and everything fetched, as plain text, so the
+  // answer is grounded and no further tool calls are possible. Nemotron first.
+  const plain = asPlainText(convo);
+  const final = await nemotronGenerate(plain, {
+    systemInstruction: systemPrompt,
+    temperature: 0.2,
+    maxOutputTokens: CHAT_MAX_TOKENS,
+  }).catch(() => null);
+  if (final?.ok && final.text.trim()) return final.text;
+
+  // Gemini as the backup. `tools` must be passed with NONE: by now the
+  // conversation holds function parts, which Gemini rejects without them.
+  const backup = await geminiGenerate(
     [
       ...convo,
       { role: "user", parts: [{ text: "Answer my question now using the data above. Do not call any more tools." }] },
     ],
     {
-      model: CHAT_MODEL,
       systemInstruction: systemPrompt,
       tools,
       toolConfig: { functionCallingConfig: { mode: "NONE" } },
       temperature: 0.2,
       maxOutputTokens: CHAT_MAX_TOKENS,
-      timeoutMs: CHAT_TIMEOUT_MS,
+      timeoutMs: GEMINI_TIMEOUT_MS,
     }
   );
-  if (final.ok && final.text.trim()) return final.text;
-
-  // Gemini could not finish. Hand the question, and whatever data was already
-  // fetched, to the text backup as plain text: no tool parts, which it would
-  // have to translate and which are exactly what fails when crossing over.
-  const backup = await textBackupGenerate(asPlainText(convo), {
-    systemInstruction: systemPrompt,
-    maxOutputTokens: CHAT_MAX_TOKENS,
-    temperature: 0.2,
-  }).catch(() => null);
-  if (backup?.ok && backup.text.trim()) return backup.text;
+  if (backup.ok && backup.text.trim()) return backup.text;
 
   // Throw rather than returning prose: the route must be able to tell a failure
   // from an answer, so it does not spend one of the day's ten questions on it.
-  const why = final.error || lastError || "empty response";
-  console.error("chat final pass failed:", why, toolsRan ? "(tools had run)" : "(no tools ran)", backup?.error ?? "");
-  if (/503|429|high demand|overloaded|unavailable/i.test(why)) {
+  const why = [final && !final.ok ? `Nemotron: ${final.error}` : "", backup.error ? `Gemini: ${backup.error}` : "", lastError]
+    .filter(Boolean)
+    .join(" · ") || "empty response";
+  console.error("chat final pass failed:", why, toolsRan ? "(tools had run)" : "(no tools ran)");
+  if (!hasTextBackup()) {
     throw new Error(
-      hasTextBackup()
-        ? "Every AI model is busy right now, the backup included. Please ask again in a minute."
-        : "Every Gemini model is busy right now, and the backup model (NVIDIA Nemotron) is not set up: " +
-          "add NIVIDA_API_KEY in Vercel so the assistant can answer when Gemini is busy. Please ask again in a minute."
+      "The assistant runs on NVIDIA Nemotron, and NIVIDA_API_KEY is not set on this deployment. " +
+        "Add it in Vercel and redeploy."
     );
   }
   throw new Error(`The assistant could not complete the answer: ${why}`);
