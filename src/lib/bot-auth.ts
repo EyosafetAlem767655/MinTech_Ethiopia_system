@@ -232,7 +232,9 @@ export type BotActivityAction =
   | "logout" | "session_revoked" | "menu_select" | "unauthorized" | "submission"
   | "submission_rejected" | "reminder_sent" | "purchase_decision" | "chat_question" | "error"
   // Raised by the dashboard's submissions manager and review buttons, not the bot.
-  | "report_edited" | "report_deleted" | "report_decided";
+  | "report_edited" | "report_deleted" | "report_decided"
+  // The 📋 Sales data manager approving or correcting a sale.
+  | "sales_review";
 
 export async function logActivity(entry: {
   chatId: string;

@@ -78,7 +78,7 @@ export interface StoreBlock {
 export const STORE_BLOCKS: StoreBlock[] = [
   { key: "mechanical", label: "Mechanical", icon: "🔧" },
   { key: "electrical", label: "Electrical", icon: "⚡" },
-  { key: "workshop", label: "Oils & workshop", icon: "🛢" },
+  { key: "workshop", label: "Auxiliary materials", icon: "🛢" },
 ];
 
 export const STORE_GROUPS: StoreGroup[] = [

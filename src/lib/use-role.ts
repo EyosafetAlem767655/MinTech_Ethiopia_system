@@ -20,9 +20,15 @@ export interface Me {
 let pending: Promise<Me | null> | null = null;
 
 function loadMe(): Promise<Me | null> {
-  pending ??= fetch("/api/me")
+  pending ??= fetch("/api/me", { cache: "no-store" })
     .then((r) => (r.ok ? (r.json() as Promise<Me>) : null))
-    .catch(() => null);
+    .catch(() => null)
+    .then((me) => {
+      // A failed answer is not remembered: the next panel asks again rather
+      // than every panel drawing for an unknown role until a reload.
+      if (!me) pending = null;
+      return me;
+    });
   return pending;
 }
 

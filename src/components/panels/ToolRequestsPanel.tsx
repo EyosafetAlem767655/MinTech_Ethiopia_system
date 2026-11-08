@@ -61,6 +61,9 @@ interface Row {
   photoFileId: string | null;
   legitimacy: Legitimacy | null;
   status: string;
+  /** "purchased" once a GRV received it (or it was marked bought); else the status. */
+  displayStatus?: string;
+  purchased?: { grvNo: string | null; date: string; line: string } | null;
   requestedBy: string;
   decidedBy?: string | null;
   decidedAt?: string | null;
@@ -75,6 +78,7 @@ const STATUS_TONE: Record<string, string> = {
   pending: "bg-amber-100 text-amber-800",
   approved: "bg-blue-100 text-blue-800",
   bought: "bg-green-100 text-green-700",
+  purchased: "bg-green-100 text-green-700",
   rejected: "bg-red-100 text-red-800",
   disregarded: "bg-stone-100 text-stone-600",
   deferred: "bg-purple-100 text-purple-700",
@@ -216,10 +220,16 @@ function KindBadge({ kind }: { kind: Row["kind"] }) {
   );
 }
 
-function StatusBadge({ status }: { status: string }) {
+function StatusBadge({ status, row }: { status: string; row?: Row }) {
+  const shown = row?.displayStatus ?? status;
+  const p = row?.purchased;
+  const title = p ? `On GRV${p.grvNo ? ` ${p.grvNo}` : ""} · ${fmtDate(p.date)} · ${p.line}` : undefined;
   return (
-    <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${STATUS_TONE[status] || "bg-stone-100 text-stone-600"}`}>
-      {status}
+    <span
+      title={title}
+      className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${STATUS_TONE[shown] || "bg-stone-100 text-stone-600"}`}
+    >
+      {shown === "purchased" ? "✓ Purchased" : shown}
     </span>
   );
 }
@@ -445,7 +455,7 @@ export default function ToolRequestsPanel() {
                               {r.status === "deferred" && <StatusBadge status={r.status} />}
                             </div>
                           ) : (
-                            <StatusBadge status={r.status} />
+                            <StatusBadge status={r.status} row={r} />
                           )}
                         </td>
                       </tr>
@@ -513,7 +523,7 @@ function RequestModal({
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
               <KindBadge kind={row.kind} />
-              <StatusBadge status={row.status} />
+              <StatusBadge status={row.status} row={row} />
             </div>
             <h3 className="mt-1.5 font-display text-base font-bold text-stone-900">{row.title}</h3>
             <p className="text-[11px] text-stone-400">
@@ -539,6 +549,12 @@ function RequestModal({
           {field("Department", row.department ? purchaseDeptLabel(row.department) : null)}
           {field("Machine", row.machine ? `🚜 ${row.machine}` : "PP bag / oil — no machine")}
           {field("Notes", row.notes)}
+          {row.purchased
+            ? field(
+                "Purchased",
+                `GRV${row.purchased.grvNo ? ` ${row.purchased.grvNo}` : ""} · ${fmtWhen(row.purchased.date)} · ${row.purchased.line}`
+              )
+            : null}
           {row.decidedBy && row.decidedAt
             ? field("Decision", `${row.status} by ${row.decidedBy} · ${fmtWhen(row.decidedAt)}`)
             : null}

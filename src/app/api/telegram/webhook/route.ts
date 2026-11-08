@@ -100,6 +100,18 @@ import {
 import { costsAt } from "@/lib/store-costs";
 import { monthPrices } from "@/lib/month-prices";
 import { SALES_KEYS, parseSalesPaste, salesEditBlock, salesMissing } from "@/lib/sales-invoice";
+import {
+  SALES_MANAGER_CAP,
+  approveSale,
+  cardKeyboard,
+  dayList,
+  invoiceToDraft,
+  reviewCard,
+  saleById,
+  salesOfDay,
+  saveEditedSale,
+  yesterdayEat,
+} from "@/lib/sales-review";
 import { applyFlowEdit, describeFlowChanges, editableFields, renderFieldList } from "@/lib/flow-edit";
 import { dailyHeartbeat } from "@/lib/heartbeat";
 import { loadImage, loadImages, telegramFileId } from "@/lib/images";
@@ -381,6 +393,71 @@ async function handleSystemCallback(data: string, callbackId: string, chatId: st
   }
   await answerCallbackQuery(callbackId, "");
   await sendSystemView(chatId, data.slice("sys:".length), user);
+}
+
+/** 📋 Sales data manager taps: a day's list, a sale's card, approve, edit. */
+async function handleSalesManagerCallback(data: string, callbackId: string, chatId: string, userName: string): Promise<void> {
+  const session = await loadSession(chatId, userName);
+  const user = session.auth ? await resolveSession(session).then((u) => (u ? view(u) : null)).catch(() => null) : null;
+  if (!user || !userCapabilities(user).some((c) => c.key === SALES_MANAGER_CAP)) {
+    await answerCallbackQuery(callbackId, "⛔ ፈቃድ የለዎትም።");
+    await logActivity({ chatId, actor: userName, action: "unauthorized", detail: `callback ${data}`, ok: false }).catch(() => {});
+    return;
+  }
+
+  const [, action, arg] = data.split(":");
+  if (action === "d" && /^\d{4}-\d{2}-\d{2}$/.test(arg || "")) {
+    await answerCallbackQuery(callbackId, "");
+    const list = dayList(arg, await salesOfDay(arg));
+    await sendMessage(chatId, list.text, { reply_markup: list.reply_markup });
+    return;
+  }
+
+  const sale = arg ? await saleById(arg) : null;
+  if (!sale) {
+    await answerCallbackQuery(callbackId, "This sale no longer exists.");
+    return;
+  }
+
+  if (action === "v") {
+    await answerCallbackQuery(callbackId, "");
+    await sendMessage(chatId, reviewCard(sale), { reply_markup: cardKeyboard(sale) });
+    return;
+  }
+
+  if (action === "ok") {
+    try {
+      await approveSale(sale.id, user.fullName);
+    } catch (e) {
+      await answerCallbackQuery(callbackId, "");
+      await sendMessage(chatId, `⚠️ ${escapeHtml(e instanceof Error ? e.message : String(e))}`);
+      return;
+    }
+    await answerCallbackQuery(callbackId, "✅ Approved");
+    await logActivity({ chatId, actor: user.fullName, userId: String(user._id), positions: user.positions, audience: "internal", action: "sales_review", detail: `approved ${sale.id}` }).catch(() => {});
+    const list = dayList(sale.day, await salesOfDay(sale.day));
+    await sendMessage(chatId, `✅ Approved: <b>${escapeHtml(sale.customer)}</b>\n\n${list.text}`, { reply_markup: list.reply_markup });
+    return;
+  }
+
+  if (action === "ed") {
+    session.state = "awaiting_sales_edit";
+    session.draft = { salesEditId: sale.id };
+    await persist(session);
+    await answerCallbackQuery(callbackId, "");
+    await sendMessage(
+      chatId,
+      `✏️ <b>${escapeHtml(sale.customer)}</b> · ${sale.day}\n` +
+        "Copy the block below, correct what is wrong, and send it back.\n" +
+        "<i>Tap the block to copy it. ❌ ሰርዝ cancels.</i>"
+    );
+    await sendMessage(chatId, `<pre>${escapeHtml(salesEditBlock(invoiceToDraft(sale)))}</pre>`, {
+      reply_markup: CHANGE_CANCEL_KEYBOARD,
+    });
+    return;
+  }
+
+  await answerCallbackQuery(callbackId, "");
 }
 
 function actorOf(session: any, user?: any): string {
@@ -1843,6 +1920,18 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true });
     }
 
+    /* Sales data manager — above the owner-only gate: the handler checks that
+       the person holds the 📋 Sales data manager functionality. */
+    if (data.startsWith("sm:")) {
+      try {
+        await handleSalesManagerCallback(data, String(cb.id), chatId, userName);
+      } catch (e) {
+        console.error("telegram sales manager callback error:", e);
+        await answerCallbackQuery(String(cb.id), MSG.genericError);
+      }
+      return NextResponse.json({ ok: true });
+    }
+
     /* Tick-list taps — above the owner-only gate for the same reason as the
        date picker: the people filing these reports are not the CEO. */
     if (data.startsWith("pick:")) {
@@ -2938,6 +3027,56 @@ export async function POST(req: NextRequest) {
 
 
 
+    /* ── Sales data manager: a corrected sale sent back ── */
+    if (session.state === "awaiting_sales_edit" && text && /[=:]/.test(text)) {
+      const editor = await currentUser(session, chatId);
+      const saleId = String(session.draft?.salesEditId || "");
+      const sale = saleId ? await saleById(saleId) : null;
+      if (!editor || !sale || !userCapabilities(editor).some((c) => c.key === SALES_MANAGER_CAP)) {
+        session.state = "idle";
+        session.draft = undefined;
+        await persist(session);
+        if (editor) await sendRoleMenu(chatId, editor);
+        return NextResponse.json({ ok: true });
+      }
+      const parsed = parseSalesPaste(text);
+      if (Object.keys(parsed.values).length === 0) {
+        await sendMessage(chatId, "⚠️ Nothing could be read from that. Send the block back with the corrected figures, or press ❌ ሰርዝ.", {
+          reply_markup: CHANGE_CANCEL_KEYBOARD,
+        });
+        return NextResponse.json({ ok: true });
+      }
+      const draft = invoiceToDraft(sale);
+      // A bank line sent again replaces the old per-bank amounts and "Other" name.
+      if (parsed.values[SALES_KEYS.bank] !== undefined) {
+        for (const k of Object.keys(draft)) {
+          if (k.startsWith("bankAmt:") || k === SALES_KEYS.bankOther) delete draft[k];
+        }
+      }
+      Object.assign(draft, parsed.values);
+      await saveEditedSale(sale.id, draft, editor.fullName);
+      session.state = "idle";
+      session.draft = undefined;
+      await persist(session);
+      await logActivity({ chatId, actor: editor.fullName, userId: String(editor._id), positions: editor.positions, audience: "internal", action: "sales_review", detail: `edited ${sale.id}` }).catch(() => {});
+      const saved = await saleById(sale.id);
+      const problems = [...parsed.invalid, ...parsed.unknown].slice(0, 6);
+      await sendMessage(
+        chatId,
+        `✅ Saved.\n\n${saved ? reviewCard(saved) : ""}` +
+          (problems.length ? `\n\n⚠️ Not read (left as they were):\n${problems.map((p) => `• ${escapeHtml(p)}`).join("\n")}` : ""),
+        saved ? { reply_markup: cardKeyboard(saved) } : {}
+      );
+      await sendRoleMenu(chatId, editor);
+      return NextResponse.json({ ok: true });
+    }
+    if (session.state === "awaiting_sales_edit") {
+      // Anything that is not a block (a menu button, a word) ends the edit and is handled as usual.
+      session.state = "idle";
+      session.draft = undefined;
+      await persist(session);
+    }
+
     /* ── HR subtype choice ── */
     if (session.state === "awaiting_hr_kind" && text) {
       const kind = HR_KIND_BY_LABEL.get(normText);
@@ -2979,6 +3118,13 @@ export async function POST(req: NextRequest) {
         action: "menu_select",
         detail: cap.key,
       });
+
+      if (cap.captureMode === "manager") {
+        const day = yesterdayEat();
+        const list = dayList(day, await salesOfDay(day));
+        await sendMessage(chatId, list.text, { reply_markup: list.reply_markup });
+        return NextResponse.json({ ok: true });
+      }
 
       if (cap.key === "hr") {
         session.state = "awaiting_hr_kind";

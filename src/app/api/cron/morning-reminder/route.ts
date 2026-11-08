@@ -14,6 +14,7 @@ import { splitByCompliance } from "@/lib/compliance";
 import { getAllDepartmentSummaries } from "@/lib/department-metrics";
 import { DEPARTMENTS } from "@/lib/departments";
 import { reportKeyboardFor, sendMessage } from "@/lib/telegram";
+import { SALES_MANAGER_CAP, dayList, salesOfDay, yesterdayEat } from "@/lib/sales-review";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -70,6 +71,31 @@ async function handle(): Promise<NextResponse> {
   // table, so roles that file through the guided flows could never be counted
   // as done and were re-reminded every morning after submitting.
   const dailyEmployees = employees.filter((u) => requiresDailyReport(u.positions));
+
+  // 📋 Sales data manager: yesterday's sales to review, every morning.
+  const salesManagers = employees.filter(
+    (u) => u.logged_in && resolveCapabilities(u.positions, u.capabilities).some((c) => c.key === SALES_MANAGER_CAP)
+  );
+  let salesListsSent = 0;
+  if (salesManagers.length > 0) {
+    const day = yesterdayEat();
+    const sales = await salesOfDay(day).catch((e) => {
+      console.error("sales review list failed:", e);
+      return null;
+    });
+    if (sales) {
+      const list = dayList(day, sales);
+      await Promise.all(
+        salesManagers.map((u) =>
+          sendMessage(String(u.chat_id), list.text, { reply_markup: list.reply_markup })
+            .then(() => {
+              salesListsSent += 1;
+            })
+            .catch(() => {})
+        )
+      );
+    }
+  }
   const { submitted, missing } = await splitByCompliance(today, dailyEmployees);
   const missingIds = new Set(missing.map((u) => u.id));
 
@@ -203,5 +229,6 @@ async function handle(): Promise<NextResponse> {
     missing: missing.length,
     hrDigests: hrUsers.length,
     adminDigests: adminUsers.length,
+    salesReviewLists: salesListsSent,
   });
 }

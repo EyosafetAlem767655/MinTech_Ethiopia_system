@@ -1,14 +1,13 @@
 "use client";
 
 import { Suspense, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 
 function LoginForm() {
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const router = useRouter();
   const params = useSearchParams();
 
   const submit = async (e: React.FormEvent) => {
@@ -22,7 +21,10 @@ function LoginForm() {
     });
     setBusy(false);
     if (res.ok) {
-      router.push(params.get("next") || "/");
+      // A full load, not router.push: the page keeps who is signed in for its
+      // whole life, so on a device that was signed in as someone else a
+      // client-side hop kept showing THEIR role (a Super Admin seen as HR).
+      window.location.assign(params.get("next") || "/");
       return;
     }
     if (res.status === 401) {

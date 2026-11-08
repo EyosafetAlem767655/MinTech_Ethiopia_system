@@ -412,7 +412,7 @@ interface StoreWorth {
  * the rest of the report is not held up, and it always says what state it is in:
  * loading, failed with a reason, or the figures. It is never simply absent.
  */
-function StoreNetWorthSection({ month }: { month: string }) {
+function StoreNetWorthSection({ month, onTotal }: { month: string; onTotal?: (total: number | null) => void }) {
   const [store, setStore] = useState<StoreWorth | null>(null);
   const [failed, setFailed] = useState("");
   const [attempt, setAttempt] = useState(0);
@@ -421,12 +421,19 @@ function StoreNetWorthSection({ month }: { month: string }) {
     let alive = true;
     setStore(null);
     setFailed("");
+    onTotal?.(null);
     getJson<StoreWorth>(`/api/finance/store-worth?month=${month}`)
-      .then((d) => alive && setStore(d))
+      .then((d) => {
+        if (!alive) return;
+        setStore(d);
+        onTotal?.(d.total);
+      })
       .catch((e) => alive && setFailed(errorText(e)));
     return () => {
       alive = false;
     };
+    // onTotal is a state setter from the parent: stable, so not a dependency.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [month, attempt]);
 
   return (
@@ -546,6 +553,7 @@ function Grade1Section({ grade1, month }: { grade1: NonNullable<Report["grade1"]
 
 function MonthlyTab() {
   const [month, setMonth] = useState("");
+  const [storeTotal, setStoreTotal] = useState<number | null>(null);
   const [months, setMonths] = useState<string[]>([]);
   const [data, setData] = useState<Report | null>(null);
   const [error, setError] = useState("");
@@ -782,11 +790,27 @@ function MonthlyTab() {
         <p className="font-display text-2xl font-bold text-clay-900">{fmt(data.totals.netWorth)} ETB</p>
       </div>
 
-      <StoreNetWorthSection month={data.month} />
+      <StoreNetWorthSection month={data.month} onTotal={setStoreTotal} />
 
       {/* Only when Grade 1 was submitted, and apart from every total above:
           it has its own stone, its own prices and its own net worth. */}
       {data.grade1 && <Grade1Section grade1={data.grade1} month={data.month} />}
+
+      {/* Everything the company holds, in one figure: the sum of the parts above. */}
+      <section className="card border-2 border-clay-200 p-4">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <p className="text-[10px] font-bold uppercase tracking-widest text-stone-500">🏦 Total net worth · {data.month}</p>
+          <p className="font-display text-2xl font-bold text-clay-900">
+            {storeTotal === null ? "adding up…" : `${fmt(data.totals.netWorth + storeTotal + (data.grade1?.netWorth ?? 0))} ETB`}
+          </p>
+        </div>
+        <ul className="mt-2 space-y-0.5 text-[11px] text-stone-500">
+          <li>Products: {fmt(data.totals.productionNetWorth)} ETB</li>
+          <li>Raw material &amp; PP bags: {fmt(data.totals.rawMaterialNetWorth)} ETB</li>
+          <li>Store (mechanical, electrical, auxiliary): {storeTotal === null ? "loading…" : `${fmt(storeTotal)} ETB`}</li>
+          {data.grade1 && <li>⭐ Grade 1: {fmt(data.grade1.netWorth)} ETB</li>}
+        </ul>
+      </section>
 
       {/* The unit costs behind the figures above, editable for the month the
           bot user could not file them. A saved price reloads the report. */}
@@ -1693,6 +1717,8 @@ interface RequestRow extends PurchaseRequestRef {
   department?: string | null;
   machine?: string | null;
   status: string;
+  /** "purchased" once a GRV received it; see /api/tool-requests. */
+  displayStatus?: string;
   requestedBy: string;
   createdAt: string;
 }
@@ -1701,6 +1727,7 @@ const REQUEST_TONE: Record<string, string> = {
   pending: "bg-amber-100 text-amber-800",
   approved: "bg-blue-100 text-blue-800",
   bought: "bg-green-100 text-green-700",
+  purchased: "bg-green-100 text-green-700",
   rejected: "bg-red-100 text-red-800",
   disregarded: "bg-stone-100 text-stone-600",
   deferred: "bg-purple-100 text-purple-700",
@@ -1738,7 +1765,7 @@ function PurchaseStatusTab() {
 
   const byRequest = new Map<string, ItemPurchase>();
   for (const p of purchases) if (p.requestId && !byRequest.has(p.requestId)) byRequest.set(p.requestId, p);
-  const open = requests.filter((r) => BUYABLE.has(r.status));
+  const open = requests.filter((r) => BUYABLE.has(r.status) && r.displayStatus !== "purchased");
   const shownRequests = showClosed ? requests : open;
 
   return (
@@ -1748,7 +1775,8 @@ function PurchaseStatusTab() {
       {/* Purchase requests, from Asset Management */}
       <div className="flex items-center justify-between px-1 pt-2">
         <p className="text-[11px] font-bold uppercase tracking-widest text-clay-500">
-          Purchase requests · {open.length} open · {requests.filter((r) => r.status === "bought").length} bought
+          Purchase requests · {open.length} open ·{" "}
+          {requests.filter((r) => (r.displayStatus ?? r.status) === "purchased").length} purchased
         </p>
         <label className="flex items-center gap-1.5 text-[11px] text-stone-500">
           <input type="checkbox" checked={showClosed} onChange={(e) => setShowClosed(e.target.checked)} />
@@ -1793,10 +1821,10 @@ function PurchaseStatusTab() {
                     <td className="p-2 text-left">
                       <span
                         className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
-                          REQUEST_TONE[r.status] || "bg-stone-100 text-stone-600"
+                          REQUEST_TONE[r.displayStatus ?? r.status] || "bg-stone-100 text-stone-600"
                         }`}
                       >
-                        {r.status}
+                        {(r.displayStatus ?? r.status) === "purchased" ? "✓ Purchased" : r.status}
                       </span>
                     </td>
                     <td className="p-2">

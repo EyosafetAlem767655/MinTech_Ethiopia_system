@@ -46,13 +46,46 @@ export const NO_DEPARTMENT = "unassigned";
  * the page.
  */
 export const PURCHASE_DEPARTMENT_ORDER: string[] = [
-  ...PURCHASE_DEPARTMENTS.map((d) => d.value),
+  "production",
+  // Shown, never stored: see displayDepartment.
+  "technical",
+  ...PURCHASE_DEPARTMENTS.map((d) => d.value).filter((v) => v !== "production"),
   NO_DEPARTMENT,
 ];
+
+/**
+ * What production itself buys. Everything else a "production" request asks for
+ * is a part for the machines, which the technical team buys, so the dashboard
+ * shows it under Technical. Add a word here to widen it.
+ */
+export const PRODUCTION_ITEM_WORDS = ["pp", "bag", "bags", "sack", "sacks", "ጆንያ", "ከረጢት", "sewing", "thread", "ክር"];
+
+/** Words that make a "bag" a machine part: "Filter bag 3475" is the technical team's. */
+export const TECHNICAL_ITEM_WORDS = ["filter", "filters"];
+
+/**
+ * The department a request is SHOWN under.
+ *
+ * The bot only offers "Production", so machine parts filed by the plant land
+ * there too. A production request for anything but PP bags or sewing thread is
+ * shown as Technical. Nothing stored changes, so past and future requests read
+ * the same way, and widening PRODUCTION_ITEM_WORDS relabels history at once.
+ */
+export function displayDepartment(department: string | null | undefined, title: string | null | undefined): string | null {
+  if (department !== "production") return department ?? null;
+  const words = String(title || "")
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean);
+  // A filter bag is a dust-collector part, not a bag production fills.
+  if (words.some((w) => TECHNICAL_ITEM_WORDS.includes(w))) return "technical";
+  return words.some((w) => PRODUCTION_ITEM_WORDS.includes(w)) ? "production" : "technical";
+}
 
 /** English name for a stored value, falling back to the value itself. */
 export function purchaseDeptLabel(value: string | null | undefined): string {
   if (!value) return "Not stated";
+  if (value === "technical") return "Technical";
   return PURCHASE_DEPARTMENTS.find((d) => d.value === value)?.short ?? value;
 }
 

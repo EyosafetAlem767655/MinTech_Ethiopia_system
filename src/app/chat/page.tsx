@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import ChatChart from "@/components/ChatChart";
+import { splitAnswer } from "@/lib/chat-charts";
 
 interface Msg {
   role: "user" | "assistant";
@@ -81,6 +83,25 @@ function RichText({ text }: { text: string }) {
         if (!line.trim()) return <span key={i} className="block h-2" />;
         return <span key={i} className="block">{renderInline(line, `l${i}`)}</span>;
       })}
+    </>
+  );
+}
+
+/** Prose and the charts drawn inside it, in order. A chart that cannot be read shows as its text. */
+function Answer({ text }: { text: string }) {
+  return (
+    <>
+      {splitAnswer(text).map((seg, i) =>
+        seg.kind === "chart" ? (
+          <ChatChart key={i} spec={seg.spec} />
+        ) : seg.kind === "bad" ? (
+          <pre key={i} className="my-2 overflow-x-auto rounded-lg bg-stone-50 p-2 text-[11px] text-stone-500">
+            {seg.raw}
+          </pre>
+        ) : (
+          <RichText key={i} text={seg.text} />
+        )
+      )}
     </>
   );
 }
@@ -180,7 +201,7 @@ export default function ChatPage() {
         {messages.map((m, i) => (
           <div key={i} className={`flex animate-fade-up ${m.role === "user" ? "justify-end" : "justify-start"}`}>
             <div
-              className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
+              className={`${m.role === "assistant" ? "w-full max-w-[95%] sm:max-w-[85%]" : "max-w-[85%]"} rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
                 m.role === "user"
                   ? "whitespace-pre-wrap bg-clay-700 text-white rounded-br-md"
                   : "card text-stone-700 rounded-bl-md"
@@ -188,7 +209,7 @@ export default function ChatPage() {
             >
               {/* Only the assistant writes markdown; a user's message is shown
                   exactly as typed. */}
-              {m.role === "assistant" ? <RichText text={m.content} /> : m.content}
+              {m.role === "assistant" ? <Answer text={m.content} /> : m.content}
             </div>
           </div>
         ))}

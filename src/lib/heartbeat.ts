@@ -54,8 +54,19 @@ export async function dailyHeartbeat(force = false): Promise<HeartbeatResult> {
   const result: HeartbeatResult = { ran: true, chased: 0, alreadyChased: 0, failed: 0 };
 
   try {
+    // Once a WEEK per customer, not daily: anyone sent a message in the last
+    // seven days is left alone. Registering a customer still texts them at once
+    // (it calls chaseHolder itself), and the weekly round takes over from there
+    // until the receipt is marked received. A failed send does not count, so a
+    // gateway outage is retried the next day rather than costing a week.
     const holders = await sql<WhtHolder[]>`
-      select id, company, phone, description from wht_holders where status = 'pending'
+      select h.id, h.company, h.phone, h.description
+        from wht_holders h
+       where h.status = 'pending'
+         and not exists (
+           select 1 from wht_sms_log l
+            where l.holder_id = h.id and l.ok and l.sent_on > ${today}::date - 7
+         )
     `.catch(() => []);
 
     for (const h of holders) {

@@ -1,7 +1,6 @@
 "use client";
 
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
 import {
   BOT_FUNCTIONALITIES,
   CAPABILITIES,
@@ -73,7 +72,7 @@ const selectionBody = (s: Selection) => ({
 /** One line saying what an employee gets, in the same words as the picker. */
 function selectionSummary(u: BotUser): string {
   const s = positionsToSelection(u.positions, u.capabilities);
-  const parts = s.caps.map((k) => CAPABILITIES[k].button);
+  const parts = s.caps.map((k) => CAPABILITIES[k].en);
   if (s.hr) parts.push("👥 HR");
   if (s.admin) parts.push("🛡 ADMIN");
   return parts.join(" · ") || "Nothing ticked";
@@ -107,7 +106,6 @@ type Tab = "users" | "submissions" | "errors" | "activity" | "devices" | "webuse
 
 export default function SettingsPage() {
   const [tab, setTab] = useState<Tab>("users");
-  const router = useRouter();
   // Errors, Devices, Web users and the danger zone are the Super Admin's.
   const isSuper = useIsSuper();
   const tabs: Tab[] = isSuper
@@ -117,7 +115,8 @@ export default function SettingsPage() {
   const logout = async () => {
     if (!confirm("Log out of this browser?")) return;
     await fetch("/api/logout", { method: "POST" }).catch(() => {});
-    router.push("/login");
+    // A full load, so nothing of this account's role stays in the page.
+    window.location.assign("/login");
   };
 
   return (
@@ -1830,10 +1829,12 @@ function FunctionalityPicker({ value, onChange }: { value: Selection; onChange: 
   return (
     <div className="rounded-xl border border-stone-200 bg-white p-3">
       <p className="text-[11px] font-bold uppercase tracking-widest text-stone-500">Bot functionalities</p>
-      <p className="mt-0.5 text-[11px] text-stone-400">What is ticked is exactly this employee&apos;s bot menu.</p>
+      <p className="mt-0.5 text-[11px] text-stone-400">
+        What is ticked is exactly this employee&apos;s bot menu. Names are in English here; the bot shows its own.
+      </p>
       <div className="mt-2 grid gap-0.5 sm:grid-cols-2">
         {BOT_FUNCTIONALITIES.map((key) =>
-          row(key, value.caps.includes(key), () => toggleCap(key), CAPABILITIES[key].button)
+          row(key, value.caps.includes(key), () => toggleCap(key), CAPABILITIES[key].en)
         )}
       </div>
       <div className="mt-2 grid gap-0.5 border-t border-stone-100 pt-2 sm:grid-cols-2">
@@ -1841,7 +1842,7 @@ function FunctionalityPicker({ value, onChange }: { value: Selection; onChange: 
           "hr",
           value.hr,
           () => onChange({ ...value, hr: !value.hr }),
-          "👥 የሰው ኃይል (HR)",
+          "👥 HR",
           "Gets the daily report on departmental activities only."
         )}
         {row(

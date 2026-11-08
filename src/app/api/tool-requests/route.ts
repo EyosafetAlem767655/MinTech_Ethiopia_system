@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import sql from "@/lib/sql";
+import { displayDepartment } from "@/lib/purchase-departments";
+import { similarItem } from "@/lib/purchase-history";
 
 export const dynamic = "force-dynamic";
 
@@ -67,11 +69,40 @@ export async function GET() {
     }
   }
 
+  // What the Goods Receiving Vouchers received, to show an approved request as
+  // Purchased once its item came in. Matched by name (similarItem), because
+  // a GRV has no request number to link it by.
+  const received = await sql<{ description: string; grv_no: string | null; date: Date }[]>`
+    select i.description, v.grv_no, v.date
+      from goods_receiving_items i
+      join goods_receiving_vouchers v on v.id = i.grv_id
+     where i.description is not null
+     order by v.date asc
+  `.catch(() => []);
+
   return NextResponse.json(
-    rows.map((r) => ({
-      ...r,
-      quantity: r.quantity == null ? null : Number(r.quantity),
-      amount: r.amount == null ? null : Number(r.amount),
-    }))
+    rows.map((r) => {
+      const status = String(r.status || "");
+      const created = new Date(String(r.createdAt)).getTime();
+      // The voucher must be no older than a day before the request: an item
+      // bought last year is not this request's purchase.
+      const line =
+        status === "approved" || status === "bought"
+          ? received.find(
+              (g) => new Date(g.date).getTime() >= created - 86_400_000 && similarItem(String(r.title || ""), g.description)
+            )
+          : undefined;
+      return {
+        ...r,
+        // Shown, not stored: machine parts asked for by production read as Technical.
+        departmentFiled: r.department ?? null,
+        department: displayDepartment(r.department as string | null, r.title as string | null),
+        purchased: line ? { grvNo: line.grv_no, date: line.date, line: line.description } : null,
+        // "Purchased" replaces "approved" once a GRV received it, and is the name for "bought".
+        displayStatus: line || status === "bought" ? "purchased" : status,
+        quantity: r.quantity == null ? null : Number(r.quantity),
+        amount: r.amount == null ? null : Number(r.amount),
+      };
+    })
   );
 }

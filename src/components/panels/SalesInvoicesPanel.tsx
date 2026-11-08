@@ -31,6 +31,9 @@ interface Row {
   banks: { bank: string; amount: number }[];
   reportedBy: string;
   products: Record<string, number>;
+  /** Set by the 📋 Sales data manager (0047). */
+  reviewStatus?: "approved" | "edited" | null;
+  reviewedBy?: string | null;
 }
 
 interface Filters {
@@ -172,7 +175,17 @@ export default function SalesInvoicesPanel() {
               {shown.map((r) => (
                 <tr key={r._id} className="border-t border-clay-50">
                   <td className="p-2 text-left font-semibold text-stone-800">{fmtDate(r.date)}</td>
-                  <td className="p-2 text-left text-stone-700">{r.customer}</td>
+                  <td className="p-2 text-left text-stone-700">
+                    {r.customer}
+                    {r.reviewStatus && (
+                      <span
+                        title={`${r.reviewStatus === "approved" ? "Approved" : "Edited"} by ${r.reviewedBy || "—"}`}
+                        className="ml-1 text-[10px]"
+                      >
+                        {r.reviewStatus === "approved" ? "✅" : "✏️"}
+                      </span>
+                    )}
+                  </td>
                   <td className="p-2 text-left tabular-nums text-stone-500">{r.tin || <span className="text-stone-300">—</span>}</td>
                   <td className="p-2 tabular-nums text-stone-700">{num(r.invoiceCash)}</td>
                   <td className="p-2 tabular-nums text-stone-700">{num(r.invoiceCredit)}</td>

@@ -45,6 +45,51 @@ export function sameItem(a: string, b: string): boolean {
   return true;
 }
 
+/** Edit distance, for one-letter typos between a request and a voucher line. */
+function distance(a: string, b: string): number {
+  const row = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    let prev = row[0];
+    row[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const keep = row[j];
+      row[j] = Math.min(row[j] + 1, row[j - 1] + 1, prev + (a[i - 1] === b[j - 1] ? 0 : 1));
+      prev = keep;
+    }
+  }
+  return row[b.length];
+}
+
+/**
+ * A request and the voucher line that bought it, typed by different people.
+ *
+ * Looser than sameItem, for a different question ("did this arrive?" rather
+ * than "was this asked for before?"):
+ *   - every part number (a word with a digit) in either must be in the other,
+ *     so a 6210 bearing never matches a 6201;
+ *   - with a shared part number, one more word in common is enough ("Ball
+ *     bearing 6210" is "6210 bearing SKF"); without one, at least 60% of the
+ *     shorter name's words must be found, so "grinder motor" never matches
+ *     "grinder belt". A word of five letters or more may be one letter off.
+ */
+export function similarItem(a: string, b: string): boolean {
+  const wa = itemWords(a);
+  const wb = itemWords(b);
+  if (wa.size === 0 || wb.size === 0) return false;
+  const hasDigit = (w: string) => /\d/.test(w);
+  for (const w of wa) if (hasDigit(w) && !wb.has(w)) return false;
+  for (const w of wb) if (hasDigit(w) && !wa.has(w)) return false;
+  const [small, big] = wa.size <= wb.size ? [wa, wb] : [wb, wa];
+  const near = (w: string) =>
+    big.has(w) || (w.length >= 5 && !hasDigit(w) && [...big].some((x) => x.length >= 5 && distance(w, x) <= 1));
+  const words = [...small].filter((w) => !hasDigit(w));
+  if (words.length === 0) return true;
+  const found = words.filter(near).length;
+  // A shared part number already names the item; one word then confirms the kind.
+  const sharedNumber = [...wa].some((w) => hasDigit(w) && wb.has(w));
+  return found >= 1 && (sharedNumber || found / words.length >= 0.6);
+}
+
 /** The shape this needs from a request row; the panel's Row satisfies it. */
 export interface HistoryRow {
   _id: string;

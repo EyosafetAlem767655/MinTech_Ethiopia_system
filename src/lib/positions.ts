@@ -47,7 +47,9 @@ export type CapabilityKey =
   // An item bought: matched to the store list, priced by the unit or the total.
   | "item_purchase"
   // Stationery taken out of the store, by the one person who issues it.
-  | "stationery_issue";
+  | "stationery_issue"
+  // Yesterday's sales each morning, to approve or correct (sales-review.ts).
+  | "sales_manager";
 
 /** How the bot collects a capability's payload. */
 export type CaptureMode =
@@ -58,12 +60,16 @@ export type CaptureMode =
   /** Pasted multi-day operations report. */
   | "ops_paste"
   /** Guided column-by-column asset report (raw material / vouchers / tool request). */
-  | "asset_entry";
+  | "asset_entry"
+  /** Not a report: opens a list to review (the sales data manager). */
+  | "manager";
 
 export interface Capability {
   key: CapabilityKey;
   /** Reply-keyboard label. Routing normalises this, so the emoji is cosmetic. */
   button: string;
+  /** The English name the dashboard shows. The bot keeps `button`. */
+  en: string;
   captureMode: CaptureMode;
   /** docType handed to classifyIngestion; only meaningful for captureMode "llm". */
   docType?: string;
@@ -75,6 +81,7 @@ export interface Capability {
 export const CAPABILITIES: Record<CapabilityKey, Capability> = {
   daily_report: {
     key: "daily_report",
+    en: "📝 Daily report",
     button: "📝 የቀኑ ሪፖርት",
     captureMode: "capture",
     input: "any",
@@ -83,6 +90,7 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
   },
   damage: {
     key: "damage",
+    en: "🛡️ Damaged bags claim",
     button: "🛡️ የተበላሹ ጆንያዎች",
     captureMode: "llm",
     docType: "damage_claim",
@@ -92,6 +100,7 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
   },
   receipt: {
     key: "receipt",
+    en: "🧾 Receipt",
     button: "🧾 ደረሰኝ",
     captureMode: "llm",
     docType: "receipt",
@@ -100,6 +109,7 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
   },
   purchase: {
     key: "purchase",
+    en: "🛒 Purchase request",
     // ONE button for every purchase request, guided. It used to be a free-text
     // capture handed to a model to sort into columns, with a second button
     // ("🔧 tool request") running the guided flow for the asset role — two ways
@@ -113,6 +123,7 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
   },
   ops: {
     key: "ops",
+    en: "📊 Daily operations report",
     button: "📊 የዕለታዊ ክንውን ሪፖርት",
     captureMode: "ops_paste",
     input: "any",
@@ -121,6 +132,7 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
   },
   production_report: {
     key: "production_report",
+    en: "🏭 Daily production report",
     button: "🏭 የቀኑ የምርት ሪፖርት",
     // Was "llm": a free-text/photo/Excel report the model guessed columns from.
     // Now guided, for the same reason the asset reports were converted — what
@@ -131,6 +143,7 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
   },
   pp_bag_used: {
     key: "pp_bag_used",
+    en: "🧺 Daily PP bag usage",
     button: "🧺 የቀኑ የPP ከረጢት ፍጆታ",
     captureMode: "asset_entry",
     input: "any",
@@ -138,6 +151,7 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
   },
   whiteness_check: {
     key: "whiteness_check",
+    en: "⚪ Whiteness quality check",
     button: "⚪ የነጭነት ጥራት ምርመራ",
     captureMode: "asset_entry",
     input: "any",
@@ -148,6 +162,7 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
   // used is worked out from production (raw-material-usage.ts).
   raw_material_received: {
     key: "raw_material_received",
+    en: "🧱 Raw material received",
     button: "🧱 የጥሬ ዕቃ ገቢ",
     captureMode: "asset_entry",
     input: "any",
@@ -155,6 +170,7 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
   },
   credit_payment: {
     key: "credit_payment",
+    en: "💳 Credit payment tracking",
     button: "💳 የብድር ክፍያ መከታተያ",
     captureMode: "asset_entry",
     input: "any",
@@ -162,6 +178,7 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
   },
   downtime: {
     key: "downtime",
+    en: "⏱ Monthly production downtime report",
     // Once a month, off the floor's own sheet: photographed, read, checked.
     button: "⏱ የወሩ የምርት መቋረጥ ሪፖርት",
     captureMode: "asset_entry",
@@ -170,6 +187,7 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
   },
   pp_bag_receipt: {
     key: "pp_bag_receipt",
+    en: "🧺 PP bags received",
     button: "🧺 የPP ከረጢት ገቢ",
     captureMode: "asset_entry",
     input: "any",
@@ -177,6 +195,7 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
   },
   store_count: {
     key: "store_count",
+    en: "🧰 Store items count",
     button: "🧰 የመጋዘን ዕቃዎች ቆጠራ",
     captureMode: "asset_entry",
     input: "any",
@@ -184,6 +203,7 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
   },
   pp_bag_damage: {
     key: "pp_bag_damage",
+    en: "💔 PP bag damage report",
     button: "💔 የPP ከረጢት ብልሽት ሪፖርት",
     captureMode: "asset_entry",
     input: "photo",
@@ -191,6 +211,7 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
   },
   base_balance: {
     key: "base_balance",
+    en: "📊 Monthly beginning balance",
     button: "📊 የወሩ የመነሻ ሚዛን",
     captureMode: "asset_entry",
     input: "any",
@@ -198,6 +219,7 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
   },
   store_issue: {
     key: "store_issue",
+    en: "📤 Store issue voucher (SIV)",
     // The Store Issue Voucher, as printed. It replaced the daily raw-material
     // issue: the paper covers everything leaving the warehouse, not just the
     // three materials that feed the monthly report.
@@ -208,6 +230,7 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
   },
   grv: {
     key: "grv",
+    en: "📥 Goods receiving voucher (GRV)",
     // The Goods Receiving Voucher, as printed. It replaced the tool purchase
     // report, the PP bag receipt and the asset PP bag count — three buttons for
     // slices of one event, none of them matching the paper being filled in.
@@ -218,6 +241,7 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
   },
   price_list: {
     key: "price_list",
+    en: "💲 Monthly unit price list",
     button: "💲 የወሩ unit price ዝርዝር",
     captureMode: "asset_entry",
     input: "any",
@@ -225,6 +249,7 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
   },
   rm_credit_purchase: {
     key: "rm_credit_purchase",
+    en: "🚚 Raw material credit purchase",
     button: "🚚 የጥሬ ዕቃ Credit ግዢ",
     captureMode: "asset_entry",
     input: "any",
@@ -232,6 +257,7 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
   },
   rm_credit_payment: {
     key: "rm_credit_payment",
+    en: "💸 Raw material credit payment",
     button: "💸 የጥሬ ዕቃ credit ክፍያ",
     captureMode: "asset_entry",
     input: "any",
@@ -239,6 +265,7 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
   },
   stationery_issue: {
     key: "stationery_issue",
+    en: "📎 Stationery issue voucher",
     button: "📎 Stationary items issue voucher",
     captureMode: "asset_entry",
     input: "any",
@@ -246,6 +273,7 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
   },
   item_purchase: {
     key: "item_purchase",
+    en: "🛍 Item purchase",
     button: "🛍 የዕቃ ግዢ",
     captureMode: "asset_entry",
     input: "any",
@@ -253,6 +281,7 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
   },
   pp_bag_price: {
     key: "pp_bag_price",
+    en: "🧺 PP bag unit price update",
     button: "🧺 PP Bag unit price update",
     captureMode: "asset_entry",
     input: "any",
@@ -260,6 +289,7 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
   },
   wht_holder: {
     key: "wht_holder",
+    en: "📄 WHT receipt holder",
     button: "📄 WHT ደረሰኝ ያዢ",
     captureMode: "asset_entry",
     input: "any",
@@ -267,6 +297,7 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
   },
   purchase_items: {
     key: "purchase_items",
+    en: "🧾 Purchased items report",
     button: "🧾 የግዢ ዕቃዎች ሪፖርት",
     captureMode: "llm",
     docType: "purchase_items",
@@ -276,6 +307,7 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
   },
   sales_report: {
     key: "sales_report",
+    en: "🧾 Sales report",
     // One row per sale, in the columns of the sales sheet. Typed: the whole
     // row is filled in as one copyable block (no photos, no AI read), and
     // corrected on the review card. It was one Payment Summary
@@ -286,8 +318,18 @@ export const CAPABILITIES: Record<CapabilityKey, Capability> = {
     input: "any",
     question: "🧾 ቀኑን ይምረጡ። ከዚያ የሽያጩን ሰንጠረዥ ሞልተው ይልካሉ።",
   },
+  sales_manager: {
+    key: "sales_manager",
+    en: "📋 Sales data manager",
+    // In English, as the owner asked for this one.
+    button: "📋 Sales data manager",
+    captureMode: "manager",
+    input: "any",
+    question: "📋 Sales to review.",
+  },
   hr: {
     key: "hr",
+    en: "👥 HR / customer report",
     button: "👥 የሰው ኃይል / ደንበኛ",
     captureMode: "capture",
     input: "any",
@@ -663,6 +705,7 @@ export const BOT_FUNCTIONALITIES: CapabilityKey[] = [
   "pp_bag_price",
   "wht_holder",
   "sales_report",
+  "sales_manager",
 ];
 
 /**

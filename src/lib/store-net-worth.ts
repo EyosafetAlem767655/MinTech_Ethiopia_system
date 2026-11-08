@@ -5,7 +5,7 @@ import { loadCustomStoreItems } from "@/lib/store-custom";
 
 /**
  * What the spare-parts store is worth at the end of a month, per block
- * (Mechanical, Electrical, Oils & workshop): quantity remaining × unit cost.
+ * (Mechanical, Electrical, Auxiliary materials): quantity remaining × unit cost.
  *
  * The same rule as the store tab (last count, moved on by the vouchers since),
  * cut off at the month's end so a past month reads what was on the shelf then,

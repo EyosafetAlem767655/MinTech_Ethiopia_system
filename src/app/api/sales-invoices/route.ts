@@ -23,7 +23,10 @@ export async function GET(req: NextRequest) {
              invoice_cash as "invoiceCash", invoice_credit as "invoiceCredit",
              qty, delivery_no as "deliveryNo", products, bank,
              ${legacy ? sql`null::jsonb` : sql`banks`} as banks,
-             reported_by as "reportedBy", created_at as "createdAt"
+             reported_by as "reportedBy", created_at as "createdAt",
+             -- 0047; read through to_jsonb so the list still loads before it runs.
+             to_jsonb(sales_invoices) ->> 'review_status' as "reviewStatus",
+             to_jsonb(sales_invoices) ->> 'reviewed_by' as "reviewedBy"
         from sales_invoices
        where true
          ${day.test(from) ? sql`and date_label >= ${from}` : sql``}

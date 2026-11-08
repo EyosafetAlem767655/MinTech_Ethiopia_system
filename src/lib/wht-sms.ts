@@ -6,7 +6,9 @@ import { sendSms, smsGatewayConfigured, type SmsResult } from "@/lib/sms";
  * Chasing a customer for the 3% withholding receipt.
  *
  * One function, three callers — the dashboard registration, the bot flow and the
- * daily cron — because the "once a day per holder" rule only holds if every path
+ * daily round (heartbeat.ts), which now asks each customer once a WEEK: it skips
+ * anyone sent a message in the last seven days. The "once a day per holder" rule
+ * below still guards every path, and only holds if every path
  * claims the day the same way. Registration now texts immediately, so without a
  * shared claim the cron would text the same customer again the next morning
  * hours after they had already been asked.

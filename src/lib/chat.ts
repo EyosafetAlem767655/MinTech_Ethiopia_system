@@ -1,5 +1,14 @@
 import type OpenAI from "openai";
 import { geminiGenerate, type GeminiContent } from "@/lib/llm";
+import { CHART_INSTRUCTIONS } from "@/lib/chat-charts";
+
+/**
+ * The model the assistant asks first. Gemini 2.0 Flash, by the owner's choice:
+ * it answers quickly and calls tools well, where the newest models spend the
+ * time thinking and were the ones found busy. If it is busy or gone, the usual
+ * fallbacks follow (other Gemini models, then NVIDIA Nemotron).
+ */
+const CHAT_MODEL = (process.env.CHAT_MODEL || "").trim() || "gemini-2.0-flash";
 import {
   damageTripwires,
   getDailySeries,
@@ -947,7 +956,8 @@ export async function companyChat(
         "partial and narrow the query rather than totalling what you can see. If the data genuinely " +
         "does not contain the answer, say so plainly instead of guessing. Currency is ETB. Today is " +
         eatDateLabel(new Date()) +
-        " (East Africa Time). Be concise, direct, and flag anything that looks like a problem.";
+        " (East Africa Time). Be concise, direct, and flag anything that looks like a problem. " +
+        CHART_INSTRUCTIONS;
 
   // The prompt goes in Gemini's own system_instruction field. It used to be
   // prepended to the first message of the window, which broke once the history
@@ -975,6 +985,7 @@ export async function companyChat(
   // stock" needs one tool to find the period and more to read each side.
   for (let round = 0; round < 4; round++) {
     const res = await geminiGenerate(convo, {
+      model: CHAT_MODEL,
       systemInstruction: systemPrompt,
       tools,
       // Round one MUST query something. Left on AUTO, a small model happily
@@ -1047,6 +1058,7 @@ export async function companyChat(
       { role: "user", parts: [{ text: "Answer my question now using the data above. Do not call any more tools." }] },
     ],
     {
+      model: CHAT_MODEL,
       systemInstruction: systemPrompt,
       tools,
       toolConfig: { functionCallingConfig: { mode: "NONE" } },
