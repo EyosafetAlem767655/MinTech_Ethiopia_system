@@ -3,7 +3,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { ScrollTable } from "@/components/panels/TableChart";
-import { HOURS_KINDS, HOURS_LABEL, LOST_KINDS, fmtHours, type HoursCell, type HoursKind } from "@/lib/downtime-sheet";
+import { HOURS_KINDS, HOURS_LABEL, LOST_KINDS, daysInMonth, fmtHours, type HoursCell, type HoursKind } from "@/lib/downtime-sheet";
+import { HOURS_PER_DAY } from "@/lib/downtime";
+
+/** Working days, at 12 hours a day: what a number of minutes comes to. */
+const workDays = (minutes: number) => (minutes ? String(Math.round((minutes / 60 / HOURS_PER_DAY) * 100) / 100) : "-");
 
 /**
  * The monthly Production Hours Report, as the plant's own sheet lays it out.
@@ -80,7 +84,10 @@ export default function DowntimePanel() {
   if (months === null) return <div className="card h-48 animate-pulse bg-clay-50" />;
 
   const lostTotal = (current?.lines ?? []).reduce((a, l) => a + LOST_KINDS.reduce((b, k) => b + l.cells[k].minutes, 0), 0);
-  const allTotal = (current?.lines ?? []).reduce((a, l) => a + l.cells.total.minutes, 0);
+  // What the month offered: every day a 12-hour working day, on every line.
+  const monthDays = current ? daysInMonth(current.month) : 0;
+  const lineMinutes = monthDays * HOURS_PER_DAY * 60;
+  const allTotal = lineMinutes * (current?.lines.length ?? 0);
 
   return (
     <section className="space-y-3">
@@ -120,7 +127,8 @@ export default function DowntimePanel() {
                 <p className="font-display text-2xl font-bold text-clay-900">{fmtHours(lostTotal)} h</p>
                 <p className="text-[10px] uppercase tracking-wide text-stone-400">
                   lost across {current.lines.length} line{current.lines.length === 1 ? "" : "s"} ·{" "}
-                  {allTotal ? Math.round((lostTotal / allTotal) * 1000) / 10 : 0}% of {fmtHours(allTotal)} h
+                  {allTotal ? Math.round((lostTotal / allTotal) * 1000) / 10 : 0}% of {fmtHours(allTotal)} working h
+                  {" "}({monthDays} days × {HOURS_PER_DAY} h × {current.lines.length} line{current.lines.length === 1 ? "" : "s"})
                 </p>
               </div>
               <p className="text-[11px] text-stone-400">{monthName(current.month)} · filed by {current.reportedBy}</p>
@@ -140,7 +148,7 @@ export default function DowntimePanel() {
                 <tr>
                   {HOURS_KINDS.flatMap((k) => [
                     <th key={`${k}h`} className="px-2 pb-1 font-semibold normal-case">Hours</th>,
-                    <th key={`${k}d`} className="px-2 pb-1 font-semibold normal-case">Days</th>,
+                    <th key={`${k}d`} className="px-2 pb-1 font-semibold normal-case" title="Working days of 12 hours">Days (12 h)</th>,
                   ])}
                 </tr>
               </thead>
@@ -153,7 +161,7 @@ export default function DowntimePanel() {
                         {fmtHours(l.cells[k].minutes)}
                       </td>,
                       <td key={`${k}d`} className="p-2 tabular-nums text-stone-500">
-                        {l.cells[k].days || (l.cells[k].minutes ? "0" : "-")}
+                        {workDays(l.cells[k].minutes)}
                       </td>,
                     ])}
                   </tr>
@@ -168,7 +176,15 @@ export default function DowntimePanel() {
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={chart} layout="vertical" margin={{ top: 4, right: 12, bottom: 0, left: 4 }} barCategoryGap={10}>
                     <CartesianGrid strokeDasharray="3 3" stroke={GRID} horizontal={false} />
-                    <XAxis type="number" tick={TICK} tickLine={false} axisLine={false} unit=" h" />
+                    <XAxis
+                      type="number"
+                      tick={TICK}
+                      tickLine={false}
+                      axisLine={false}
+                      unit=" h"
+                      // The whole month's working time, so a bar's length reads as its share of it.
+                      domain={[0, (dataMax: number) => Math.max(dataMax, lineMinutes / 60)]}
+                    />
                     <YAxis type="category" dataKey="name" width={52} tick={{ ...TICK, fill: "#57534e" }} tickLine={false} axisLine={false} />
                     <Tooltip
                       cursor={{ fill: "rgba(0,0,0,0.04)" }}

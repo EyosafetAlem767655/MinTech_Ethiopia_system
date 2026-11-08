@@ -1112,11 +1112,12 @@ const GEMINI_DOWNTIME_SYSTEM =
   "The sheet is a table with one row per production LINE (usually 1, 2, 3). Its columns, left to right: " +
   "Line · Working (Hours, Days) · Power Interruption (Hours, Days) · Maintenance Mechanical (Hours, Days) · " +
   "Maintenance Electrical (Hours, Days) · Raw material shortage (Hours, Days) · Total (Hours, Days).\n" +
-  "Hours are written h:mm (\"538:50\" is 538 hours 50 minutes) or whole hours (\"744\"). Days are numbers " +
+  "The plant works 12 hours a day, so a 31-day month has 372 working hours. " +
+  "Hours are written h:mm (\"270:00\" is 270 hours) or whole hours (\"372\"). Days are numbers " +
   "(\"22.5\"). A dash \"-\" or an empty cell means none.\n" +
-  'Return: {"rows":[{"line":1,"working":{"hours":"538:50","days":22.5},"power":{"hours":"125:05","days":5.2},' +
-  '"mech":{"hours":"56:35","days":2.4},"elec":{"hours":"23:30","days":1},"raw":{"hours":"-","days":0},' +
-  '"total":{"hours":"744","days":31}}],"confidence":0-100,"notes":"","unmatched":["anything you could not read"]}\n' +
+  'Return: {"rows":[{"line":1,"working":{"hours":"270:00","days":22.5},"power":{"hours":"62:30","days":5.2},' +
+  '"mech":{"hours":"28:15","days":2.4},"elec":{"hours":"11:15","days":0.9},"raw":{"hours":"-","days":0},' +
+  '"total":{"hours":"372","days":31}}],"confidence":0-100,"notes":"","unmatched":["anything you could not read"]}\n' +
   "Copy every hours figure EXACTLY as printed, as a string, keeping the colon. Do not add up, correct or " +
   "convert anything. Use \"-\" for an empty or dashed hours cell and 0 for an empty days cell. A cell you " +
   "cannot read goes in `unmatched` (e.g. \"line 2 electrical hours\"), never a guess. Ignore signatures " +

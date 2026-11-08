@@ -6,18 +6,21 @@
  * August 2026"), so the system reads it in its own shape: for each line, the
  * hours (h:mm) and days spent working, stopped by a power interruption, stopped
  * for mechanical or electrical maintenance, stopped for want of raw material,
- * and the month's total. On a filled sheet the parts add up to the total —
- * 538:50 + 125:05 + 56:35 + 23:30 = 744:00, which is 31 days × 24 hours.
+ * and the month's total. The plant works 12 hours a day (HOURS_PER_DAY), so on a
+ * filled sheet the parts add up to the month's working hours —
+ * 270:00 + 62:30 + 28:15 + 11:15 = 372:00, which is 31 days × 12 hours.
  *
  * The bot photographs the sheet, the model reads it into the block below, and
  * the person checks the block and sends it back. What is saved is the block as
  * sent back, never the read itself.
  *
  *     # Line | Working | Power | Mechanical | Electrical | Raw material | Total
- *     1 | 538:50 / 22.5 | 125:05 / 5.2 | 56:35 / 2.4 | 23:30 / 1 | - | 744 / 31
+ *     1 | 270:00 / 22.5 | 62:30 / 5.2 | 28:15 / 2.4 | 11:15 / 0.9 | - | 372 / 31
  *
  * Pure — no `sql` — so the bot, the review card, the panel and the tests share it.
  */
+
+import { HOURS_PER_DAY } from "@/lib/downtime";
 
 export const HOURS_KINDS = ["working", "power", "mech", "elec", "raw", "total"] as const;
 export type HoursKind = (typeof HOURS_KINDS)[number];
@@ -143,7 +146,8 @@ export function parseHoursBlock(text: string, month: string): ParsedHoursBlock {
   const rows: ProductionHoursRow[] = [];
   const bad: string[] = [];
   const warnings: string[] = [];
-  const monthMinutes = /^\d{4}-\d{2}$/.test(month) ? daysInMonth(month) * 24 * 60 : null;
+  // The month's WORKING time: every day is a 12-hour day, by the owner's word.
+  const monthMinutes = /^\d{4}-\d{2}$/.test(month) ? daysInMonth(month) * HOURS_PER_DAY * 60 : null;
 
   for (const raw of String(text || "").split(/\r?\n/)) {
     const line = raw.trim();
