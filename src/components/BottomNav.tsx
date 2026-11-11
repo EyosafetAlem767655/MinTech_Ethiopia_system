@@ -16,7 +16,7 @@ export default function BottomNav() {
   if (pathname === "/login") return null;
   return (
     <nav className="fixed bottom-0 inset-x-0 z-50 glass border-t border-clay-100 pb-[env(safe-area-inset-bottom)] lg:hidden">
-      <div className="max-w-lg mx-auto grid grid-cols-7">
+      <div className="max-w-lg mx-auto grid grid-cols-8">
         {NAV_ITEMS.map((it) => {
           const active = isActive(pathname, it.href);
           return (

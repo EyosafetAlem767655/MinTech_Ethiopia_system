@@ -1,5 +1,5 @@
 /**
- * The seven places the app goes.
+ * The eight places the app goes.
  *
  * One list, two navigations: a bottom tab bar on a phone and a top bar on a
  * desktop. They are the same destinations in the same order, and keeping the
@@ -26,6 +26,7 @@ export const NAV_ITEMS: NavItem[] = [
   { href: "/departments/sales", label: "Sales", short: "Sales", icon: "🤝" },
   { href: "/departments/finance", label: "Finance", short: "Finance", icon: "💵" },
   { href: "/chat", label: "AI", short: "AI", icon: "💬" },
+  { href: "/guide", label: "Guide", short: "Guide", icon: "📖" },
   { href: "/settings", label: "Settings", short: "Settings", icon: "⚙️" },
 ];
 

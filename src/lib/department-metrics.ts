@@ -21,6 +21,7 @@ import { DEPARTMENTS, DEPARTMENT_KEYS, type DepartmentKey } from "@/lib/departme
 import { eatDateLabel } from "@/lib/dates";
 import { rangeWindow, rangeDef, type RangeKey } from "@/lib/ranges";
 import { cashSales, creditTotals, millions, monthNetWorth } from "@/lib/finance-summary";
+import { rawUsedFrom } from "@/lib/raw-material-usage";
 
 export interface Kpi {
   label: string;
@@ -437,7 +438,7 @@ async function departmentActivityCounts(
       // Split in two queries on purpose: the second group of tables arrives in
       // 0014, 0019, 0022 and 0033, and a database a migration behind must still
       // show the counts it does have rather than an empty card.
-      const [[a], [b]] = await Promise.all([
+      const [[a], [b], made] = await Promise.all([
         sql<{ purchases: string; claims: string }[]>`
           select
             (select count(*) from purchase_requests where created_at >= ${start} and created_at < ${end}) as purchases,
@@ -466,7 +467,19 @@ async function departmentActivityCounts(
             (select count(*) from daily_ops_reports        where date >= ${start} and date < ${end}) as stock`.catch(
           () => [{ raw: "0", grv: "0", bags: "0", siv: "0", usage: "0", damage: "0", stock: "0" }]
         ),
+        // What production made in the window, normal and Grade 1: the raw
+        // material it used is worked out from it (raw-material-usage.ts).
+        sql<{ products: Record<string, number> | null; grade1: { products?: Record<string, number> } | null }[]>`
+          select p.products, to_jsonb(p) -> 'grade1' as grade1
+            from production_reports p where p.date >= ${start} and p.date < ${end}`.catch(() => []),
       ]);
+      // Raw material used: each product's tons on its own material, plus 5%
+      // wastage, the same rule as the raw material page.
+      let rawUsed = 0;
+      for (const r of made) {
+        for (const t of Object.values(rawUsedFrom(r.products))) rawUsed += t;
+        for (const t of Object.values(rawUsedFrom(r.grade1?.products))) rawUsed += t;
+      }
       const purchases = Number(a.purchases) || 0;
       const raw = Number(b.raw) || 0;
       const siv = Number(b.siv) || 0;
@@ -485,7 +498,7 @@ async function departmentActivityCounts(
       return {
         total,
         headline: [
-          { icon: "🧱", label: "Raw material days", value: raw },
+          { icon: "🧱", label: "Raw material used", value: Math.round(rawUsed * 10) / 10, suffix: " t", decimals: 1 },
           { icon: "📥", label: "Goods received", value: received },
           { icon: "📤", label: "Store issues", value: siv },
           { icon: "🛒", label: "Purchase requests", value: purchases },

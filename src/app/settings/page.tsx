@@ -22,6 +22,7 @@ import { useCanEdit, useIsSuper } from "@/lib/use-role";
 import WebUsersTab from "@/components/panels/WebUsersPanel";
 import AiRecheckPanel from "@/components/panels/AiRecheckPanel";
 import type { SchemaReport } from "@/lib/schema-check";
+import type { SettingsTab } from "@/lib/tab-keys";
 
 interface BotUser {
   _id: string;
@@ -102,7 +103,7 @@ const ACTION_STYLES: Record<string, string> = {
   error: "bg-red-200 text-red-900",
 };
 
-type Tab = "users" | "submissions" | "errors" | "activity" | "devices" | "webusers";
+type Tab = SettingsTab;
 
 export default function SettingsPage() {
   const [tab, setTab] = useState<Tab>("users");
@@ -111,6 +112,22 @@ export default function SettingsPage() {
   const tabs: Tab[] = isSuper
     ? ["users", "submissions", "errors", "activity", "devices", "webusers"]
     : ["users", "submissions", "activity"];
+
+  // A link such as /settings?tab=submissions (from the Guide) opens that tab,
+  // once, and only a tab this role can see; Super Admin's arrive when known.
+  const linked = useRef(false);
+  useEffect(() => {
+    if (linked.current) return;
+    const wanted = new URLSearchParams(window.location.search).get("tab");
+    if (!wanted) {
+      linked.current = true;
+      return;
+    }
+    if (tabs.includes(wanted as Tab)) {
+      setTab(wanted as Tab);
+      linked.current = true;
+    }
+  }, [tabs]);
 
   const logout = async () => {
     if (!confirm("Log out of this browser?")) return;
@@ -133,6 +150,9 @@ export default function SettingsPage() {
             <p className="text-xs font-bold tracking-[0.24em] uppercase text-clay-100">Settings</p>
             <h1 className="font-display text-2xl font-bold">Telegram bot access</h1>
             <p className="mt-1 text-sm text-clay-100/90">Employees · positions · passwords · devices</p>
+            <a href="/guide#settings" className="mt-1 inline-block text-xs font-bold text-clay-100 underline">
+              📖 How to read this
+            </a>
           </div>
           <button
             onClick={logout}

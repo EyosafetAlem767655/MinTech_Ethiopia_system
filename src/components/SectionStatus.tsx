@@ -69,11 +69,17 @@ export function SectionError({ title, message, onRetry }: { title: string; messa
  * would sit on screen at once and they would all start together, which is the
  * pile-up on the database this exists to prevent.
  */
-export function LazySection({ title, children }: { title: string; children: ReactNode }) {
+export function LazySection({ title, anchor, children }: { title: string; anchor?: string; children: ReactNode }) {
   const [near, setNear] = useState(false);
   const box = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    // Opened on this section's own link (#store): start it now and keep it in view.
+    if (anchor && window.location.hash === `#${anchor}`) {
+      setNear(true);
+      setTimeout(() => document.getElementById(anchor)?.scrollIntoView({ block: "start" }), 50);
+      return;
+    }
     const el = box.current;
     if (!el || typeof IntersectionObserver === "undefined") {
       setNear(true);
@@ -87,7 +93,7 @@ export function LazySection({ title, children }: { title: string; children: Reac
     );
     observer.observe(el);
     return () => observer.disconnect();
-  }, []);
+  }, [anchor]);
 
   if (near) return <>{children}</>;
   return (

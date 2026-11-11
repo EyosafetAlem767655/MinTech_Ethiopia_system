@@ -5,6 +5,7 @@ import { useParams } from "next/navigation";
 import type { ComponentType } from "react";
 import DepartmentReport from "@/components/DepartmentReport";
 import { LazySection } from "@/components/SectionStatus";
+import { PANEL_ANCHORS } from "@/lib/panel-anchors";
 import { isDepartmentKey, type DepartmentKey } from "@/lib/departments";
 import BagControlPanel from "@/components/panels/BagControlPanel";
 import RawMaterialDailyPanel from "@/components/panels/RawMaterialDailyPanel";
@@ -95,6 +96,32 @@ const PANELS: Record<DepartmentKey, ComponentType[]> = {
   finance: [FinancePanels],
 };
 
+/** Each panel's anchor, so a link (from the Guide) can land on it: #store, #credit… */
+const ANCHOR = new Map<ComponentType, string>([
+  [ProductionPanels, PANEL_ANCHORS.production],
+  [DowntimePanel, PANEL_ANCHORS.downtime],
+  [WhitenessPanel, PANEL_ANCHORS.whiteness],
+  [RawMaterialDailyPanel, PANEL_ANCHORS.rawMaterial],
+  [VoucherPanels, PANEL_ANCHORS.vouchers],
+  [StockOnHandPanel, PANEL_ANCHORS.stockOnHand],
+  [PpBagUsagePanel, PANEL_ANCHORS.ppBagUsage],
+  [PpBagDamagePanel, PANEL_ANCHORS.ppBagDamage],
+  [ToolRequestsPanel, PANEL_ANCHORS.purchaseRequests],
+  [StoreInventoryPanel, PANEL_ANCHORS.store],
+  [BagControlPanel, PANEL_ANCHORS.bagControl],
+  [SalesAnalyticsPanel, PANEL_ANCHORS.salesAnalytics],
+  [SalesInvoicesPanel, PANEL_ANCHORS.salesTable],
+  [FinancePanels, PANEL_ANCHORS.finance],
+]);
+
+/** The Guide section that explains each department page. */
+const GUIDE_SECTION: Record<DepartmentKey, string> = {
+  production: "production",
+  asset_management: "assets",
+  sales: "sales",
+  finance: "finance",
+};
+
 /**
  * The asset page is a long list of reports, each with its own requests. Started
  * together they queue on the same few database connections and all arrive late,
@@ -137,9 +164,14 @@ export default function DepartmentPage() {
 
   return (
     <main className="app-shell px-4 pb-6 pt-4">
-      <Link href="/" className="mb-2 inline-flex items-center gap-1 text-xs font-bold text-clay-600">
-        ← Brief
-      </Link>
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <Link href="/" className="inline-flex items-center gap-1 text-xs font-bold text-clay-600">
+          ← Brief
+        </Link>
+        <Link href={`/guide#${GUIDE_SECTION[dept]}`} className="text-xs font-bold text-clay-600 hover:underline">
+          📖 How to read this
+        </Link>
+      </div>
 
       {/* Range-driven summary (KPIs, trend, contributors, submissions).
           Sales and Asset Management are intentionally report-only. Asset's KPI
@@ -153,10 +185,11 @@ export default function DepartmentPage() {
       <div className="mt-4 space-y-8 lg:grid lg:grid-cols-2 lg:items-start lg:gap-8 lg:space-y-0">
         {panels.map((Panel, i) => {
           const title = dept === "asset_management" ? ASSET_TITLES.get(Panel) : undefined;
+          const anchor = ANCHOR.get(Panel);
           return (
-            <div key={i} className={FULL_WIDTH.has(Panel) ? "lg:col-span-2" : ""}>
+            <div key={i} id={anchor} className={`scroll-mt-4 ${FULL_WIDTH.has(Panel) ? "lg:col-span-2" : ""}`}>
               {title ? (
-                <LazySection title={title}>
+                <LazySection title={title} anchor={anchor}>
                   <Panel />
                 </LazySection>
               ) : (

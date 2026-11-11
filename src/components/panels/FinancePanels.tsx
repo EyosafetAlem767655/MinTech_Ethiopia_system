@@ -6,6 +6,7 @@ import { useCanEdit, useIsSuper } from "@/lib/use-role";
 import { PriceListEditor, StoreCostEditor } from "@/components/panels/UnitCostEditors";
 import { type PurchaseRequestRef } from "@/components/panels/PurchaseForm";
 import PurchaseAnalysis from "@/components/panels/PurchaseAnalysis";
+import { FINANCE_TABS, type FinanceTab } from "@/lib/tab-keys";
 import { SectionError, SectionLoading, errorText, getJson } from "@/components/SectionStatus";
 import { purchaseDeptLabel } from "@/lib/purchase-departments";
 import {
@@ -29,7 +30,7 @@ import {
  * nobody scrolls to the bottom of.
  */
 
-type Tab = "rmcredit" | "monthly" | "credit" | "wht" | "banks" | "purchases";
+type Tab = FinanceTab;
 
 const fmt = (n: number | null | undefined, dp = 2) =>
   n == null ? "—" : (Math.round(n * 10 ** dp) / 10 ** dp).toLocaleString(undefined, { maximumFractionDigits: dp });
@@ -38,6 +39,11 @@ const fmtDate = (d: string) => new Date(d).toLocaleDateString("en-GB", { day: "n
 export default function FinancePanels() {
   // Monthly is what finance opens the tab for; the others are looked up.
   const [tab, setTab] = useState<Tab>("monthly");
+  // A link such as /departments/finance?tab=credit (from the Guide) opens that tab.
+  useEffect(() => {
+    const wanted = new URLSearchParams(window.location.search).get("tab");
+    if (wanted && FINANCE_TABS.includes(wanted as Tab)) setTab(wanted as Tab);
+  }, []);
   return (
     <div className="space-y-4">
       <div className="flex gap-1 rounded-full bg-clay-50 p-0.5">
