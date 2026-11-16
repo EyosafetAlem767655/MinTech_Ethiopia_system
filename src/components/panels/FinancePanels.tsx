@@ -1,6 +1,8 @@
 "use client";
 
 import { Fragment, useCallback, useEffect, useState } from "react";
+import ExcelExport from "@/components/ExcelExport";
+import type { ExportDatasetKey } from "@/lib/export-keys";
 import DecideBtn from "@/components/DecideButton";
 import { useCanEdit, useIsSuper } from "@/lib/use-role";
 import { PriceListEditor, StoreCostEditor } from "@/components/panels/UnitCostEditors";
@@ -36,6 +38,16 @@ const fmt = (n: number | null | undefined, dp = 2) =>
   n == null ? "—" : (Math.round(n * 10 ** dp) / 10 ** dp).toLocaleString(undefined, { maximumFractionDigits: dp });
 const fmtDate = (d: string) => new Date(d).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
 
+/** Each tab's ⬇ Excel export: the tab's own records. */
+const TAB_EXPORT: Record<Tab, ExportDatasetKey> = {
+  rmcredit: "rm-credit",
+  monthly: "monthly",
+  credit: "credit",
+  wht: "wht",
+  banks: "banks",
+  purchases: "purchases",
+};
+
 export default function FinancePanels() {
   // Monthly is what finance opens the tab for; the others are looked up.
   const [tab, setTab] = useState<Tab>("monthly");
@@ -67,6 +79,10 @@ export default function FinancePanels() {
             {label}
           </button>
         ))}
+      </div>
+
+      <div className="-mt-2 flex justify-end">
+        <ExcelExport key={tab} dataset={TAB_EXPORT[tab]} />
       </div>
 
       {tab === "rmcredit" && <RmCreditTab />}

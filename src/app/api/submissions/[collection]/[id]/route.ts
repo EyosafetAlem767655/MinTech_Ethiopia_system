@@ -136,6 +136,12 @@ export async function PATCH(req: NextRequest, { params }: { params: { collection
 export async function DELETE(_req: NextRequest, { params }: { params: { collection: string; id: string } }) {
   const spec = resolve(params.collection, params.id);
   if (!spec) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (spec.noDelete) {
+    return NextResponse.json(
+      { error: `A ${spec.label.toLowerCase()} cannot be deleted here (that would delete the sale). Edit it and clear the review status instead.` },
+      { status: 400 }
+    );
+  }
 
   const row = await loadRow(spec, params.id);
   if (!row) return NextResponse.json({ error: "Not found" }, { status: 404 });

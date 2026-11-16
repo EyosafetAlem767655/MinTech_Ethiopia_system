@@ -764,12 +764,23 @@ export function requiresDailyReport(positions: string[]): boolean {
   return positions.some((p) => isPositionKey(p) && POSITIONS[p].dailyRequired);
 }
 
-/** Every table that counts as "reported" for the roles this person holds. */
-export function submissionTablesFor(positions: string[]): string[] {
+/**
+ * The 📋 Sales data manager's reviews as a compliance source (compliance.ts):
+ * sales_invoices by reviewed_by / reviewed_at. Not a table of its own.
+ */
+export const SALES_REVIEW_SOURCE = "sales_reviews";
+
+/**
+ * Every table that counts as "reported" for the roles this person holds, plus
+ * the sales reviews when the 📋 Sales data manager button is ticked for them:
+ * approving yesterday's sales is that person's daily work.
+ */
+export function submissionTablesFor(positions: string[], override?: string[] | null): string[] {
   const out = new Set<string>();
   for (const p of positions) {
     if (isPositionKey(p)) POSITIONS[p].submissionTables.forEach((t) => out.add(t));
   }
+  if (resolveCapabilities(positions, override).some((c) => c.key === "sales_manager")) out.add(SALES_REVIEW_SOURCE);
   return [...out];
 }
 

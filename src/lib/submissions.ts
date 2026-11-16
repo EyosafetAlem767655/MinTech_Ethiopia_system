@@ -52,6 +52,8 @@ export const SUBMISSION_COLLECTIONS = [
   "rm_credit",
   // An item finance bought (🛍).
   "item_purchase",
+  // The 📋 Sales data manager's approvals and corrections, under the reviewer.
+  "sales_review",
 ] as const;
 
 export type SubmissionCollection = (typeof SUBMISSION_COLLECTIONS)[number];
@@ -105,6 +107,19 @@ export interface SubmissionSpec {
    * by `childTablesOf` below rather than being written twice.
    */
   extraChildren?: { table: string; foreignKey: string }[];
+  /**
+   * When the entry "arrived", for the quick range and the newest-first order.
+   * created_at unless said otherwise: a review arrives when it is made, not when
+   * the sale it reviews was filed.
+   */
+  arrivalColumn?: string;
+  /** Only rows where this column is set (a sale is a review once it has a status). */
+  onlyWhereSet?: string;
+  /**
+   * The entry is a view onto another table's row, so it cannot be deleted from
+   * here: deleting a review must never delete the sale. Clear it by editing.
+   */
+  noDelete?: boolean;
 }
 
 /** Every child table of a collection, from both declarations. */
@@ -702,6 +717,27 @@ export const SUBMISSIONS: Record<SubmissionCollection, SubmissionSpec> = {
     searchColumns: ["method"],
     displayFields: [NUM("amount", "Amount"), TEXT("method", "Method")],
     editableKeys: ["amount", "method"],
+  },
+  sales_review: {
+    table: "sales_invoices",
+    label: "Sales review",
+    icon: "📋",
+    dateColumn: "reviewed_at",
+    authorColumn: "reviewed_by",
+    arrivalColumn: "reviewed_at",
+    onlyWhereSet: "review_status",
+    noDelete: true,
+    searchColumns: ["reviewed_by", "customer", "delivery_no", "reported_by"],
+    displayFields: [
+      TEXT("review_status", "Review (approved / edited)"),
+      TEXT("reviewed_by", "Reviewed by"),
+      TEXT("customer", "Deliver to"),
+      NUM("qty", "Invoice qty"),
+      TEXT("delivery_no", "Deli"),
+      TEXT("reported_by", "Sale filed by"),
+    ],
+    // Clearing the status takes the review off the sale; the sale itself stays.
+    editableKeys: ["review_status", "reviewed_by"],
   },
 };
 

@@ -56,7 +56,16 @@ export const GUIDE: GuideSection[] = [
         body: [
           "Most charts have range buttons: Daily, Weekly, Monthly (last 30 days), 90 days, 6 months, Yearly.",
           "📅 Month shows one calendar month on its own, day by day (for example Oct 2026).",
+          "🗓 Dates picks any From and To days, or tick One day for a single date. The picked dates show on the button.",
           "Days are East Africa Time.",
+        ],
+      },
+      {
+        title: "Downloading to Excel",
+        body: [
+          "Every section with a table has a green ⬇ Excel button above it (on Finance, beside the tabs, for the open tab).",
+          "Pick the From and To days, or a quick pick (Today, Last 7 days, This month, Last month), then Download .xlsx.",
+          "The file holds the records filed in those days, one row per entry, one sheet per kind of record. Calculated sections (raw material, credit, monthly) export the same figures the screen shows.",
         ],
       },
       {

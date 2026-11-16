@@ -41,8 +41,8 @@ export async function GET(req: NextRequest) {
              created_at as "createdAt"
         from daily_reports order by created_at desc limit ${limit}
     `,
-    sql<{ id: string; full_name: string; positions: string[] }[]>`
-      select id, full_name, positions from telegram_users where archived_at is null order by full_name
+    sql<{ id: string; full_name: string; positions: string[]; capabilities: string[] | null }[]>`
+      select id, full_name, positions, capabilities from telegram_users where archived_at is null order by full_name
     `,
     /**
      * WHAT EACH PERSON ACTUALLY FILED, per EAT day.
@@ -63,7 +63,7 @@ export async function GET(req: NextRequest) {
              to_char((created_at at time zone 'Africa/Addis_Ababa')::date, 'YYYY-MM-DD') as day,
              count(*) as n
         from bot_activity
-       where action = 'submission'
+       where action in ('submission', 'sales_review')
          and created_at >= ${new Date(Date.now() - 30 * 86400000)}
        group by 1, 2
     `.catch(() => []),
@@ -74,7 +74,7 @@ export async function GET(req: NextRequest) {
              to_char((created_at at time zone 'Africa/Addis_Ababa')::date, 'YYYY-MM-DD') as day,
              count(*) as n
         from bot_activity
-       where action = 'submission'
+       where action in ('submission', 'sales_review')
          and created_at >= ${monthStart} and created_at < ${monthEnd}
        group by 1, 2
     `.catch(() => []),
@@ -102,11 +102,11 @@ export async function GET(req: NextRequest) {
   // Compliance is measured against each role's OWN submission tables. Counting
   // `daily_reports` alone meant roles that report through the guided flows could
   // never register a submission and sat at 0/7 forever.
-  const historyTables = [...new Set(expected.flatMap((u) => submissionTablesFor(u.positions)))];
+  const historyTables = [...new Set(expected.flatMap((u) => submissionTablesFor(u.positions, u.capabilities)))];
   const history = await reporterDaysByTable(cutoff30, historyTables);
 
   const compliance = expected.map((u) => {
-    const days = daysFor(history, u.full_name, u.positions);
+    const days = daysFor(history, u.full_name, u.positions, u.capabilities);
     const submitted7 = window7.filter((d) => days.has(d)).length;
     // Missed days ending today (a streak): count leading days with no submission.
     let missedStreak = 0;

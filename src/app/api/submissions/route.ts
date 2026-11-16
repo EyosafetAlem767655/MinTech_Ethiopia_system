@@ -110,7 +110,7 @@ export async function GET(req: NextRequest) {
   // from so the UI can label and act on it.
   const merged = results
     .flatMap(({ collection: key, rows }) =>
-      rows.map((r) => ({ ...r, _collection: key, _sortAt: sortInstant(r) }))
+      rows.map((r) => ({ ...r, _collection: key, _sortAt: sortInstant(r, SUBMISSIONS[key]) }))
     )
     .sort((a, b) => b._sortAt - a._sortAt)
     .slice(0, limit);
@@ -134,8 +134,8 @@ export async function GET(req: NextRequest) {
  * reached; the report was there, unfindable, and the screen read as the bot
  * having lost it.
  */
-function sortInstant(row: Record<string, unknown>): number {
-  const t = new Date(String(row.created_at ?? "")).getTime();
+function sortInstant(row: Record<string, unknown>, spec: SubmissionSpec): number {
+  const t = new Date(String(row[spec.arrivalColumn ?? "created_at"] ?? row.created_at ?? "")).getTime();
   return isNaN(t) ? 0 : t;
 }
 
@@ -176,6 +176,10 @@ async function queryCollection(
 ): Promise<Record<string, unknown>[] | null> {
   const { present } = opts;
   if (present.size === 0) return null;
+  // A view that depends on a column this database does not have yet (an
+  // unapplied migration) is unavailable, not "everything".
+  if (spec.onlyWhereSet && !present.has(spec.onlyWhereSet)) return null;
+  const arrival = spec.arrivalColumn && present.has(spec.arrivalColumn) ? spec.arrivalColumn : "created_at";
 
   const columns = Array.from(
     new Set(
@@ -237,7 +241,8 @@ async function queryCollection(
       from ${sql(spec.table)}
      where ${from ? sql`${sql(dateColumn)} >= ${lower}` : sql`true`}
        and ${to ? sql`${sql(dateColumn)} < ${upperExclusive}` : sql`true`}
-       and ${since ? sql`created_at >= ${since}` : sql`true`}
+       and ${since ? sql`${sql(arrival)} >= ${since}` : sql`true`}
+       and ${spec.onlyWhereSet ? sql`${sql(spec.onlyWhereSet)} is not null` : sql`true`}
        and ${
          q && searchColumns.length > 0
            ? sql`(${searchColumns
@@ -245,7 +250,7 @@ async function queryCollection(
                .reduce((a, b) => sql`${a} or ${b}`)})`
            : sql`true`
        }
-     order by ${byArrival ? sql`created_at desc` : sql`${sql(dateColumn)} desc, created_at desc`}
+     order by ${byArrival ? sql`${sql(arrival)} desc nulls last` : sql`${sql(dateColumn)} desc, created_at desc`}
      limit ${limit}
   `;
 }

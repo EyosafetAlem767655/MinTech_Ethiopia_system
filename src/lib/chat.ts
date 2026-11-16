@@ -636,8 +636,8 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<unk
       const dayStart = new Date(`${day}T00:00:00+03:00`);
       const dayEnd = new Date(dayStart.getTime() + 86_400_000);
 
-      const roster = await sql<{ full_name: string; positions: string[]; active: boolean }[]>`
-        select full_name, positions, active from telegram_users where active = true
+      const roster = await sql<{ full_name: string; positions: string[]; capabilities: string[] | null; active: boolean }[]>`
+        select full_name, positions, capabilities, active from telegram_users where active = true
       `;
       // Only roles that actually owe a daily report count as "missing" — holding
       // a receiver-only role (HR, admin) is not a failure to submit.
@@ -651,7 +651,7 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<unk
       // have something to work with.
       const filed = await sql<{ actor: string }[]>`
         select distinct actor from bot_activity
-         where action = 'submission' and ok = true
+         where action in ('submission', 'sales_review') and ok = true
            and created_at >= ${dayStart} and created_at < ${dayEnd}
       `;
 

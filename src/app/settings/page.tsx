@@ -1,6 +1,7 @@
 "use client";
 
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import ExcelExport from "@/components/ExcelExport";
 import {
   BOT_FUNCTIONALITIES,
   CAPABILITIES,
@@ -497,7 +498,7 @@ function SubmissionDetail(props: {
             <p className="text-[10px] font-bold uppercase tracking-wide text-clay-600">
               {spec.icon} {spec.label}
             </p>
-            <p className="text-[11px] text-stone-400">{fmtTime(String(row.created_at))}</p>
+            <p className="text-[11px] text-stone-400">{fmtTime(String(row[spec.arrivalColumn ?? "created_at"] ?? row.created_at))}</p>
           </div>
           <button onClick={onClose} className="rounded-full px-2 py-1 text-lg text-stone-400 hover:bg-clay-50" aria-label="Close">
             ✕
@@ -619,7 +620,7 @@ function SubmissionDetail(props: {
           ) : (
             <>
               {spec.editableKeys.length > 0 && canEdit && <SmallBtn label="✏️ Edit" disabled={busy} onClick={props.onEdit} />}
-              {isSuper && <SmallBtn label="🗑 Delete" tone="red" disabled={busy} onClick={props.onDelete} />}
+              {isSuper && !spec.noDelete && <SmallBtn label="🗑 Delete" tone="red" disabled={busy} onClick={props.onDelete} />}
               <SmallBtn label="Close" onClick={onClose} />
             </>
           )}
@@ -916,6 +917,9 @@ function SubmissionsTab() {
       <AiRecheckPanel />
 
       <div className="card space-y-3 p-4">
+        <div className="flex justify-end">
+          <ExcelExport dataset="submissions" />
+        </div>
         <select
           value={collection}
           disabled={loading}
@@ -1057,7 +1061,7 @@ function SubmissionsTab() {
                   </p>
                 ))}
                 <p className="text-[10px] text-stone-400">
-                  {fmtTime(String(row.created_at))}
+                  {fmtTime(String(row[spec.arrivalColumn ?? "created_at"] ?? row.created_at))}
                   {photoIds(row).length > 0 ? ` · 📷 ${photoIds(row).length}` : ""}
                 </p>
               </button>

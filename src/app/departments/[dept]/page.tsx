@@ -6,6 +6,8 @@ import type { ComponentType } from "react";
 import DepartmentReport from "@/components/DepartmentReport";
 import { LazySection } from "@/components/SectionStatus";
 import { PANEL_ANCHORS } from "@/lib/panel-anchors";
+import ExcelExport from "@/components/ExcelExport";
+import type { ExportDatasetKey } from "@/lib/export-keys";
 import { isDepartmentKey, type DepartmentKey } from "@/lib/departments";
 import BagControlPanel from "@/components/panels/BagControlPanel";
 import RawMaterialDailyPanel from "@/components/panels/RawMaterialDailyPanel";
@@ -114,6 +116,25 @@ const ANCHOR = new Map<ComponentType, string>([
   [FinancePanels, PANEL_ANCHORS.finance],
 ]);
 
+/**
+ * Each panel's ⬇ Excel export. Finance is absent: its tabs are different data,
+ * so FinancePanels puts the button beside the tab, for that tab's records.
+ */
+const EXPORT = new Map<ComponentType, ExportDatasetKey>([
+  [ProductionPanels, "production"],
+  [DowntimePanel, "downtime"],
+  [WhitenessPanel, "whiteness"],
+  [RawMaterialDailyPanel, "raw-material"],
+  [VoucherPanels, "vouchers"],
+  [StockOnHandPanel, "stock-on-hand"],
+  [PpBagUsagePanel, "pp-bag-usage"],
+  [PpBagDamagePanel, "pp-bag-damage"],
+  [ToolRequestsPanel, "purchase-requests"],
+  [StoreInventoryPanel, "store"],
+  [BagControlPanel, "bag-control"],
+  [SalesInvoicesPanel, "sales"],
+]);
+
 /** The Guide section that explains each department page. */
 const GUIDE_SECTION: Record<DepartmentKey, string> = {
   production: "production",
@@ -186,8 +207,14 @@ export default function DepartmentPage() {
         {panels.map((Panel, i) => {
           const title = dept === "asset_management" ? ASSET_TITLES.get(Panel) : undefined;
           const anchor = ANCHOR.get(Panel);
+          const exportKey = EXPORT.get(Panel);
           return (
             <div key={i} id={anchor} className={`scroll-mt-4 ${FULL_WIDTH.has(Panel) ? "lg:col-span-2" : ""}`}>
+              {exportKey && (
+                <div className="mb-1 flex justify-end">
+                  <ExcelExport dataset={exportKey} />
+                </div>
+              )}
               {title ? (
                 <LazySection title={title} anchor={anchor}>
                   <Panel />
