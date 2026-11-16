@@ -85,7 +85,7 @@ import { parseGrade1RawPaste, parseRawMaterialPaste } from "@/lib/raw-material-p
 import { parsePpBagPaste } from "@/lib/pp-bag-paste";
 import { parseHoursBlock, setHoursCells } from "@/lib/downtime-sheet";
 import { INVOICES_KEY, chosenInvoice, encodeInvoices, openCreditInvoices } from "@/lib/credit-bot";
-import { LOADS_KEY, PART_LABEL, chosenOwed, encodeLoads, loadRemaining, openRmLoads } from "@/lib/rm-credit";
+import { LOADS_KEY, PART_LABEL, chosenOwedList, encodeLoads, loadRemaining, openRmLoads } from "@/lib/rm-credit";
 import { SETTLED_TOLERANCE_ETB } from "@/lib/credit";
 import { reconcileBags } from "@/lib/stock-reconciliation";
 import { parseStoreGroupPaste } from "@/lib/store-count-paste";
@@ -1260,10 +1260,15 @@ const PICK_DONE = "done";
 
 function tickKeyboard(
   state: AssetFlowState,
-  step: { id: string; choices?: { label: string; value: string }[]; columns?: number }
+  step: {
+    id: string;
+    choices?: { label: string; value: string }[];
+    choicesFrom?: (d: Record<string, string | number>) => { label: string; value: string }[];
+    columns?: number;
+  }
 ) {
   const chosen = ticked(state.draft, step.id);
-  const buttons = (step.choices || []).map((c) => ({
+  const buttons = choicesOf(step, state.draft).map((c) => ({
     text: `${chosen.includes(c.value) ? "✅" : "▫️"} ${c.label}`,
     callback_data: `pick:${state.kind}:${step.id}:${c.value}`,
   }));
@@ -1285,8 +1290,10 @@ async function askAssetStep(chatId: string, state: AssetFlowState): Promise<void
     });
     return;
   }
-  const step = findStep(state.kind, state.step, state.draft);
-  if (!step) return;
+  const found = findStep(state.kind, state.step, state.draft);
+  if (!found) return;
+  // A question that names what it asks about is worked out from the answers so far.
+  const step = found.promptFrom ? { ...found, prompt: found.promptFrom(state.draft) } : found;
 
   if (step.type === "date") {
     await sendMessage(chatId, step.prompt, {
@@ -2436,24 +2443,23 @@ export async function POST(req: NextRequest) {
             runAfter(sendCreditBalanceNote(chatId, invoiceId));
           }
 
-          // The same for a raw-material load: what is still owed on it now.
+          // The same for raw-material loads: what is still owed on each one paid.
           if (state.kind === "rm_credit_payment") {
-            const owed = chosenOwed(state.draft);
-            if (owed) {
-              const { load, part } = owed;
-              const who = part === "driver" ? load.driverName || "ሹፌር" : load.owner || load.supplier;
+            const items = chosenOwedList(state.draft);
+            if (items.length > 0) {
               runAfter(
-                loadRemaining(load.id, part)
-                  .then((left) =>
-                    left === null
-                      ? undefined
-                      : sendMessage(
-                          chatId,
-                          left <= 1
-                            ? `✅ <b>${escapeHtml(who)}</b> — የዚህ ጭነት (${escapeHtml(load.truckPlate || load.date)}) ${PART_LABEL[part]} ክፍያ ሙሉ በሙሉ ተከፍሏል።`
-                            : `🚚 <b>${escapeHtml(who)}</b> — ከዚህ ጭነት ${PART_LABEL[part]} የሚቀር: <b>${Math.round(left).toLocaleString("en-US")}</b> ብር።`
-                        )
-                  )
+                Promise.all(items.map((o) => loadRemaining(o.load.id, o.part)))
+                  .then((lefts) => {
+                    const lines = items.map((o, i) => {
+                      const left = lefts[i];
+                      const what = `<b>${escapeHtml(o.who)}</b> · ${escapeHtml(o.load.truckPlate || o.load.date)} · ${PART_LABEL[o.part]}`;
+                      if (left === null) return `• ${what}`;
+                      return left <= 1
+                        ? `✅ ${what} — ሙሉ በሙሉ ተከፍሏል።`
+                        : `⏳ ${what} — የሚቀር: <b>${Math.round(left).toLocaleString("en-US")}</b> ብር`;
+                    });
+                    return sendMessage(chatId, `🚚 ከክፍያው በኋላ፦\n${lines.join("\n")}`);
+                  })
                   .catch((e) => console.warn("rm credit balance note skipped:", e))
               );
             }

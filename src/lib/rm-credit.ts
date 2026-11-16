@@ -27,6 +27,8 @@ export interface RmCreditPayment {
   paidOn: string;
   note: string | null;
   recordedBy: string;
+  /** Ties the rows of one payment made over several loads (0048); null otherwise. */
+  batchId?: string | null;
 }
 
 export interface RmCreditLoad {
@@ -85,8 +87,9 @@ export async function rmCreditLoads(): Promise<RmCreditLoad[]> {
     if (loads.length === 0) return [];
     const ids = loads.map((l) => String(l.id));
     const payments = await sql<Record<string, unknown>[]>`
-      select id, credit_id, part, amount, paid_on, note, recorded_by
-        from raw_material_credit_payments
+      select id, credit_id, part, amount, paid_on, note, recorded_by,
+             to_jsonb(p) ->> 'batch_id' as batch_id
+        from raw_material_credit_payments p
        where credit_id = any(${ids})
        order by paid_on, created_at
     `.catch((e) => {
@@ -110,6 +113,7 @@ export async function rmCreditLoads(): Promise<RmCreditLoad[]> {
           paidOn: new Date(String(p.paid_on)).toISOString().slice(0, 10),
           note: (p.note as string) ?? null,
           recordedBy: String(p.recorded_by),
+          batchId: (p.batch_id as string) || null,
         },
       ]);
     }
@@ -274,11 +278,26 @@ export async function loadRemaining(id: string, part?: RmPart): Promise<number |
 
 export const PART_LABEL: Record<RmPart, string> = { material: "ጥሬ ዕቃ", driver: "ሹፌር" };
 
-/** Every unpaid part of every open load, oldest first — one button each. */
-export function owedChoices(draft: Record<string, string | number>) {
-  const out: { label: string; value: string }[] = [];
-  const loads = decodeLoads(draft).sort((a, b) => a.date.localeCompare(b.date));
-  for (const l of loads) {
+/** One unpaid part of one open load: what a payment can be put against. */
+export interface OwedItem {
+  /**
+   * Short and stable within the flow: the load's place in the draft's list and
+   * the part ("3m", "3d"). A tick button carries it, and Telegram allows 64
+   * bytes of button data, which a load's uuid alone nearly fills.
+   */
+  code: string;
+  load: OpenLoad;
+  part: RmPart;
+  /** Still owed on this part when the flow opened. */
+  left: number;
+  /** Who is paid: the quarry owner, or the driver. */
+  who: string;
+}
+
+/** Every unpaid part of every open load, oldest first. */
+export function owedItems(draft: Record<string, string | number>): OwedItem[] {
+  const out: OwedItem[] = [];
+  decodeLoads(draft).forEach((l, i) => {
     const parts: [RmPart, number][] = [
       ["material", l.materialLeft ?? l.remaining],
       ["driver", l.driverLeft ?? 0],
@@ -286,21 +305,92 @@ export function owedChoices(draft: Record<string, string | number>) {
     for (const [part, left] of parts) {
       if (left <= RM_SETTLED_ETB) continue;
       const who = part === "driver" ? l.driverName || "ሹፌር" : l.owner || l.supplier;
-      out.push({
-        label: `${l.date} · ${who} · ${l.truckPlate || "—"} · ${l.material} ${l.tonnes}t · ${PART_LABEL[part]} ${money(left)} ቀሪ`,
-        value: `${l.id}|${part}`,
-      });
+      out.push({ code: `${i}${part === "driver" ? "d" : "m"}`, load: l, part, left, who });
     }
-  }
-  return out;
+  });
+  return out.sort((a, b) => a.load.date.localeCompare(b.load.date) || a.code.localeCompare(b.code));
 }
 
-/** The load and part picked on the payment form, with what was left on it. */
-export function chosenOwed(draft: Record<string, string | number>): { load: OpenLoad; part: RmPart; left: number } | null {
-  const [id, rawPart] = String(draft.owed || "").split("|");
-  const load = decodeLoads(draft).find((l) => l.id === id);
-  if (!load) return null;
-  const part: RmPart = rawPart === "driver" ? "driver" : "material";
-  const left = part === "driver" ? load.driverLeft ?? 0 : load.materialLeft ?? load.remaining;
-  return { load, part, left };
+/** One line naming an unpaid item, for the buttons, the questions and the card. */
+export function owedLabel(o: OwedItem): string {
+  const l = o.load;
+  return `${l.date} · ${o.who} · ${l.truckPlate || "—"} · ${l.material} ${l.tonnes}t · ${PART_LABEL[o.part]} ${money(o.left)} ቀሪ`;
+}
+
+/** The tick buttons: every unpaid item, oldest first. */
+export function owedChoices(draft: Record<string, string | number>) {
+  return owedItems(draft).map((o) => ({ label: owedLabel(o), value: o.code }));
+}
+
+/** The draft step holding the ticked items (comma-joined codes). */
+export const OWED_STEP = "owed";
+
+/**
+ * The items ticked on the payment form, oldest first. A draft begun before the
+ * tick list (one "uuid|part" value) still reads as its one item.
+ */
+export function chosenOwedList(draft: Record<string, string | number>): OwedItem[] {
+  const raw = String(draft[OWED_STEP] || "");
+  const items = owedItems(draft);
+  if (raw.includes("|")) {
+    const [id, part] = raw.split("|");
+    return items.filter((o) => o.load.id === id && o.part === (part === "driver" ? "driver" : "material"));
+  }
+  const codes = new Set(raw.split(",").map((c) => c.trim()).filter(Boolean));
+  return items.filter((o) => codes.has(o.code));
+}
+
+/** How a payment over several items is entered. */
+export type PayMode = "each" | "total";
+export const PAY_MODE_STEP = "payMode";
+/** Above this many ticked items, typing each amount is not offered: one total, split. */
+export const MAX_EACH_AMOUNTS = 12;
+export const eachAmountStep = (i: number) => `amt${i}`;
+
+export function payModeOf(draft: Record<string, string | number>): PayMode {
+  const n = chosenOwedList(draft).length;
+  if (n <= 1) return "total";
+  if (n > MAX_EACH_AMOUNTS) return "total";
+  return draft[PAY_MODE_STEP] === "each" ? "each" : "total";
+}
+
+export interface Allocation {
+  item: OwedItem;
+  /** Put on this item now. */
+  amount: number;
+  /** Owed on it before this payment (the live figure at save, the draft's before). */
+  owedBefore: number;
+  /** Still owed after it. */
+  leftAfter: number;
+}
+
+/**
+ * One total over the ticked items: the OLDEST is paid off first, then the next,
+ * and what remains goes on the last as a part payment. `over` is what the
+ * total exceeds everything ticked by (to be refused, never silently kept).
+ */
+export function splitOldestFirst(items: { item: OwedItem; owed: number }[], total: number): { rows: Allocation[]; over: number } {
+  let rest = round2(total);
+  const rows = items.map(({ item, owed }) => {
+    const amount = round2(Math.max(0, Math.min(rest, owed)));
+    rest = round2(rest - amount);
+    return { item, amount, owedBefore: owed, leftAfter: round2(owed - amount) };
+  });
+  return { rows, over: Math.max(0, rest) };
+}
+
+/** The payment as entered on the form, against the figures it carries. */
+export function draftAllocation(draft: Record<string, string | number>): { rows: Allocation[]; total: number; over: number } {
+  const items = chosenOwedList(draft);
+  if (payModeOf(draft) === "each") {
+    const rows = items.map((item, i) => {
+      const amount = round2(Number(draft[eachAmountStep(i + 1)]) || 0);
+      return { item, amount, owedBefore: item.left, leftAfter: round2(item.left - amount) };
+    });
+    const over = round2(rows.reduce((a, r) => a + Math.max(0, r.amount - r.owedBefore), 0));
+    return { rows, total: round2(rows.reduce((a, r) => a + r.amount, 0)), over };
+  }
+  const total = round2(Number(draft.amount) || 0);
+  const { rows, over } = splitOldestFirst(items.map((item) => ({ item, owed: item.left })), total);
+  return { rows, total, over };
 }

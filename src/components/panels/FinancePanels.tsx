@@ -105,6 +105,8 @@ interface RmPayment {
   paidOn: string;
   note: string | null;
   recordedBy: string;
+  /** One payment made over several loads shares this (0048). */
+  batchId?: string | null;
 }
 
 interface RmLoad {
@@ -130,6 +132,41 @@ interface RmLoad {
   payments: RmPayment[];
 }
 
+/** One payment as it was made: one load, or several paid together. */
+interface RmPaymentGroup {
+  key: string;
+  paidOn: string;
+  recordedBy: string;
+  note: string | null;
+  total: number;
+  lines: { load: RmLoad; payment: RmPayment; leftNow: number }[];
+}
+
+/** Every payment, the rows of one multi-load payment folded together, newest first. */
+function groupRmPayments(loads: RmLoad[]): RmPaymentGroup[] {
+  const by = new Map<string, RmPaymentGroup>();
+  for (const load of loads) {
+    for (const payment of load.payments) {
+      const key = payment.batchId || payment.id;
+      const g = by.get(key) ?? {
+        key,
+        paidOn: payment.paidOn,
+        recordedBy: payment.recordedBy,
+        note: payment.note,
+        total: 0,
+        lines: [],
+      };
+      g.total += payment.amount;
+      const leftNow = Math.max(0, payment.part === "driver" ? load.driverLeft ?? 0 : load.materialLeft ?? load.remaining);
+      g.lines.push({ load, payment, leftNow });
+      by.set(key, g);
+    }
+  }
+  return [...by.values()]
+    .map((g) => ({ ...g, lines: g.lines.sort((a, b) => a.load.date.localeCompare(b.load.date)) }))
+    .sort((a, b) => b.paidOn.localeCompare(a.paidOn) || b.total - a.total);
+}
+
 interface RmData {
   loads: RmLoad[];
   suppliers: { supplier: string; loads: number; open: number; tonnes: number; amount: number; paid: number; remaining: number }[];
@@ -145,6 +182,7 @@ function RmCreditTab() {
   const [data, setData] = useState<RmData | null>(null);
   const [showSettled, setShowSettled] = useState(false);
   const [openId, setOpenId] = useState<string | null>(null);
+  const [allPayments, setAllPayments] = useState(false);
 
   useEffect(() => {
     fetch("/api/finance/rm-credit")
@@ -155,6 +193,8 @@ function RmCreditTab() {
 
   if (!data) return <div className="card h-40 animate-pulse bg-clay-50" />;
   const loads = data.loads.filter((l) => showSettled || l.status === "open");
+  const paymentGroups = groupRmPayments(data.loads);
+  const batchOf = new Map(paymentGroups.filter((g) => g.lines.length > 1).map((g) => [g.key, g]));
 
   return (
     <section className="space-y-3">
@@ -292,6 +332,12 @@ function RmCreditTab() {
                                   💸 {fmtDate(p.paidOn)} · {p.part === "driver" ? "🧑‍✈️ driver" : "🧱 raw material"} ·{" "}
                                   <b className="tabular-nums">{fmt(p.amount, 0)} ETB</b> · {p.recordedBy}
                                   {p.note ? <span className="text-stone-400"> — {p.note}</span> : null}
+                                  {p.batchId && batchOf.has(p.batchId) ? (
+                                    <span className="ml-1 rounded-full bg-sky-50 px-1.5 py-0.5 text-[10px] font-bold text-sky-800">
+                                      part of one payment of {fmt(batchOf.get(p.batchId)!.total, 0)} ETB over{" "}
+                                      {batchOf.get(p.batchId)!.lines.length} loads
+                                    </span>
+                                  ) : null}
                                 </li>
                               ))}
                             </ul>
@@ -308,6 +354,59 @@ function RmCreditTab() {
               </tbody>
             </table>
           </div>
+
+          {/* Payments, as they were made: one paid over several loads is one entry. */}
+          <div className="flex items-center justify-between px-1">
+            <p className="text-[11px] font-bold uppercase tracking-widest text-clay-500">Payments</p>
+            {paymentGroups.length > 10 && (
+              <button onClick={() => setAllPayments((a) => !a)} className="text-[11px] font-bold text-clay-600">
+                {allPayments ? "Show the latest 10" : `Show all ${paymentGroups.length}`}
+              </button>
+            )}
+          </div>
+          {paymentGroups.length === 0 ? (
+            <p className="card p-4 text-sm text-stone-400">No payment recorded yet. A payment is filed from the bot with 💸.</p>
+          ) : (
+            <div className="space-y-2">
+              {(allPayments ? paymentGroups : paymentGroups.slice(0, 10)).map((g) => (
+                <div key={g.key} className="card p-3">
+                  <div className="flex flex-wrap items-baseline justify-between gap-2">
+                    <p className="text-xs font-bold text-stone-800">
+                      💸 {fmtDate(g.paidOn)} ·{" "}
+                      <span className="tabular-nums text-green-700">{fmt(g.total, 0)} ETB</span>
+                      {g.lines.length > 1 && (
+                        <span className="ml-1 rounded-full bg-sky-50 px-1.5 py-0.5 text-[10px] font-bold text-sky-800">
+                          over {g.lines.length} loads
+                        </span>
+                      )}
+                    </p>
+                    <p className="text-[10px] text-stone-400">
+                      {g.recordedBy}
+                      {g.note ? ` · ${g.note}` : ""}
+                    </p>
+                  </div>
+                  <ul className="mt-1.5 space-y-0.5 text-[11px] text-stone-600">
+                    {g.lines.map(({ load, payment, leftNow }) => (
+                      <li key={payment.id} className="flex flex-wrap justify-between gap-x-3">
+                        <span>
+                          🚚 {fmtDate(load.date)} · {load.truckPlate || "—"} · {load.material} {fmt(load.tonnes, 2)} t ·{" "}
+                          {payment.part === "driver" ? `🧑‍✈️ ${load.driverName || "driver"}` : `🧱 ${load.quarryOwner || load.supplier}`}
+                        </span>
+                        <span className="tabular-nums">
+                          <b>{fmt(payment.amount, 0)}</b>
+                          {leftNow <= 1 ? (
+                            <span className="ml-1 font-bold text-green-700">✓ paid in full</span>
+                          ) : (
+                            <span className="ml-1 text-amber-700">{fmt(leftNow, 0)} owed now</span>
+                          )}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+          )}
         </>
       )}
     </section>

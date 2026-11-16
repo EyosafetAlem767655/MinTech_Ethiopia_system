@@ -64,7 +64,20 @@ import { NO_MACHINE, decodeMachines } from "@/lib/machines";
 import { createCustomItems } from "@/lib/store-custom";
 import { eatDateLabel } from "@/lib/dates";
 import { chosenCustomerName, chosenInvoice, customerChoices, invoiceChoices, invoicesFor } from "@/lib/credit-bot";
-import { PART_LABEL, chosenOwed, loadRemaining, owedChoices } from "@/lib/rm-credit";
+import {
+  MAX_EACH_AMOUNTS,
+  OWED_STEP,
+  PAY_MODE_STEP,
+  PART_LABEL,
+  chosenOwedList,
+  draftAllocation,
+  eachAmountStep,
+  loadRemaining,
+  owedChoices,
+  owedLabel,
+  payModeOf,
+  splitOldestFirst,
+} from "@/lib/rm-credit";
 import { SETTLED_TOLERANCE_ETB } from "@/lib/credit";
 import {
   HOURS_KINDS,
@@ -292,6 +305,11 @@ export interface AssetStep {
    * (the machine names already used), and a new name is simply typed.
    */
   freeText?: boolean;
+  /**
+   * The question worked out from the answers so far, for a step that has to
+   * name what it asks about ("load 2 of 3 · 12/11 · AA-3-12345 …").
+   */
+  promptFrom?: (draft: Record<string, string | number>) => string;
 }
 
 /* ─────────────────────────────── Step tables ──────────────────────────────── */
@@ -1278,20 +1296,72 @@ const RM_CREDIT_PURCHASE_STEPS: AssetStep[] = [
 ];
 
 /**
- * Money paid later. Everything still unpaid pops up as one list — each load's
- * raw material and its driver's fee as separate buttons — and the amount may
- * be part of what is left.
+ * Money paid later. Everything still unpaid pops up as one tick list — each
+ * load's raw material and its driver's fee as separate buttons — and one
+ * payment may cover several of them, in either of two ways:
+ *
+ *   * each: an amount typed for every ticked load;
+ *   * total: one figure, split oldest first — the oldest ticked load is paid
+ *     off, then the next, and what remains goes on the last as a part payment.
+ *
+ * One ticked load asks one amount, as before. The review card shows which
+ * loads end fully paid and what is left on the others.
  */
 const RM_CREDIT_PAYMENT_STEPS: AssetStep[] = [
   { id: "date", prompt: "📅 የተከፈለበትን ቀን ይምረጡ።", type: "date" },
   {
-    id: "owed",
+    id: OWED_STEP,
     label: "Unpaid",
-    prompt: "📋 ያልተከፈሉ — የትኛው ነው የተከፈለው? <i>(ቀን · ለማን · ታርጋ · ዓይነት · ቀሪ ብር)</i>",
-    type: "choice",
+    prompt:
+      "📋 ያልተከፈሉ — የተከፈሉትን ይንኩ (አንድ ወይም ብዙ)፣ ከዚያ ✅ ጨርሻለሁ ይጫኑ።\n" +
+      "<i>(ቀን · ለማን · ታርጋ · ዓይነት · ቀሪ ብር)</i>",
+    type: "multichoice",
     choicesFrom: owedChoices,
   },
-  { id: "amount", label: "Amount", prompt: "💰 ስንት ብር ተከፈለ? (ከፊል ክፍያ ሊሆን ይችላል)", type: "number" },
+  {
+    id: PAY_MODE_STEP,
+    label: "How it is paid",
+    prompt: "💰 ክፍያውን እንዴት ያስገባሉ?",
+    type: "choice",
+    choices: [
+      { label: "📋 ለእያንዳንዱ ጭነት ለየብቻ (Each load its own amount)", value: "each" },
+      { label: "💰 ጠቅላላ ብር — ሲስተሙ ያከፋፍላል (One total, split oldest first)", value: "total" },
+    ],
+    when: (d) => {
+      const n = chosenOwedList(d).length;
+      return n > 1 && n <= MAX_EACH_AMOUNTS;
+    },
+  },
+  {
+    id: "amount",
+    label: "Amount",
+    prompt: "💰 ስንት ብር ተከፈለ? (ከፊል ክፍያ ሊሆን ይችላል)",
+    promptFrom: (d) => {
+      const items = chosenOwedList(d);
+      if (items.length <= 1) return "💰 ስንት ብር ተከፈለ? (ከፊል ክፍያ ሊሆን ይችላል)";
+      const owed = items.reduce((a, o) => a + o.left, 0);
+      return (
+        `💰 በጠቅላላ ስንት ብር ተከፈለ? (የተመረጡት ${items.length} ዕዳ: <b>${money(owed)}</b> ብር)\n` +
+        "<i>ሲስተሙ ከቀደመው ጭነት ጀምሮ ሙሉ በሙሉ ይከፍላል፤ የሚተርፈው በመጨረሻው ላይ ከፊል ክፍያ ይሆናል።</i>"
+      );
+    },
+    type: "number",
+    when: (d) => payModeOf(d) === "total",
+  },
+  ...Array.from({ length: MAX_EACH_AMOUNTS }, (_, k): AssetStep => ({
+    id: eachAmountStep(k + 1),
+    label: `Amount ${k + 1}`,
+    prompt: `💰 ጭነት ${k + 1} — ስንት ብር ተከፈለ?`,
+    promptFrom: (d) => {
+      const list = chosenOwedList(d);
+      const o = list[k];
+      return o
+        ? `💰 ${k + 1}/${list.length} · ${esc(owedLabel(o))}\nለዚህ ስንት ብር ተከፈለ? (ካልተከፈለ 0፣ ሙሉው <b>${money(o.left)}</b>)`
+        : `💰 ጭነት ${k + 1} — ስንት ብር ተከፈለ?`;
+    },
+    type: "number",
+    when: (d) => payModeOf(d) === "each" && chosenOwedList(d).length > k,
+  })),
   { id: "note", label: "Note", prompt: "🗒 ማስታወሻ ካለ ይፃፉ።", type: "text", skippable: true },
 ];
 
@@ -2501,19 +2571,35 @@ export function assetPreview(state: AssetFlowState): string {
   }
 
   if (state.kind === "rm_credit_payment") {
-    const owed = chosenOwed(d);
-    const paid = Number(d.amount) || 0;
-    const left = owed ? Math.round((owed.left - paid) * 100) / 100 : 0;
-    const who = owed ? (owed.part === "driver" ? owed.load.driverName || "ሹፌር" : owed.load.owner || owed.load.supplier) : "";
+    const { rows, total, over } = draftAllocation(d);
+    const owedAll = rows.reduce((a, r) => a + r.owedBefore, 0);
+    const lines = rows.map((r, i) => {
+      const l = r.item.load;
+      const status =
+        r.amount <= 0
+          ? "▫️ አልተከፈለም"
+          : r.leftAfter <= 1
+            ? "✅ ሙሉ በሙሉ ተከፈለ"
+            : `⏳ ከፊል · የሚቀር <b>${money(r.leftAfter)}</b>`;
+      return (
+        `${i + 1}. 🚚 ${esc(l.date)} · ${esc(l.truckPlate || "—")} · ${esc(l.material)} ${qty(l.tonnes)} t\n` +
+        `   👤 ${PART_LABEL[r.item.part]}: <b>${esc(r.item.who)}</b> · ዕዳ ${money(r.owedBefore)} → ` +
+        `ክፍያ <b>${money(r.amount)}</b> · ${status}`
+      );
+    });
+    const mode = rows.length > 1 ? (payModeOf(d) === "each" ? "📋 ለየብቻ (each load)" : "💰 ጠቅላላ — ከቀደመው ጀምሮ (oldest first)") : "";
+    const full = rows.filter((r) => r.amount > 0 && r.leftAfter <= 1).length;
+    const part = rows.filter((r) => r.amount > 0 && r.leftAfter > 1).length;
     return (
       head +
       `📅 Date: ${esc(d.date)}\n` +
-      (owed
-        ? `🚚 ጭነት: ${esc(owed.load.date)} · ${esc(owed.load.truckPlate || "—")} · ${esc(owed.load.material)} ${qty(owed.load.tonnes)} t\n` +
-          `👤 ${PART_LABEL[owed.part]}: <b>${esc(who)}</b> · ዕዳ <b>${money(owed.left)}</b>\n`
-        : "") +
-      `💰 የተከፈለ: <b>${money(paid)}</b>\n` +
-      (owed ? (left <= 1 ? "✅ ይህ ሙሉ በሙሉ ይከፈላል።\n" : `⏳ ከክፍያ በኋላ የሚቀር: <b>${money(left)}</b>\n`) : "") +
+      (mode ? `🧮 ${mode}\n` : "") +
+      (lines.length ? lines.join("\n") + "\n" : "") +
+      `\n💰 ጠቅላላ የተከፈለ: <b>${money(total)}</b> ብር` +
+      (rows.length > 1 ? ` · የተመረጡት ዕዳ ${money(owedAll)}` : "") +
+      "\n" +
+      (rows.length > 0 ? `✅ ሙሉ በሙሉ የተከፈሉ: ${full} · ⏳ ከፊል: ${part}\n` : "") +
+      (over > 1 ? `⚠️ ከዕዳው በ <b>${money(over)}</b> ብር ይበልጣል — እባክዎ ያስተካክሉ።\n` : "") +
       `🗒 ማስታወሻ: ${esc(d.note) || "—"}\n`
     );
   }
@@ -2834,23 +2920,67 @@ export async function saveAssetReport(
   }
 
   if (state.kind === "rm_credit_payment") {
-    const owed = chosenOwed(d);
-    const amount = Math.round((Number(d.amount) || 0) * 100) / 100;
-    if (!owed) throw new Error("Nothing unpaid was chosen for this payment.");
-    if (!(amount > 0)) throw new Error("A payment has to be more than zero.");
-    // Read again HERE: somebody may have recorded a payment on the same load
+    const items = chosenOwedList(d);
+    if (items.length === 0) throw new Error("Nothing unpaid was chosen for this payment.");
+    // Read again HERE: somebody may have recorded a payment on the same loads
     // while this one was being filled in.
-    const outstanding = await loadRemaining(owed.load.id, owed.part);
-    if (outstanding === null) throw new Error("That load no longer exists.");
-    if (amount > outstanding + 1) {
-      throw new Error(`That is more than is owed — ${money(outstanding)} ETB is outstanding on it.`);
+    const live = await Promise.all(items.map((item) => loadRemaining(item.load.id, item.part)));
+    if (live.some((v) => v === null)) throw new Error("One of those loads no longer exists.");
+    const owedNow = items.map((item, i) => ({ item, owed: Math.max(0, Number(live[i])) }));
+
+    let rows: { item: (typeof items)[number]; amount: number }[];
+    if (payModeOf(d) === "each") {
+      rows = owedNow.map(({ item, owed }, i) => {
+        const amount = Math.round((Number(d[eachAmountStep(i + 1)]) || 0) * 100) / 100;
+        if (amount > owed + 1) {
+          throw new Error(
+            `${item.load.date} ${item.load.truckPlate || ""}: that is more than is owed — ${money(owed)} ETB is outstanding on it.`
+          );
+        }
+        return { item, amount };
+      });
+    } else {
+      const total = Math.round((Number(d.amount) || 0) * 100) / 100;
+      const split = splitOldestFirst(owedNow, total);
+      if (split.over > 1) {
+        throw new Error(`That is more than is owed — ${money(total - split.over)} ETB is outstanding on what was ticked.`);
+      }
+      rows = split.rows;
     }
-    const [row] = await sql<{ id: string }[]>`
-      insert into raw_material_credit_payments (credit_id, part, amount, paid_on, note, recorded_by)
-      values (${owed.load.id}::uuid, ${owed.part}, ${amount}, ${eatDateLabel(reportDate(d.date))}::date,
-              ${String(d.note || "") || null}, ${reportedBy})
-      returning id`;
-    return { id: row.id, table: "raw_material_credit_payments" };
+    rows = rows.filter((r) => r.amount > 0);
+    if (rows.length === 0) throw new Error("A payment has to be more than zero.");
+
+    // One payment over several loads is one batch (0048), so the dashboard can
+    // show it as the single payment it was. Without the column it is saved
+    // exactly as before, one row per load.
+    const batch = rows.length > 1 ? crypto.randomUUID() : null;
+    const paidOn = eatDateLabel(reportDate(d.date));
+    const note = String(d.note || "") || null;
+    const hasBatch =
+      (
+        await sql`
+          select 1 from information_schema.columns
+           where table_name = 'raw_material_credit_payments' and column_name = 'batch_id'`
+      ).length > 0;
+    // All of it or none of it: half a payment saved would leave loads owing
+    // what was paid on them.
+    const ids = await sql.begin(async (tx) => {
+      const out: string[] = [];
+      for (const r of rows) {
+        const [row] = hasBatch
+          ? await tx<{ id: string }[]>`
+              insert into raw_material_credit_payments (credit_id, part, amount, paid_on, note, recorded_by, batch_id)
+              values (${r.item.load.id}::uuid, ${r.item.part}, ${r.amount}, ${paidOn}::date, ${note}, ${reportedBy}, ${batch}::uuid)
+              returning id`
+          : await tx<{ id: string }[]>`
+              insert into raw_material_credit_payments (credit_id, part, amount, paid_on, note, recorded_by)
+              values (${r.item.load.id}::uuid, ${r.item.part}, ${r.amount}, ${paidOn}::date, ${note}, ${reportedBy})
+              returning id`;
+        out.push(row.id);
+      }
+      return out;
+    });
+    return { id: ids[0], table: "raw_material_credit_payments" };
   }
 
   if (state.kind === "credit_payment") {

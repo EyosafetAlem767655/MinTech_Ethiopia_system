@@ -258,7 +258,9 @@ export const GUIDE: GuideSection[] = [
         title: "🚚 RM credit",
         body: [
           "Raw material bought on credit, one row per truck: quarry owner, agent, plate, tonnes, amount, paid and owed.",
-          "Tap a load to see or record its payments.",
+          "Tap a load to see its payments.",
+          "Payments lists every payment as it was made: one paid over several loads is one entry, with each load's share and whether it is now paid in full.",
+          "In the bot (💸), tick one or more loads, then type each load's amount, or one total that is split oldest first (the oldest load is paid off first, the rest goes on the next).",
         ],
         source: "🚚 Raw material credit purchase, 💸 Raw material credit payment.",
         href: "/departments/finance?tab=rmcredit",
