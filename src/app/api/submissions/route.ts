@@ -202,6 +202,21 @@ async function queryCollection(
   // Photos kept in a child table are aggregated into the same `photo_ids` shape
   // the UI already uses for a uuid[] column, so the two storage layouts are
   // indistinguishable to everything downstream.
+  // jsonb fields shown one by one (the whiteness readings), and the columns of
+  // the row this one belongs to (the load a payment paid).
+  const jsonSelect =
+    spec.jsonFields && present.has(spec.jsonFields.column)
+      ? spec.jsonFields.keys.map((k) => sql`, ${sql(spec.jsonFields!.column)} ->> ${k} as ${sql(k)}`).reduce((a, b) => sql`${a}${b}`, sql``)
+      : sql``;
+  const pf = spec.parentFields;
+  const parentSelect = pf
+    ? pf.columns
+        .map(
+          (c) =>
+            sql`, (select p.${sql(c.column)} from ${sql(pf.table)} p where p.id = ${sql(spec.table)}.${sql(pf.foreignKey)}) as ${sql(c.as)}`
+        )
+        .reduce((a, b) => sql`${a}${b}`, sql``)
+    : sql``;
   const join = spec.photoJoin;
   const photoIdsSelect = join
     ? sql`, coalesce((
@@ -237,7 +252,7 @@ async function queryCollection(
   const byArrival = !from && !to;
 
   return await sql<Record<string, unknown>[]>`
-    select ${sql(columns)}${photoIdsSelect}
+    select ${sql(columns)}${photoIdsSelect}${jsonSelect}${parentSelect}
       from ${sql(spec.table)}
      where ${from ? sql`${sql(dateColumn)} >= ${lower}` : sql`true`}
        and ${to ? sql`${sql(dateColumn)} < ${upperExclusive}` : sql`true`}

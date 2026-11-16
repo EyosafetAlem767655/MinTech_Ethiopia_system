@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import sql, { first, isUuid } from "@/lib/sql";
 import { logActivity } from "@/lib/bot-auth";
 import { binSubmission } from "@/lib/recycle-bin";
+import { parseWhitenessReading, whitenessAverage } from "@/lib/asset-flows";
 import {
   childTablesOf,
   isSubmissionCollection,
@@ -85,8 +86,17 @@ export async function PATCH(req: NextRequest, { params }: { params: { collection
 
   // Only fields the registry marks editable, and only those actually sent.
   const patch: Record<string, unknown> = {};
+  // Fields kept inside a jsonb column (the whiteness readings) are gathered
+  // apart and merged into what is stored, below.
+  const jsonKeys = new Set(spec.jsonFields?.keys ?? []);
+  const jsonPatch: Record<string, string> = {};
   for (const key of spec.editableKeys) {
     if (!(key in body)) continue;
+    if (jsonKeys.has(key)) {
+      const raw = body[key];
+      jsonPatch[key] = spec.table === "whiteness_checks" ? parseWhitenessReading(String(raw ?? "")) : String(raw ?? "").trim();
+      continue;
+    }
     const field = spec.displayFields.find((f) => f.key === key);
     const raw = body[key];
     if (field?.type === "number") {
@@ -108,20 +118,43 @@ export async function PATCH(req: NextRequest, { params }: { params: { collection
     }
   }
 
-  if (Object.keys(patch).length === 0) {
+  if (Object.keys(patch).length === 0 && Object.keys(jsonPatch).length === 0) {
     return NextResponse.json({ error: "Nothing to update." }, { status: 400 });
   }
 
-  await sql`update ${sql(spec.table)} set ${sql(patch)} where id = ${params.id}`;
+  // A payment is positive by constraint; say so rather than fail on it.
+  if (spec.table === "raw_material_credit_payments" && "amount" in patch && !(Number(patch.amount) > 0)) {
+    return NextResponse.json({ error: "A payment must be more than 0. Delete it instead if it was not made." }, { status: 400 });
+  }
+
+  if (Object.keys(patch).length > 0) {
+    await sql`update ${sql(spec.table)} set ${sql(patch)} where id = ${params.id}`;
+  }
+
+  if (spec.jsonFields && Object.keys(jsonPatch).length > 0) {
+    const column = spec.jsonFields.column;
+    const [current] = await sql<{ v: Record<string, string> | null }[]>`
+      select ${sql(column)} as v from ${sql(spec.table)} where id = ${params.id}`;
+    const merged = { ...(current?.v ?? {}), ...jsonPatch };
+    if (spec.table === "whiteness_checks") {
+      // The average follows the readings, worked out the way the bot does.
+      await sql`
+        update whiteness_checks
+           set readings = ${sql.json(merged)}, avg = ${whitenessAverage(merged)}, updated_at = now()
+         where id = ${params.id}`;
+    } else {
+      await sql`update ${sql(spec.table)} set ${sql(column)} = ${sql.json(merged)} where id = ${params.id}`;
+    }
+  }
 
   await logActivity({
     ...WEB_ACTOR,
     action: "report_edited",
-    detail: `${spec.label} ${params.id} · ${Object.keys(patch).join(", ")}`,
+    detail: `${spec.label} ${params.id} · ${[...Object.keys(patch), ...Object.keys(jsonPatch)].join(", ")}`,
     ok: true,
   });
 
-  return NextResponse.json({ ok: true, updated: Object.keys(patch) });
+  return NextResponse.json({ ok: true, updated: [...Object.keys(patch), ...Object.keys(jsonPatch)] });
 }
 
 /**

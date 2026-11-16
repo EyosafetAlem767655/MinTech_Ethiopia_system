@@ -63,6 +63,9 @@ const CHILD_TABLES: ArchiveTable[] = [
     parent: { table: "pp_bag_usage", fk: "usage_id", dateColumn: "date" } },
   { table: "pp_bag_damage_items", dateColumn: "created_at", sheet: "pp_bag_damage_items",
     parent: { table: "pp_bag_damage_reports", fk: "report_id", dateColumn: "date" } },
+  // A load's payments are part of the load: archived and removed with it.
+  { table: "raw_material_credit_payments", dateColumn: "created_at", sheet: "rm_credit_payments",
+    parent: { table: "raw_material_credits", fk: "credit_id", dateColumn: "date" } },
   { table: "bag_events", dateColumn: "date", sheet: "bag_events",
     parent: { table: "bag_lots", fk: "lot_id", dateColumn: "received_at" } },
 ];

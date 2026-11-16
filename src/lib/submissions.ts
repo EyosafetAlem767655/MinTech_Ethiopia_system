@@ -54,6 +54,8 @@ export const SUBMISSION_COLLECTIONS = [
   "item_purchase",
   // The 📋 Sales data manager's approvals and corrections, under the reviewer.
   "sales_review",
+  // 💸 Money paid on a raw-material load.
+  "rm_credit_payment",
 ] as const;
 
 export type SubmissionCollection = (typeof SUBMISSION_COLLECTIONS)[number];
@@ -120,6 +122,18 @@ export interface SubmissionSpec {
    * here: deleting a review must never delete the sale. Clear it by editing.
    */
   noDelete?: boolean;
+  /**
+   * Fields kept inside a jsonb column, shown and edited one by one: the
+   * whiteness readings live in `readings` as { wb1: "88.4", … }. Each key is
+   * also a displayField key (column = key) so the list and the edit form treat
+   * it like any other field.
+   */
+  jsonFields?: { column: string; keys: string[] };
+  /**
+   * Columns of the row this one belongs to, shown beside it: a payment says
+   * which load it paid. Read only.
+   */
+  parentFields?: { table: string; foreignKey: string; columns: { column: string; as: string }[] };
 }
 
 /** Every child table of a collection, from both declarations. */
@@ -544,12 +558,19 @@ export const SUBMISSIONS: Record<SubmissionCollection, SubmissionSpec> = {
       TEXT("product_code", "Product"),
       NUM("line", "Line"),
       NUM("avg", "Avg %"),
+      TEXT("wb1", "Reading 1"),
+      TEXT("wb2", "Reading 2"),
+      TEXT("wb3", "Reading 3"),
+      TEXT("wb4", "Reading 4"),
+      TEXT("wb5", "Reading 5"),
+      TEXT("wb6", "Reading 6"),
       TEXT("reported_by", "By"),
     ],
-    // The readings are a jsonb map and the average is derived from them, so
-    // neither is editable here: changing one without the other would put an
-    // average on screen that its own readings contradict.
-    editableKeys: [],
+    // The six readings, one by one (a %, or MNT / OFF / blank, as in the bot).
+    // The average is never typed: it is worked out again from the readings on
+    // every save, so the two cannot disagree.
+    jsonFields: { column: "readings", keys: ["wb1", "wb2", "wb3", "wb4", "wb5", "wb6"] },
+    editableKeys: ["wb1", "wb2", "wb3", "wb4", "wb5", "wb6"],
   },
   grv: {
     table: "goods_receiving_vouchers",
@@ -738,6 +759,39 @@ export const SUBMISSIONS: Record<SubmissionCollection, SubmissionSpec> = {
     ],
     // Clearing the status takes the review off the sale; the sale itself stays.
     editableKeys: ["review_status", "reviewed_by"],
+  },
+  rm_credit_payment: {
+    table: "raw_material_credit_payments",
+    label: "Raw material credit payment",
+    icon: "💸",
+    dateColumn: "paid_on",
+    authorColumn: "recorded_by",
+    searchColumns: ["note", "recorded_by", "part"],
+    parentFields: {
+      table: "raw_material_credits",
+      foreignKey: "credit_id",
+      columns: [
+        { column: "quarry_owner", as: "load_owner" },
+        { column: "supplier", as: "load_supplier" },
+        { column: "truck_plate", as: "load_truck" },
+        { column: "date_label", as: "load_date" },
+        { column: "material", as: "load_material" },
+      ],
+    },
+    displayFields: [
+      NUM("amount", "Amount (ETB)"),
+      TEXT("part", "Paid for (material / driver)"),
+      TEXT("load_owner", "Quarry owner"),
+      TEXT("load_supplier", "Supplier"),
+      TEXT("load_truck", "Truck"),
+      TEXT("load_date", "Load date"),
+      TEXT("load_material", "Material"),
+      TEXT("note", "Note"),
+      TEXT("recorded_by", "By"),
+    ],
+    // What the load still owes is always worked out from its payments, so a
+    // corrected amount corrects the balance with it.
+    editableKeys: ["amount", "note"],
   },
 };
 
