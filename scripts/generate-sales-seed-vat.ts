@@ -1,23 +1,28 @@
 /**
- * Generates the June and July 2026 sales seed from the VAT sales register.
+ * Generates a sales seed for one or more months from the VAT sales register.
  *
- *   npx tsx scripts/generate-sales-seed-vat.ts
+ *   npx tsx scripts/generate-sales-seed-vat.ts 2026-06 2026-07   → seed 0026
+ *   npx tsx scripts/generate-sales-seed-vat.ts 2026-08 2026-09   → seed 0027
  *
- * Reads scripts/sales/2026-06-vat.csv and 2026-07-vat.csv (the register as the
+ * Reads scripts/sales/<month>-vat.csv for each month (the register as the
  * owner sent it, one line per product line of a receipt):
  *
  *   VAT CATEGORY, CALENDAR, Types of Sale, Buyer TIN., Buyer name, Date of Sale.,
  *   MRC, Vat receipt, Description., Unit of Measure, Quantity., Unit Price.,
  *   Total value, vat, value after vat, Sale Type
  *
- * and writes supabase/seed/0026_sales_2026_06_07_vat_register.sql, which
- * REPLACES every June and July sale (owner's decision, 16 Nov 2026).
+ * and writes one seed that REPLACES every sale in those months (owner's
+ * decision, 16 Nov 2026), EXCEPT the rows of the owner's statement of
+ * uncollected credit sales and the Oct collection summary (seed 0022): those
+ * hold what is still owed, at net pay, and stay exactly as they are; the
+ * register's line for the same receipt is not added a second time.
  *
  * The register names the MATERIAL (Dolomite, CaCo3, Marble Powder, Talc), not
  * the product the plant tracks, so the product is decided like this:
  *
- *   1. July: the product mix of the same receipt in seed 0008 (typed from the
- *      older cash and credit sheets), when its tonnes agree with the register.
+ *   1. The product mix of the same receipt in that month's earlier import
+ *      (seeds 0008 / 0007 / 0006, typed from the older cash and credit
+ *      sheets), when its tonnes agree with the register.
  *   2. Otherwise the price: PRODUCT_AT_PRICE below, which is what July's old
  *      data shows was sold at each material and price, plus June's earlier,
  *      higher prices assigned from what the same customers bought in July,
@@ -34,9 +39,32 @@ import { PRODUCT_LABEL } from "../src/lib/products";
 import { creditDueDate } from "../src/lib/credit";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const MONTHS = ["2026-06", "2026-07"] as const;
-const OUT = path.join(ROOT, "supabase", "seed", "0026_sales_2026_06_07_vat_register.sql");
-const OLD_JULY = path.join(ROOT, "supabase", "seed", "0008_sales_2026_07.sql");
+const MONTHS = process.argv.slice(2).filter((a) => /^\d{4}-\d{2}$/.test(a)).sort();
+if (MONTHS.length === 0) {
+  console.error("Usage: npx tsx scripts/generate-sales-seed-vat.ts 2026-08 2026-09");
+  process.exit(1);
+}
+/** Each batch has its own seed number, kept when the batch is regenerated. */
+const SEED_NO: Record<string, string> = { "2026-06,2026-07": "0026", "2026-08,2026-09": "0027" };
+const seedNo = SEED_NO[MONTHS.join(",")];
+if (!seedNo) {
+  console.error(`No seed number for ${MONTHS.join(" + ")}: add it to SEED_NO.`);
+  process.exit(1);
+}
+const OUT = path.join(
+  ROOT,
+  "supabase",
+  "seed",
+  `${seedNo}_sales_${MONTHS[0].replace("-", "_")}_${MONTHS[MONTHS.length - 1].slice(5)}_vat_register.sql`
+);
+/** The earlier import of each month, typed from the older cash and credit sheets. */
+const OLD_SEED: Record<string, string> = {
+  "2026-07": "0008_sales_2026_07.sql",
+  "2026-08": "0007_sales_2026_08.sql",
+  "2026-09": "0006_sales_2026_09.sql",
+};
+/** Seed 0022's own rows: what is still owed (and the October collections). Never replaced. */
+const KEEP_REPORTED_BY = ["credit statement 31 Oct 2026", "cash collection summary Oct 2026"];
 
 /** Marks every row this import writes, so a re-run can find its own work. */
 const REPORTED_BY = "VAT sales register";
@@ -50,7 +78,7 @@ function materialOf(description: string): Material | null {
   const d = description.trim().toLowerCase();
   if (/^ca[ck]?[ao]3$|^caco3$|^caca3$/.test(d)) return "CaCO3";
   if (d.startsWith("dolomite")) return "Dolomite";
-  if (d.startsWith("marble")) return "Marble";
+  if (d.startsWith("marb")) return "Marble";
   if (d.startsWith("talc") || d.startsWith("talk")) return "Talc";
   return null;
 }
@@ -69,7 +97,7 @@ const PRODUCT_AT_PRICE: Record<Material, Record<number, string>> = {
   CaCO3: {
     18000: "EC90", 19000: "EC90", 20000: "EC90", 21000: "EC90",
     32000: "5EL",
-    33000: "3EL", 36000: "3EL", 38000: "3EL", 40000: "3EL", 43000: "3EL",
+    29000: "3EL", 33000: "3EL", 36000: "3EL", 38000: "3EL", 40000: "3EL", 43000: "3EL",
     34000: "2EL", 35000: "2EL", 39000: "2EL",
   },
   Dolomite: {
@@ -95,6 +123,7 @@ const TIN_FIX: Record<string, string> = {
   "0037971241": "0037971214", // Netsanet Asefa
   "0054718624": "0054718684", // Maxflow Manufacturing
   "0002484610": "0002184610", // Solomon Badie
+  "0074337486": "0074357486", // Betelhem Tigabu
   "0079953704": "0079453704", // Milano Chemicals
   "0070453704": "0079453704", // Milano Chemicals
 };
@@ -139,6 +168,27 @@ const NAME_BY_TIN: Record<string, string> = {
   "0079453704": "Milano Chemicals",
   "0058028434": "Harmony Paint",
   "0041702587": "Mela Soap & Detergent",
+  "0091314834": "Platinum Ethio Manufacturing PLC",
+  "0085222333": "Huanqie Shoe",
+  "0103596225": "Harmony Paint & Chemicals",
+  "0039521460": "Mural Paint & Chemicals",
+  "0085034551": "Nice Soap & Detergent",
+  "0000280751": "Birhanu Beyene",
+  "0000014526": "Hakkamal Cosmetics",
+  "0091656698": "Kibrom & Henok Friends",
+  "0003323096": "Simret Tekle",
+  "0003604159": "Simegnesh Negash Workneh",
+  "0038559842": "Abdulezak Nesro",
+  "0056693091": "Biruk Sew Amare",
+  "0094833764": "Firehiwot Abenezer",
+  "0000247932": "Tewodros Melese",
+  "0058635746": "Eyob Tekeste",
+  "0003452830": "Yoursa Mohammed",
+  "0074923314": "Kefyalew Wederyelesh",
+  "0077718940": "Leila Dry & Liquid Soap",
+  "0002518138": "Wale Workneh",
+  "0000073306": "Solomon Yishak",
+  "0081357245": "Tana Manufacturing PLC",
 };
 
 const problems: string[] = [];
@@ -190,14 +240,28 @@ function parseCsv(text: string): string[][] {
   return rows.filter((r) => r.some((c) => c.trim()));
 }
 
-/** The old July rows (seed 0008) by receipt number: products, tonnes, bank. */
-function oldJuly(): Map<string, { products: Record<string, number>; qty: number; bank: string }[]> {
-  const out = new Map<string, { products: Record<string, number>; qty: number; bank: string }[]>();
-  const text = fs.readFileSync(OLD_JULY, "utf8");
-  const re = /\('[^']+', '[^']+', '[^']+', '(?:[^']|'')*', [0-9.]+, [0-9.]+, ([0-9.]+), '([0-9]+)', '(\{[^}]*\})'::jsonb, '((?:[^']|'')*)'/g;
+type OldRow = { products: Record<string, number>; qty: number; bank: string };
+
+/** A month's earlier import by receipt number: products, tonnes, bank (null on credit rows). */
+function oldRows(month: string): Map<string, OldRow[]> {
+  const out = new Map<string, OldRow[]>();
+  const file = OLD_SEED[month];
+  if (!file) return out;
+  const text = fs.readFileSync(path.join(ROOT, "supabase", "seed", file), "utf8");
+  const re = /\('[^']+', '[^']+', '[^']+', '(?:[^']|'')*', [0-9.]+, [0-9.]+, ([0-9.]+), '([0-9]+)', '(\{[^}]*\})'::jsonb, (?:'((?:[^']|'')*)'|null)/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text))) {
-    out.set(m[2], [...(out.get(m[2]) ?? []), { qty: Number(m[1]), products: JSON.parse(m[3]), bank: m[4].replace(/''/g, "'") }]);
+    out.set(m[2], [...(out.get(m[2]) ?? []), { qty: Number(m[1]), products: JSON.parse(m[3]), bank: (m[4] ?? "").replace(/''/g, "'") }]);
+  }
+  return out;
+}
+
+/** The receipts on seed 0022's statement of uncollected credit sales. */
+function statementReceipts(): Set<string> {
+  const file = path.join(ROOT, "supabase", "seed", "0022_credit_sales_fresh_start_2026_10_31.sql");
+  const out = new Set<string>();
+  for (const m of fs.readFileSync(file, "utf8").matchAll(/\('\d{4}-\d{2}-\d{2}', '[^']+', '(?:[^']|'')*', [0-9.]+, [0-9.]+, '([0-9]+)', '\{/g)) {
+    out.add(String(Number(m[1])));
   }
   return out;
 }
@@ -223,7 +287,7 @@ interface Invoice {
   afterVat: number;
   bank: string | null;
   /** Where the product split came from. */
-  productFrom: "old July data" | "price";
+  productFrom: "earlier import" | "price";
 }
 
 const nameCounts = new Map<string, Map<string, number>>();
@@ -326,7 +390,8 @@ function parseMonth(month: string): Invoice[] {
 }
 
 const all = MONTHS.flatMap(parseMonth);
-const old = oldJuly();
+const old = new Map(MONTHS.map((m) => [m, oldRows(m)]));
+const onStatement = statementReceipts();
 
 const add = (p: Record<string, number>, code: string, qty: number) => {
   p[code] = round((p[code] ?? 0) + qty, 3);
@@ -339,17 +404,21 @@ for (const v of all) {
     const counts = [...(nameCounts.get(v.tin) ?? new Map()).entries()].sort((a, b) => b[1] - a[1]);
     v.customer = fixed ?? counts[0]?.[0] ?? v.customer;
   }
-  // July: the old data's product mix and bank for the same receipt, when its tonnes agree.
-  const prev = v.month === "2026-07" ? old.get(v.fsNo) : undefined;
-  if (prev && prev.length === 1 && Math.abs(prev[0].qty - v.qty) < 1e-6) {
-    v.products = { ...prev[0].products };
-    v.bank = prev[0].bank || null;
-    v.productFrom = "old July data";
+  // The earlier import's product mix and bank for the same receipt, when its tonnes agree.
+  const prev = old.get(v.month)?.get(v.fsNo);
+  const same = prev?.filter((p) => Math.abs(p.qty - v.qty) < 1e-6) ?? [];
+  if (same.length === 1) {
+    v.products = { ...same[0].products };
+    v.bank = same[0].bank || null;
+    v.productFrom = "earlier import";
     continue;
   }
-  if (prev && prev.length === 1) {
-    notes.push(`Fs ${v.fsNo}: the old July data had ${prev[0].qty} t on it, the register ${v.qty} t, so its product follows the price`);
-    v.bank = prev[0].bank || null;
+  // The bank is still the receipt's own when there is one row for it.
+  if (prev?.length === 1) v.bank = prev[0].bank || null;
+  if (prev && prev.length > 0) {
+    notes.push(
+      `Fs ${v.fsNo}: the earlier import had ${prev.map((p) => `${p.qty} t`).join(" and ")} on it, the register ${v.qty} t, so its product follows the price`
+    );
   }
   for (const l of v.lines) {
     const code = l.material === "Talc" ? "Talk" : PRODUCT_AT_PRICE[l.material][l.price];
@@ -369,11 +438,26 @@ if (problems.length) {
 
 all.sort((a, b) => +a.date - +b.date || a.fsNo.localeCompare(b.fsNo, "en", { numeric: true }));
 
-const monthStart = "2026-06-01";
-const monthEnd = "2026-08-01";
+const first = MONTHS[0];
+const last = MONTHS[MONTHS.length - 1];
+const rangeStart = `${first}-01`;
+const rangeEnd = (() => {
+  const [y, m] = last.split("-").map(Number);
+  return new Date(Date.UTC(y, m, 1)).toISOString().slice(0, 10);
+})();
+const monthName = (m: string) =>
+  new Date(`${m}-01T00:00:00Z`).toLocaleString("en-GB", { month: "long", timeZone: "UTC" });
+const span = MONTHS.map(monthName).join(" and ");
+const tag = MONTHS.map((m) => m.replace("-", "_")).join("_");
+const backupSales = `sales_reset_backup_${tag}`;
+const backupPays = `sales_reset_backup_payments_${tag}`;
+
+/** Register receipts that are already on the 0022 statement: kept as the statement has them. */
+const skipped = all.filter((v) => v.kind === "credit" && onStatement.has(v.fsNo));
+const written = all.filter((v) => !skipped.includes(v));
 
 function summary(month: string) {
-  const list = all.filter((v) => v.month === month);
+  const list = written.filter((v) => v.month === month);
   const cash = list.filter((v) => v.kind === "cash");
   const credit = list.filter((v) => v.kind === "credit");
   return {
@@ -384,7 +468,8 @@ function summary(month: string) {
     tonnes: round(list.reduce((a, v) => a + v.qty, 0), 3),
     cashEtb: round(cash.reduce((a, v) => a + v.afterVat, 0)),
     creditEtb: round(credit.reduce((a, v) => a + v.afterVat, 0)),
-    fromOld: list.filter((v) => v.productFrom === "old July data").length,
+    fromOld: list.filter((v) => v.productFrom === "earlier import").length,
+    skipped: skipped.filter((v) => v.month === month),
     products: list.reduce((p, v) => {
       for (const [c, q] of Object.entries(v.products)) add(p, c, q);
       return p;
@@ -393,7 +478,7 @@ function summary(month: string) {
 }
 const sums = MONTHS.map(summary);
 
-const values = all
+const values = written
   .map((v) => {
     const label = dateLabel(v.date);
     return (
@@ -417,7 +502,7 @@ const values = all
   })
   .join(",\n");
 
-const credits = all.filter((v) => v.kind === "credit");
+const credits = written.filter((v) => v.kind === "credit");
 const payments = credits
   .map((v) => {
     const due = creditDueDate(v.date).toISOString().slice(0, 10);
@@ -437,104 +522,128 @@ const fmtProducts = (p: Record<string, number>) =>
     .sort((a, b) => b[1] - a[1])
     .map(([c, q]) => `${PRODUCT_LABEL[c] ?? c} ${round(q, 3)}`)
     .join(", ");
+const keepList = KEEP_REPORTED_BY.map(sqlString).join(", ");
+const inRange = (alias: string) =>
+  `(${alias}.date at time zone 'Africa/Addis_Ababa')::date >= date '${rangeStart}'\n   and (${alias}.date at time zone 'Africa/Addis_Ababa')::date < date '${rangeEnd}'`;
+const oldSeeds = MONTHS.map((m) => OLD_SEED[m]).filter(Boolean);
 
-const out = `-- MinTech Ethiopia — sales, June and July 2026, from the VAT sales register.
--- GENERATED by scripts/generate-sales-seed-vat.ts from scripts/sales/2026-06-vat.csv
--- and scripts/sales/2026-07-vat.csv — do not edit by hand.
+const out = `-- MinTech Ethiopia — sales, ${span} ${first.slice(0, 4)}, from the VAT sales register.
+-- GENERATED by scripts/generate-sales-seed-vat.ts ${MONTHS.join(" ")} from
+-- ${MONTHS.map((m) => `scripts/sales/${m}-vat.csv`).join(" and ")} — do not edit by hand.
 --
 ${sums
   .map(
     (s) =>
       `-- ${s.month}: ${s.invoices} sales (${s.cash} cash, ${s.credit} credit), ${s.tonnes} t,\n` +
       `--   ${money(s.cashEtb)} ETB cash and ${money(s.creditEtb)} ETB credit, after VAT.\n` +
-      `--   Products: ${fmtProducts(s.products)}.`
+      `--   Products: ${fmtProducts(s.products)}.` +
+      (s.skipped.length
+        ? `\n--   Not added again (already on the 31 Oct statement of uncollected credit sales, kept as it is):\n` +
+          s.skipped.map((v) => `--     Fs ${v.fsNo} · ${v.customer} · ${v.qty} t`).join("\n")
+        : "")
   )
   .join("\n")}
 --
--- REPLACES every June and July sale (owner's decision, 16 Nov 2026). They are
--- copied first into sales_reset_backup_2026_06_07 and their payments into
--- sales_reset_backup_payments_2026_06_07, then removed, including any filed
--- through the bot, and the register goes in. Every line was checked: qty × unit
--- price = total value, and total value + VAT = value after VAT.
+-- REPLACES every ${span} sale (owner's decision, 16 Nov 2026), except seed
+-- 0022's statement of uncollected credit sales and its October collections,
+-- which hold what is still owed and stay exactly as they are. What is replaced
+-- is copied first into ${backupSales} (and its payments into
+-- ${backupPays}). Every line was checked: qty × unit price = total value,
+-- and total value + VAT = value after VAT.
 --
 -- One sale per receipt; a receipt's product lines are summed into \`products\`.
--- \`delivery_no\` is the receipt: FS00002641 → "2641"; the early-June M-receipts
--- keep their letter (M0004032 → "M4032").
+-- \`delivery_no\` is the receipt: FS00002641 → "2641"; M-receipts keep their
+-- letter (M0004032 → "M4032").
 --
--- PRODUCTS. The register names only the material. July takes each receipt's
--- product from the old July data (seed 0008) when its tonnes agree
--- (${sums[1].fromOld} of ${sums[1].invoices}); everything else follows the price-to-product table in the
--- script, built from July's data and confirmed by the owner for June's prices.
--- The bank is the old July data's for the same receipt; June has none.
+-- PRODUCTS. The register names only the material. A receipt takes its product
+-- (and bank) from the month's earlier import${oldSeeds.length ? ` (${oldSeeds.join(", ")})` : ""} when
+-- its tonnes agree (${sums.map((s) => `${s.month}: ${s.fromOld} of ${s.invoices}`).join("; ")}); every other line
+-- follows the price-to-product table in the script, confirmed by the owner.
 --
--- CREDIT. The credit sales are written as credit WITH a payment of the full
--- amount at the due date: the owner's statement of uncollected credit sales
--- (seed 0022) has none from June or July, so they were collected. They show as
--- settled on the Credit tab and are never counted as owed.
+-- CREDIT. Credit sales not on the 31 Oct uncollected statement were collected,
+-- so each is written with a payment of the full amount at its due date: settled
+-- on the Credit tab and never counted as owed.
 --
 -- Corrections made to the register's own text:
 ${tinLines.join("\n") || "--   (no TIN corrections)"}
 ${nameLines.join("\n") || "--   (no name corrections)"}
 ${notes.map((n) => `--   ${n}`).join("\n")}
 --
--- SAFE TO RE-RUN: it removes its own rows too and writes the same ids. Do not
--- re-run seed 0008 after this: it would put the old July rows back beside these.
+-- SAFE TO RE-RUN: it removes its own rows too and writes the same ids.${
+  oldSeeds.length ? ` Do not\n-- re-run ${oldSeeds.join(" / ")} after this: they would put the old rows back beside these.` : ""
+}
 
 begin;
 
-create table if not exists sales_reset_backup_2026_06_07 as select * from sales_invoices where false;
-create table if not exists sales_reset_backup_payments_2026_06_07 as select * from sales_credit_payments where false;
-alter table sales_reset_backup_2026_06_07 enable row level security;
-alter table sales_reset_backup_payments_2026_06_07 enable row level security;
+create table if not exists ${backupSales} as select * from sales_invoices where false;
+create table if not exists ${backupPays} as select * from sales_credit_payments where false;
+alter table ${backupSales} enable row level security;
+alter table ${backupPays} enable row level security;
 
-/* 1. A copy of what is there now (not this seed's own rows, which it rewrites). */
-insert into sales_reset_backup_payments_2026_06_07
+/* 1. A copy of what is replaced (not this seed's own rows, nor the statement's). */
+insert into ${backupPays}
 select p.* from sales_credit_payments p
   join sales_invoices i on i.id = p.invoice_id
- where (i.date at time zone 'Africa/Addis_Ababa')::date >= date '${monthStart}'
-   and (i.date at time zone 'Africa/Addis_Ababa')::date < date '${monthEnd}'
+ where ${inRange("i")}
    and i.reported_by <> ${sqlString(REPORTED_BY)}
-   and not exists (select 1 from sales_reset_backup_payments_2026_06_07 b where b.id = p.id);
+   and i.reported_by not in (${keepList})
+   and not exists (select 1 from ${backupPays} b where b.id = p.id);
 
-insert into sales_reset_backup_2026_06_07
+insert into ${backupSales}
 select i.* from sales_invoices i
- where (i.date at time zone 'Africa/Addis_Ababa')::date >= date '${monthStart}'
-   and (i.date at time zone 'Africa/Addis_Ababa')::date < date '${monthEnd}'
+ where ${inRange("i")}
    and i.reported_by <> ${sqlString(REPORTED_BY)}
-   and not exists (select 1 from sales_reset_backup_2026_06_07 b where b.id = i.id);
+   and i.reported_by not in (${keepList})
+   and not exists (select 1 from ${backupSales} b where b.id = i.id);
 
-/* 2. Every June and July sale out, with its payments. */
+/* 2. Every ${span} sale out, with its payments — the statement's rows stay. */
 delete from sales_credit_payments p using sales_invoices i
  where p.invoice_id = i.id
-   and (i.date at time zone 'Africa/Addis_Ababa')::date >= date '${monthStart}'
-   and (i.date at time zone 'Africa/Addis_Ababa')::date < date '${monthEnd}';
+   and ${inRange("i")}
+   and i.reported_by not in (${keepList});
 
-delete from sales_invoices
- where (date at time zone 'Africa/Addis_Ababa')::date >= date '${monthStart}'
-   and (date at time zone 'Africa/Addis_Ababa')::date < date '${monthEnd}';
+delete from sales_invoices i
+ where ${inRange("i")}
+   and i.reported_by not in (${keepList});
 
-/* 3. The register. */
+/* 3. The register, except a receipt the statement already holds. */
 insert into sales_invoices (id, date, date_label, customer, tin, invoice_cash, invoice_credit, qty,
-                            delivery_no, products, bank, reported_by, source) values
-${values};
-
-/* 4. The credit sales, collected. */
-insert into sales_credit_payments (invoice_id, amount, collected_on, note, recorded_by) values
-${payments};
-
+                            delivery_no, products, bank, reported_by, source)
+select v.id::uuid, v.date::timestamptz, v.date_label, v.customer, v.tin, v.invoice_cash, v.invoice_credit, v.qty,
+       v.delivery_no, v.products, v.bank, v.reported_by, v.source from (values
+${values}
+) as v(id, date, date_label, customer, tin, invoice_cash, invoice_credit, qty, delivery_no, products, bank, reported_by, source)
+ where not exists (
+   select 1 from sales_invoices s
+    where s.reported_by in (${keepList})
+      and s.delivery_no = v.delivery_no
+      and ${inRange("s")}
+ );
+${
+  payments
+    ? `
+/* 4. The credit sales, collected (only those written above). */
+insert into sales_credit_payments (invoice_id, amount, collected_on, note, recorded_by)
+select v.invoice_id::uuid, v.amount, v.collected_on::date, v.note, v.recorded_by from (values
+${payments}
+) as v(invoice_id, amount, collected_on, note, recorded_by)
+ where exists (select 1 from sales_invoices i where i.id = v.invoice_id::uuid);
+`
+    : ""
+}
 commit;
 
--- Expect, per month:
-${sums.map((s) => `--   ${s.month}: ${s.invoices} sales, ${s.tonnes} t, ${money(s.cashEtb)} cash + ${money(s.creditEtb)} credit, ${s.credit} credit sales all settled`).join("\n")}
+-- Expect, per month (the register's own sales; the statement's rows are added on top):
+${sums.map((s) => `--   ${s.month}: ${s.invoices} sales, ${s.tonnes} t, ${money(s.cashEtb)} cash + ${money(s.creditEtb)} credit, all settled`).join("\n")}
 select to_char((i.date at time zone 'Africa/Addis_Ababa')::date, 'YYYY-MM') as month,
-       count(*)                        as sales,
-       round(sum(i.qty), 3)            as tonnes,
-       round(sum(i.invoice_cash), 2)   as cash_etb,
-       round(sum(i.invoice_credit), 2) as credit_etb,
+       count(*) filter (where i.reported_by = ${sqlString(REPORTED_BY)}) as register_sales,
+       round(sum(i.qty) filter (where i.reported_by = ${sqlString(REPORTED_BY)}), 3) as register_tonnes,
+       round(sum(i.invoice_cash) filter (where i.reported_by = ${sqlString(REPORTED_BY)}), 2) as register_cash,
+       round(sum(i.invoice_credit) filter (where i.reported_by = ${sqlString(REPORTED_BY)}), 2) as register_credit,
+       count(*) filter (where i.reported_by in (${keepList})) as statement_sales_kept,
        round(sum(i.invoice_credit) - coalesce(sum((select sum(p.amount) from sales_credit_payments p where p.invoice_id = i.id)), 0), 2) as credit_still_owed
   from sales_invoices i
- where (i.date at time zone 'Africa/Addis_Ababa')::date >= date '${monthStart}'
-   and (i.date at time zone 'Africa/Addis_Ababa')::date < date '${monthEnd}'
+ where ${inRange("i")}
  group by 1
  order by 1;
 `;
@@ -544,9 +653,10 @@ console.log(`Wrote ${path.relative(ROOT, OUT)}`);
 for (const s of sums) {
   console.log(
     `  ${s.month}: ${s.invoices} sales (${s.cash} cash, ${s.credit} credit) · ${s.tonnes} t · ` +
-      `${money(s.cashEtb)} cash · ${money(s.creditEtb)} credit · product from old July data: ${s.fromOld}`
+      `${money(s.cashEtb)} cash · ${money(s.creditEtb)} credit · product from earlier import: ${s.fromOld}`
   );
   console.log(`    ${fmtProducts(s.products)}`);
+  for (const v of s.skipped) console.log(`    kept from the statement, not added again: Fs ${v.fsNo} ${v.customer} ${v.qty} t (${money(v.afterVat)} on the register)`);
 }
-console.log(`  TIN fixes: ${[...tinFixes.entries()].map(([k, n]) => `${k} ×${n}`).join("; ")}`);
+console.log(`  TIN fixes: ${[...tinFixes.entries()].map(([k, n]) => `${k} ×${n}`).join("; ") || "none"}`);
 for (const n of notes) console.log(`  note: ${n}`);
