@@ -260,7 +260,7 @@ export const GUIDE: GuideSection[] = [
           "Raw material bought on credit, one row per truck: quarry owner, agent, plate, tonnes, amount, paid and owed.",
           "Tap a load to see its payments.",
           "Payments lists every payment as it was made: one paid over several loads is one entry, with each load's share and whether it is now paid in full.",
-          "In the bot (💸), tick one or more loads, then type each load's amount, or one total that is split oldest first (the oldest load is paid off first, the rest goes on the next).",
+          "In the bot (💸) the first question is how it is paid. 💰 Bulk: pick who was paid and type the total; their oldest load is paid off first, then the next, and what is left over goes on the next one as a part payment. 📋 Per invoice: tick the loads and type an amount for each.",
         ],
         source: "🚚 Raw material credit purchase, 💸 Raw material credit payment.",
         href: "/departments/finance?tab=rmcredit",

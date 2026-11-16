@@ -326,32 +326,105 @@ export function owedChoices(draft: Record<string, string | number>) {
 export const OWED_STEP = "owed";
 
 /**
- * The items ticked on the payment form, oldest first. A draft begun before the
- * tick list (one "uuid|part" value) still reads as its one item.
+ * How a payment is entered, asked FIRST:
+ *
+ *   * each ("per invoice"): tick the loads, then an amount for each one;
+ *   * total ("bulk"): who is paid and how much in all. Nothing to add up first:
+ *     their oldest load is paid off, then the next, and what is left over goes
+ *     on the next one as a part payment.
+ */
+export type PayMode = "each" | "total";
+export const PAY_MODE_STEP = "payMode";
+/** Who a bulk payment goes to: a payee's code, or everyone. */
+export const PAYEE_STEP = "payee";
+export const PAYEE_ALL = "all";
+/** The most loads a per-invoice payment can tick (one amount question each). */
+export const MAX_EACH_AMOUNTS = 20;
+export const eachAmountStep = (i: number) => `amt${i}`;
+
+/**
+ * The mode as entered. A draft begun before the question (one "uuid|part" pick
+ * and an amount) reads as a bulk payment on that one item, which is exactly
+ * what it was.
+ */
+export function payModeOf(draft: Record<string, string | number>): PayMode {
+  if (draft[PAY_MODE_STEP] === "each") return "each";
+  return "total";
+}
+
+/** Who is owed: the quarry owner for the raw material, the driver for the fee. */
+export interface Payee {
+  code: string;
+  name: string;
+  owed: number;
+  items: number;
+}
+
+/** A driver and a quarry owner of the same name are different people to pay. */
+const payeeKey = (o: OwedItem) => `${o.part === "driver" ? "d" : "o"}:${o.who.toLowerCase().replace(/\s+/g, " ").trim()}`;
+
+/** Everyone still owed, most owed first, each with a short code and its items. */
+function payeeGroups(draft: Record<string, string | number>): (Payee & { list: OwedItem[] })[] {
+  const by = new Map<string, OwedItem[]>();
+  for (const o of owedItems(draft)) by.set(payeeKey(o), [...(by.get(payeeKey(o)) ?? []), o]);
+  return [...by.values()]
+    .map((list) => ({ name: list[0].who, owed: round2(list.reduce((a, o) => a + o.left, 0)), items: list.length, list }))
+    .sort((a, b) => b.owed - a.owed || a.name.localeCompare(b.name))
+    .map((g, i) => ({ ...g, code: `p${i}` }));
+}
+
+export function payees(draft: Record<string, string | number>): Payee[] {
+  return payeeGroups(draft).map(({ code, name, owed, items }) => ({ code, name, owed, items }));
+}
+
+/** The payee buttons for a bulk payment, and "everyone" when there is more than one. */
+export function payeeChoices(draft: Record<string, string | number>) {
+  const list = payees(draft);
+  const out = list.map((p) => ({ label: `👤 ${p.name} · ${p.items} ጭነት · ${money(p.owed)} ብር`, value: p.code }));
+  if (list.length > 1) {
+    const all = list.reduce((a, p) => a + p.owed, 0);
+    out.push({ label: `🌐 ሁሉም (Everyone, oldest first) · ${money(all)} ብር`, value: PAYEE_ALL });
+  }
+  return out;
+}
+
+/** The payee picked, or the only one there is. */
+function pickedPayee(draft: Record<string, string | number>): string {
+  const groups = payeeGroups(draft);
+  return groups.length === 1 ? groups[0].code : String(draft[PAYEE_STEP] || "");
+}
+
+/** What a bulk payment can be put on: the payee's unpaid items, oldest first. */
+function bulkItems(draft: Record<string, string | number>): OwedItem[] {
+  const code = pickedPayee(draft);
+  if (code === PAYEE_ALL) return owedItems(draft);
+  const ids = new Set(payeeGroups(draft).find((g) => g.code === code)?.list.map((o) => o.code) ?? []);
+  return owedItems(draft).filter((o) => ids.has(o.code));
+}
+
+/**
+ * The items this payment is put on, oldest first: the ticked ones on a
+ * per-invoice payment, the payee's unpaid ones on a bulk payment.
  */
 export function chosenOwedList(draft: Record<string, string | number>): OwedItem[] {
   const raw = String(draft[OWED_STEP] || "");
   const items = owedItems(draft);
+  // A draft begun before the tick list: one "uuid|part" pick.
   if (raw.includes("|")) {
     const [id, part] = raw.split("|");
     return items.filter((o) => o.load.id === id && o.part === (part === "driver" ? "driver" : "material"));
   }
+  if (payModeOf(draft) === "total") return bulkItems(draft);
   const codes = new Set(raw.split(",").map((c) => c.trim()).filter(Boolean));
   return items.filter((o) => codes.has(o.code));
 }
 
-/** How a payment over several items is entered. */
-export type PayMode = "each" | "total";
-export const PAY_MODE_STEP = "payMode";
-/** Above this many ticked items, typing each amount is not offered: one total, split. */
-export const MAX_EACH_AMOUNTS = 12;
-export const eachAmountStep = (i: number) => `amt${i}`;
-
-export function payModeOf(draft: Record<string, string | number>): PayMode {
-  const n = chosenOwedList(draft).length;
-  if (n <= 1) return "total";
-  if (n > MAX_EACH_AMOUNTS) return "total";
-  return draft[PAY_MODE_STEP] === "each" ? "each" : "total";
+/** What the bulk payment can cover in all: its payee's total owed. */
+export function bulkOwed(draft: Record<string, string | number>): { name: string; owed: number; items: number } {
+  const items = bulkItems(draft);
+  const code = pickedPayee(draft);
+  const name = code === PAYEE_ALL ? "ሁሉም (everyone)" : payees(draft).find((p) => p.code === code)?.name ?? "—";
+  return { name, owed: round2(items.reduce((a, o) => a + o.left, 0)), items: items.length };
 }
 
 export interface Allocation {
@@ -365,9 +438,9 @@ export interface Allocation {
 }
 
 /**
- * One total over the ticked items: the OLDEST is paid off first, then the next,
- * and what remains goes on the last as a part payment. `over` is what the
- * total exceeds everything ticked by (to be refused, never silently kept).
+ * One total over a list of items, oldest first: the oldest is paid off, then
+ * the next, and what is left over goes on the next one as a part payment.
+ * `over` is what the total exceeds everything owed by (refused, never kept).
  */
 export function splitOldestFirst(items: { item: OwedItem; owed: number }[], total: number): { rows: Allocation[]; over: number } {
   let rest = round2(total);

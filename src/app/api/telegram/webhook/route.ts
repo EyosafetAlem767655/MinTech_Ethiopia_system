@@ -85,7 +85,7 @@ import { parseGrade1RawPaste, parseRawMaterialPaste } from "@/lib/raw-material-p
 import { parsePpBagPaste } from "@/lib/pp-bag-paste";
 import { parseHoursBlock, setHoursCells } from "@/lib/downtime-sheet";
 import { INVOICES_KEY, chosenInvoice, encodeInvoices, openCreditInvoices } from "@/lib/credit-bot";
-import { LOADS_KEY, PART_LABEL, chosenOwedList, encodeLoads, loadRemaining, openRmLoads } from "@/lib/rm-credit";
+import { LOADS_KEY, PART_LABEL, draftAllocation, encodeLoads, loadRemaining, openRmLoads } from "@/lib/rm-credit";
 import { SETTLED_TOLERANCE_ETB } from "@/lib/credit";
 import { reconcileBags } from "@/lib/stock-reconciliation";
 import { parseStoreGroupPaste } from "@/lib/store-count-paste";
@@ -1205,6 +1205,12 @@ async function handlePickCallback(
     return;
   }
 
+  // A tick list with a ceiling (one amount question per tick) refuses one more.
+  const already = ticked(state.draft, stepId);
+  if (step.maxTicks && !already.includes(value) && already.length >= step.maxTicks) {
+    await answerCallbackQuery(callbackId, `⚠️ እስከ ${step.maxTicks} ብቻ። ለተጨማሪ በጅምላ ይክፈሉ ወይም ሌላ ክፍያ ያስገቡ።`);
+    return;
+  }
   state.draft[stepId] = toggleTick(String(state.draft[stepId] || ""), value);
   session.assetFlow = { ...state };
   await persist(session);
@@ -2445,7 +2451,8 @@ export async function POST(req: NextRequest) {
 
           // The same for raw-material loads: what is still owed on each one paid.
           if (state.kind === "rm_credit_payment") {
-            const items = chosenOwedList(state.draft);
+            // Only the loads the payment reached: a bulk payment leaves the rest untouched.
+            const items = draftAllocation(state.draft).rows.filter((r) => r.amount > 0).map((r) => r.item);
             if (items.length > 0) {
               runAfter(
                 Promise.all(items.map((o) => loadRemaining(o.load.id, o.part)))

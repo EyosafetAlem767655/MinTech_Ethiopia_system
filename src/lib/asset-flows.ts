@@ -67,7 +67,11 @@ import { chosenCustomerName, chosenInvoice, customerChoices, invoiceChoices, inv
 import {
   MAX_EACH_AMOUNTS,
   OWED_STEP,
+  PAYEE_STEP,
   PAY_MODE_STEP,
+  bulkOwed,
+  payeeChoices,
+  payees,
   PART_LABEL,
   chosenOwedList,
   draftAllocation,
@@ -310,6 +314,8 @@ export interface AssetStep {
    * name what it asks about ("load 2 of 3 · 12/11 · AA-3-12345 …").
    */
   promptFrom?: (draft: Record<string, string | number>) => string;
+  /** A tick list that allows at most this many ticks. */
+  maxTicks?: number;
 }
 
 /* ─────────────────────────────── Step tables ──────────────────────────────── */
@@ -1296,57 +1302,67 @@ const RM_CREDIT_PURCHASE_STEPS: AssetStep[] = [
 ];
 
 /**
- * Money paid later. Everything still unpaid pops up as one tick list — each
- * load's raw material and its driver's fee as separate buttons — and one
- * payment may cover several of them, in either of two ways:
+ * Money paid later. The first question is HOW it is paid:
  *
- *   * each: an amount typed for every ticked load;
- *   * total: one figure, split oldest first — the oldest ticked load is paid
- *     off, then the next, and what remains goes on the last as a part payment.
+ *   * 💰 bulk: who is paid, then the total. Nothing to add up first: their
+ *     oldest load is paid off, then the next, and what is left over goes on the
+ *     next one as a part payment;
+ *   * 📋 per invoice: tick the loads (raw material and driver's fee are separate
+ *     buttons), then an amount for each one.
  *
- * One ticked load asks one amount, as before. The review card shows which
- * loads end fully paid and what is left on the others.
+ * The review card shows which loads end fully paid and what is left on the others.
  */
 const RM_CREDIT_PAYMENT_STEPS: AssetStep[] = [
   { id: "date", prompt: "📅 የተከፈለበትን ቀን ይምረጡ።", type: "date" },
   {
-    id: OWED_STEP,
-    label: "Unpaid",
-    prompt:
-      "📋 ያልተከፈሉ — የተከፈሉትን ይንኩ (አንድ ወይም ብዙ)፣ ከዚያ ✅ ጨርሻለሁ ይጫኑ።\n" +
-      "<i>(ቀን · ለማን · ታርጋ · ዓይነት · ቀሪ ብር)</i>",
-    type: "multichoice",
-    choicesFrom: owedChoices,
-  },
-  {
     id: PAY_MODE_STEP,
     label: "How it is paid",
-    prompt: "💰 ክፍያውን እንዴት ያስገባሉ?",
+    prompt:
+      "💰 ክፍያው እንዴት ነው?\n" +
+      "<i>📋 በየደረሰኙ — ጭነቶቹን መርጠው ለእያንዳንዱ ብር ያስገባሉ።\n" +
+      "💰 በጅምላ — ጠቅላላውን ብር ብቻ ያስገባሉ፤ ሲስተሙ ከቀደመው ጭነት ጀምሮ ይከፍላል፣ የተረፈው ለቀጣዩ ከፊል ክፍያ ይሆናል።</i>",
     type: "choice",
     choices: [
-      { label: "📋 ለእያንዳንዱ ጭነት ለየብቻ (Each load its own amount)", value: "each" },
-      { label: "💰 ጠቅላላ ብር — ሲስተሙ ያከፋፍላል (One total, split oldest first)", value: "total" },
+      { label: "💰 በጅምላ (Bulk: one total, oldest first)", value: "total" },
+      { label: "📋 በየደረሰኙ (Per invoice: pick loads)", value: "each" },
     ],
-    when: (d) => {
-      const n = chosenOwedList(d).length;
-      return n > 1 && n <= MAX_EACH_AMOUNTS;
-    },
+  },
+
+  /* 💰 Bulk: who, then how much. */
+  {
+    id: PAYEE_STEP,
+    label: "Paid to",
+    prompt: "👤 ለማን ነው የተከፈለው? <i>(ስም · ያልተከፈሉ ጭነቶች · ዕዳ)</i>",
+    type: "choice",
+    choicesFrom: payeeChoices,
+    when: (d) => payModeOf(d) === "total" && payees(d).length > 1,
   },
   {
     id: "amount",
     label: "Amount",
-    prompt: "💰 ስንት ብር ተከፈለ? (ከፊል ክፍያ ሊሆን ይችላል)",
+    prompt: "💰 በጠቅላላ ስንት ብር ተከፈለ?",
     promptFrom: (d) => {
-      const items = chosenOwedList(d);
-      if (items.length <= 1) return "💰 ስንት ብር ተከፈለ? (ከፊል ክፍያ ሊሆን ይችላል)";
-      const owed = items.reduce((a, o) => a + o.left, 0);
+      const b = bulkOwed(d);
       return (
-        `💰 በጠቅላላ ስንት ብር ተከፈለ? (የተመረጡት ${items.length} ዕዳ: <b>${money(owed)}</b> ብር)\n` +
-        "<i>ሲስተሙ ከቀደመው ጭነት ጀምሮ ሙሉ በሙሉ ይከፍላል፤ የሚተርፈው በመጨረሻው ላይ ከፊል ክፍያ ይሆናል።</i>"
+        `💰 ለ <b>${esc(b.name)}</b> በጠቅላላ ስንት ብር ተከፈለ?\n` +
+        `<i>ዕዳ: ${b.items} ጭነት · ${money(b.owed)} ብር። ሲስተሙ ከቀደመው ጭነት ጀምሮ ሙሉ በሙሉ ይከፍላል፤ የተረፈው ለቀጣዩ ከፊል ክፍያ ይሆናል።</i>`
       );
     },
     type: "number",
     when: (d) => payModeOf(d) === "total",
+  },
+
+  /* 📋 Per invoice: tick, then an amount for each. */
+  {
+    id: OWED_STEP,
+    label: "Loads paid",
+    prompt:
+      `📋 ያልተከፈሉ — የተከፈሉትን ይንኩ (እስከ ${MAX_EACH_AMOUNTS})፣ ከዚያ ✅ ጨርሻለሁ ይጫኑ።\n` +
+      "<i>(ቀን · ለማን · ታርጋ · ዓይነት · ቀሪ ብር)</i>",
+    type: "multichoice",
+    choicesFrom: owedChoices,
+    maxTicks: MAX_EACH_AMOUNTS,
+    when: (d) => payModeOf(d) === "each",
   },
   ...Array.from({ length: MAX_EACH_AMOUNTS }, (_, k): AssetStep => ({
     id: eachAmountStep(k + 1),
@@ -2571,8 +2587,13 @@ export function assetPreview(state: AssetFlowState): string {
   }
 
   if (state.kind === "rm_credit_payment") {
-    const { rows, total, over } = draftAllocation(d);
-    const owedAll = rows.reduce((a, r) => a + r.owedBefore, 0);
+    const { rows: all, total, over } = draftAllocation(d);
+    const bulk = payModeOf(d) === "total";
+    const owedAll = all.reduce((a, r) => a + r.owedBefore, 0);
+    // A bulk payment goes on the payee's loads oldest first; the ones it does
+    // not reach are summed in one line rather than listed one by one.
+    const rows = bulk ? all.filter((r) => r.amount > 0) : all;
+    const untouched = bulk ? all.filter((r) => r.amount <= 0) : [];
     const lines = rows.map((r, i) => {
       const l = r.item.load;
       const status =
@@ -2587,16 +2608,21 @@ export function assetPreview(state: AssetFlowState): string {
         `ክፍያ <b>${money(r.amount)}</b> · ${status}`
       );
     });
-    const mode = rows.length > 1 ? (payModeOf(d) === "each" ? "📋 ለየብቻ (each load)" : "💰 ጠቅላላ — ከቀደመው ጀምሮ (oldest first)") : "";
+    const mode = bulk
+      ? `💰 በጅምላ — ለ <b>${esc(bulkOwed(d).name)}</b>፣ ከቀደመው ጭነት ጀምሮ (bulk, oldest first)`
+      : "📋 በየደረሰኙ (per invoice)";
     const full = rows.filter((r) => r.amount > 0 && r.leftAfter <= 1).length;
     const part = rows.filter((r) => r.amount > 0 && r.leftAfter > 1).length;
+    const stillOwed = all.reduce((a, r) => a + Math.max(0, r.leftAfter), 0);
     return (
       head +
       `📅 Date: ${esc(d.date)}\n` +
-      (mode ? `🧮 ${mode}\n` : "") +
+      `🧮 ${mode}\n` +
       (lines.length ? lines.join("\n") + "\n" : "") +
-      `\n💰 ጠቅላላ የተከፈለ: <b>${money(total)}</b> ብር` +
-      (rows.length > 1 ? ` · የተመረጡት ዕዳ ${money(owedAll)}` : "") +
+      (untouched.length
+        ? `▫️ ያልተነኩ ${untouched.length} ጭነት · ዕዳ ${money(untouched.reduce((a, r) => a + r.owedBefore, 0))} ብር\n`
+        : "") +
+      `\n💰 ጠቅላላ የተከፈለ: <b>${money(total)}</b> ብር · ዕዳ ${money(owedAll)} → የሚቀር <b>${money(stillOwed)}</b>` +
       "\n" +
       (rows.length > 0 ? `✅ ሙሉ በሙሉ የተከፈሉ: ${full} · ⏳ ከፊል: ${part}\n` : "") +
       (over > 1 ? `⚠️ ከዕዳው በ <b>${money(over)}</b> ብር ይበልጣል — እባክዎ ያስተካክሉ።\n` : "") +
@@ -2943,7 +2969,7 @@ export async function saveAssetReport(
       const total = Math.round((Number(d.amount) || 0) * 100) / 100;
       const split = splitOldestFirst(owedNow, total);
       if (split.over > 1) {
-        throw new Error(`That is more than is owed — ${money(total - split.over)} ETB is outstanding on what was ticked.`);
+        throw new Error(`That is more than is owed — ${money(total - split.over)} ETB is owed to them in all.`);
       }
       rows = split.rows;
     }
