@@ -580,6 +580,29 @@ create table if not exists ${backupPays} as select * from sales_credit_payments 
 alter table ${backupSales} enable row level security;
 alter table ${backupPays} enable row level security;
 
+/* A backup made by an earlier run has the columns the tables had then. A later
+   migration (0049 added five) would leave it a column short and the copy below
+   would fail, so any column added since is added to the backup too, in order. */
+do $$
+declare
+  pair record;
+  c record;
+begin
+  for pair in select * from (values ('sales_invoices', '${backupSales}'), ('sales_credit_payments', '${backupPays}')) as t(src, dst) loop
+    for c in
+      select a.attname, format_type(a.atttypid, a.atttypmod) as typ
+        from pg_attribute a
+       where a.attrelid = pair.src::regclass and a.attnum > 0 and not a.attisdropped
+         and not exists (
+           select 1 from pg_attribute b
+            where b.attrelid = pair.dst::regclass and b.attname = a.attname and not b.attisdropped)
+       order by a.attnum
+    loop
+      execute format('alter table %I add column %I %s', pair.dst, c.attname, c.typ);
+    end loop;
+  end loop;
+end $$;
+
 /* 1. A copy of what is replaced (not this seed's own rows, nor the statement's). */
 insert into ${backupPays}
 select p.* from sales_credit_payments p
@@ -631,15 +654,25 @@ ${payments}
 `
     : ""
 }
+/* 5. WHT off what qualifies (migration 0049), so a re-run never leaves invoices
+      at their full amount. A database without 0049 skips this; running 0049
+      and seed 0028 later applies it. */
+do $$ begin
+  perform apply_sales_wht();
+exception when undefined_function then null;
+end $$;
+
 commit;
 
--- Expect, per month (the register's own sales; the statement's rows are added on top):
+-- Expect, per month (the register's own sales, BEFORE WHT; the statement's rows are added on top):
 ${sums.map((s) => `--   ${s.month}: ${s.invoices} sales, ${s.tonnes} t, ${money(s.cashEtb)} cash + ${money(s.creditEtb)} credit, all settled`).join("\n")}
 select to_char((i.date at time zone 'Africa/Addis_Ababa')::date, 'YYYY-MM') as month,
        count(*) filter (where i.reported_by = ${sqlString(REPORTED_BY)}) as register_sales,
        round(sum(i.qty) filter (where i.reported_by = ${sqlString(REPORTED_BY)}), 3) as register_tonnes,
-       round(sum(i.invoice_cash) filter (where i.reported_by = ${sqlString(REPORTED_BY)}), 2) as register_cash,
-       round(sum(i.invoice_credit) filter (where i.reported_by = ${sqlString(REPORTED_BY)}), 2) as register_credit,
+       round(sum(coalesce((to_jsonb(i) ->> 'gross_cash')::numeric, i.invoice_cash)) filter (where i.reported_by = ${sqlString(REPORTED_BY)}), 2) as register_cash,
+       round(sum(coalesce((to_jsonb(i) ->> 'gross_credit')::numeric, i.invoice_credit)) filter (where i.reported_by = ${sqlString(REPORTED_BY)}), 2) as register_credit,
+       round(sum(coalesce((to_jsonb(i) ->> 'wht_amount')::numeric, 0)) filter (where i.reported_by = ${sqlString(REPORTED_BY)}), 2) as wht_3pct,
+       round(sum(i.invoice_cash + i.invoice_credit) filter (where i.reported_by = ${sqlString(REPORTED_BY)}), 2) as net_after_wht,
        count(*) filter (where i.reported_by in (${keepList})) as statement_sales_kept,
        round(sum(i.invoice_credit) - coalesce(sum((select sum(p.amount) from sales_credit_payments p where p.invoice_id = i.id)), 0), 2) as credit_still_owed
   from sales_invoices i

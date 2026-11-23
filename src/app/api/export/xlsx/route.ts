@@ -9,89 +9,54 @@ export const maxDuration = 60;
 
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
 
-/** Plumbing no reader of the sheet needs: ids, file handles, hashes, bot drafts. */
-function hidden(key: string): boolean {
-  return (
-    key === "id" ||
-    key === "_id" ||
-    /(_id|Id)$/.test(key) ||
-    /_ids$/.test(key) ||
-    /(^|_)(hash|draft|file|files)$/.test(key) ||
-    key === "photo_file_ids" ||
-    key === "tg_file_ids"
-  );
-}
-
-/** "reported_by" / "reportedBy" → "Reported by". Product codes stay as they are. */
-function heading(key: string): string {
-  return key
-    .split(" · ")
-    .map((part) => {
-      if (/^[A-Z0-9@.\- ]+$/.test(part) || /@/.test(part)) return part.replace("@", " · ");
-      const words = part.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/_/g, " ").toLowerCase();
-      return words.charAt(0).toUpperCase() + words.slice(1);
-    })
-    .join(" · ");
-}
-
-/** A Date in EAT: the day alone when it is a stored calendar day, else day and time. */
-function eat(d: Date): string {
-  const s = new Date(d.getTime() + 3 * 3_600_000).toISOString();
-  const time = s.slice(11, 16);
-  return time === "03:00" || time === "00:00" ? s.slice(0, 10) : `${s.slice(0, 10)} ${time}`;
-}
-
-/** One row flattened: nested objects become "Parent · key" columns, lists become text. */
-function flatten(row: Record<string, unknown>, prefix = "", out: Record<string, unknown> = {}) {
-  for (const [k, v] of Object.entries(row)) {
-    if (hidden(k)) continue;
-    const key = prefix ? `${prefix} · ${k}` : k;
-    if (v instanceof Date) out[key] = eat(v);
-    else if (Array.isArray(v)) {
-      out[key] = v
-        .map((x) => (x && typeof x === "object" ? Object.entries(x).filter(([kk]) => !hidden(kk)).map(([kk, vv]) => `${kk}: ${vv}`).join(", ") : String(x)))
-        .join(" | ");
-    } else if (v && typeof v === "object") flatten(v as Record<string, unknown>, key, out);
-    else if (typeof v === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(v)) out[key] = eat(new Date(v));
-    else if (typeof v === "string" && v !== "" && /^-?(0|[1-9]\d*)(\.\d+)?$/.test(v) && v.length < 16) out[key] = Number(v);
-    else out[key] = v;
-  }
-  return out;
-}
-
+/**
+ * One sheet: the columns the section declares, in its order, nothing else.
+ * Numbers go in as numbers, days as real dates, so the file sorts and sums.
+ */
 function addSheet(wb: ExcelJS.Workbook, sheet: ExportSheet, used: Set<string>) {
   // Excel: 31 characters, no []:*?/\ and every name different.
   let name = sheet.name.replace(/[[\]:*?/\\]/g, " ").slice(0, 31).trim() || "Sheet";
   for (let i = 2; used.has(name.toLowerCase()); i++) name = `${sheet.name.slice(0, 27)} (${i})`;
   used.add(name.toLowerCase());
 
-  const rows = sheet.rows.map((r) => flatten(r));
-  const keys: string[] = [];
-  const seen = new Set<string>();
-  for (const r of rows) for (const k of Object.keys(r)) if (!seen.has(k)) (seen.add(k), keys.push(k));
-
   const ws = wb.addWorksheet(name, { views: [{ state: "frozen", ySplit: 1 }] });
-  if (keys.length === 0) {
-    ws.addRow(["Nothing was filed in these dates."]);
-    return;
+  ws.columns = sheet.columns.map((c, i) => ({ header: c.header, key: `c${i}` }));
+
+  for (const row of sheet.rows) {
+    const out: Record<string, unknown> = {};
+    sheet.columns.forEach((c, i) => {
+      let v: unknown;
+      try {
+        v = c.value(row);
+      } catch {
+        v = null;
+      }
+      if (v === undefined || v === "" || (typeof v === "number" && !isFinite(v))) v = null;
+      if (c.kind === "date" && typeof v === "string" && DAY.test(v)) v = new Date(`${v}T00:00:00Z`);
+      else if (c.kind === "number" && v !== null && typeof v !== "number") {
+        const n = Number(v);
+        v = isFinite(n) ? n : null;
+      } else if (v !== null && typeof v === "object" && !(v instanceof Date)) v = null;
+      out[`c${i}`] = v;
+    });
+    ws.addRow(out);
   }
-  ws.columns = keys.map((k) => ({ header: heading(k), key: k }));
-  for (const r of rows) ws.addRow(r);
 
   const header = ws.getRow(1);
   header.font = { bold: true };
   header.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF3E9E4" } };
-  ws.columns.forEach((col, i) => {
-    const k = keys[i];
-    let width = heading(k).length;
-    let numeric = rows.length > 0;
-    for (const r of rows) {
-      const v = r[k];
-      if (v !== null && v !== undefined && v !== "" && typeof v !== "number") numeric = false;
-      width = Math.max(width, String(v ?? "").length);
-    }
-    col.width = Math.min(Math.max(width + 2, 8), 60);
-    if (numeric) col.numFmt = "#,##0.###";
+  sheet.columns.forEach((c, i) => {
+    const col = ws.getColumn(i + 1);
+    if (c.kind === "number") col.numFmt = "#,##0.###";
+    if (c.kind === "date") col.numFmt = "yyyy-mm-dd";
+    let width = c.header.length;
+    col.eachCell({ includeEmpty: false }, (cell, rowNo) => {
+      if (rowNo === 1) return;
+      const v = cell.value;
+      const len = v instanceof Date ? 10 : String(v ?? "").length;
+      if (len > width) width = len;
+    });
+    col.width = Math.min(Math.max(width + 2, 8), 50);
   });
 }
 

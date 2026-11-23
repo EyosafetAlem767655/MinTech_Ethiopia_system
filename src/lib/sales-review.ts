@@ -11,6 +11,7 @@ import {
   salesTin,
 } from "@/lib/sales-invoice";
 import { linkCustomerTin } from "@/lib/sales-tin";
+import { salesWht } from "@/lib/sales-wht";
 
 /**
  * 📋 Sales data manager: yesterday's sales, one tap each, to approve or correct.
@@ -62,8 +63,10 @@ function fromRow(r: Record<string, unknown>): ReviewSale {
     id: String(r.id),
     day: new Date(date.getTime() + 3 * 3_600_000).toISOString().slice(0, 10),
     customer: String(r.customer || ""),
-    cash: n(r.invoice_cash),
-    credit: n(r.invoice_credit),
+    // The invoice as filed (before WHT came off, 0049), which is what the
+    // manager checks against the receipt and corrects.
+    cash: n(r.gross_cash ?? r.invoice_cash),
+    credit: n(r.gross_credit ?? r.invoice_credit),
     qty: n(r.qty),
     products: (r.products as Record<string, number>) || {},
     banks: Array.isArray(r.banks) ? (r.banks as { bank: string; amount: number }[]) : [],
@@ -197,6 +200,25 @@ export async function saveEditedSale(id: string, d: Record<string, string | numb
     banks: salesBanks(d),
     tin: salesTin(d),
   };
+  // What is typed is the invoice; the WHT is worked out again from it (0049).
+  const w = salesWht(values.cash, values.credit, values.tin);
+  const saved = await sql`
+    update sales_invoices set
+      customer = ${values.customer}, invoice_cash = ${w.netCash}, invoice_credit = ${w.netCredit},
+      gross_cash = ${w.grossCash}, gross_credit = ${w.grossCredit}, wht_amount = ${w.wht},
+      qty = ${values.qty}, products = ${sql.json(products)}, bank = ${values.bank},
+      banks = ${sql.json(values.banks)}, tin = ${values.tin},
+      review_status = 'edited', reviewed_by = ${who}, reviewed_at = now(), updated_at = now()
+     where id = ${id}::uuid
+  `.then(() => true).catch((e) => {
+    if (!missingReviewColumns(e)) throw e;
+    return false;
+  });
+  if (saved) {
+    await linkCustomerTin(id).catch((e) => console.error("TIN back-fill skipped:", e));
+    return;
+  }
+  // Before 0049: the invoice as typed; apply_sales_wht() reduces it once later.
   await sql`
     update sales_invoices set
       customer = ${values.customer}, invoice_cash = ${values.cash}, invoice_credit = ${values.credit},

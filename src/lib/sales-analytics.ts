@@ -29,6 +29,9 @@ const EAT = "Africa/Addis_Ababa";
  * was worse than a thin sample. A week of sales does swing more between views,
  * which is a property of the week and not of the chart.
  */
+/** The bar for credit still owed, after the banks on the "Cash by bank" chart. */
+export const UNCOLLECTED = "Uncollected (credit)";
+
 export const SALES_ANALYTICS_RANGES: RangeKey[] = ["weekly", "monthly", "d90", "d180", "yearly"];
 
 export interface CustomerStat {
@@ -157,17 +160,36 @@ export async function salesAnalytics(range: RangeKey, now = new Date()): Promise
          order by buckets.b`
     ),
     // CASH per bank — what actually landed there. A sale paid into two banks
-    // counts in each for that bank's share only. A cash sale with no bank
-    // recorded is its own bar: "not recorded" is worth seeing too.
+    // counts in each for that bank's share only. Cash with no bank recorded is
+    // left out of the chart (owner, 23 Nov 2026); it still counts in the totals.
+    // Credit is not in a bank: what is still owed on it is one grey bar,
+    // "Uncollected (credit)", after the banks.
     guard(
       sql<{ bank: string; etb: string; sales: string }[]>`
-        select coalesce(bank, '—') as bank,
-               coalesce(sum(cash), 0) as etb,
-               count(distinct id) as sales
-          from (${salesBankLines(legacy)}) l
-         where date >= ${start} and date < ${end}
-         group by 1
-         order by 2 desc`
+        select bank, etb, sales from (
+          select bank, coalesce(sum(cash), 0) as etb, count(distinct id) as sales, 0 as last
+            from (${salesBankLines(legacy)}) l
+           where date >= ${start} and date < ${end} and bank is not null
+           group by bank
+          union all
+          select ${UNCOLLECTED}, coalesce(sum(i.invoice_credit - coalesce(p.paid, 0)), 0), count(*), 1
+            from sales_invoices i
+            left join (select invoice_id, sum(amount) as paid from sales_credit_payments group by invoice_id) p
+              on p.invoice_id = i.id
+           where i.date >= ${start} and i.date < ${end}
+             and i.invoice_credit - coalesce(p.paid, 0) > 1
+        ) x
+         where etb > 0
+         order by last, etb desc`.catch((e) => {
+        // Before the credit payments table: the banks alone.
+        if ((e as { code?: string })?.code !== "42P01") throw e;
+        return sql<{ bank: string; etb: string; sales: string }[]>`
+          select bank, coalesce(sum(cash), 0) as etb, count(distinct id) as sales
+            from (${salesBankLines(legacy)}) l
+           where date >= ${start} and date < ${end} and bank is not null
+           group by bank
+           order by 2 desc`;
+      })
     ),
   ]));
 

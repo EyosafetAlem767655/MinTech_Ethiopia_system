@@ -26,7 +26,11 @@ export async function GET(req: NextRequest) {
              reported_by as "reportedBy", created_at as "createdAt",
              -- 0047; read through to_jsonb so the list still loads before it runs.
              to_jsonb(sales_invoices) ->> 'review_status' as "reviewStatus",
-             to_jsonb(sales_invoices) ->> 'reviewed_by' as "reviewedBy"
+             to_jsonb(sales_invoices) ->> 'reviewed_by' as "reviewedBy",
+             -- 0049: WHT taken off, and how the cash was paid.
+             to_jsonb(sales_invoices) ->> 'wht_amount' as "whtAmount",
+             to_jsonb(sales_invoices) ->> 'wht_received' as "whtReceived",
+             to_jsonb(sales_invoices) ->> 'paid_by_cheque' as "paidByCheque"
         from sales_invoices
        where true
          ${day.test(from) ? sql`and date_label >= ${from}` : sql``}
@@ -43,6 +47,9 @@ export async function GET(req: NextRequest) {
         qty: num(r.qty),
         products: (r.products as Record<string, number>) || {},
         banks: Array.isArray(r.banks) ? r.banks : [],
+        whtAmount: num(r.whtAmount),
+        whtReceived: r.whtReceived == null ? null : r.whtReceived === "true",
+        paidByCheque: r.paidByCheque === "true",
       }))
     );
   } catch (e) {

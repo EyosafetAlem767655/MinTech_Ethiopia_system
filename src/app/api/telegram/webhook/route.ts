@@ -49,6 +49,7 @@ import {
   type AssetFlowKind,
   type AssetFlowState,
   type VoucherExtractionRecord,
+  WHT_PENDING_KEY,
 } from "@/lib/asset-flows";
 import { parseGrade1Paste, parseProductionPaste } from "@/lib/production-paste";
 import { parseFinancePaste } from "@/lib/finance-paste";
@@ -1778,6 +1779,14 @@ async function startAssetFlow(
       return false;
     }
     draft[LOADS_KEY] = encodeLoads(open);
+  }
+  // The customers already waiting on a WHT receipt: a sale to one of them adds
+  // to their follow-up instead of asking for their phone again.
+  if (kind === "sales_invoice") {
+    const pending = await sql<{ id: string; company: string }[]>`
+      select id, company from wht_holders where status = 'pending' order by created_at desc limit 300
+    `.catch(() => []);
+    draft[WHT_PENDING_KEY] = JSON.stringify(pending.map((h) => ({ id: String(h.id), company: h.company })));
   }
   // The machine names already used, offered as buttons wherever a machine or
   // car is asked for.

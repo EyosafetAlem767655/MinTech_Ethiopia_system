@@ -83,6 +83,29 @@ create table if not exists sales_reset_backup_payments_2026_08_2026_09 as select
 alter table sales_reset_backup_2026_08_2026_09 enable row level security;
 alter table sales_reset_backup_payments_2026_08_2026_09 enable row level security;
 
+/* A backup made by an earlier run has the columns the tables had then. A later
+   migration (0049 added five) would leave it a column short and the copy below
+   would fail, so any column added since is added to the backup too, in order. */
+do $$
+declare
+  pair record;
+  c record;
+begin
+  for pair in select * from (values ('sales_invoices', 'sales_reset_backup_2026_08_2026_09'), ('sales_credit_payments', 'sales_reset_backup_payments_2026_08_2026_09')) as t(src, dst) loop
+    for c in
+      select a.attname, format_type(a.atttypid, a.atttypmod) as typ
+        from pg_attribute a
+       where a.attrelid = pair.src::regclass and a.attnum > 0 and not a.attisdropped
+         and not exists (
+           select 1 from pg_attribute b
+            where b.attrelid = pair.dst::regclass and b.attname = a.attname and not b.attisdropped)
+       order by a.attnum
+    loop
+      execute format('alter table %I add column %I %s', pair.dst, c.attname, c.typ);
+    end loop;
+  end loop;
+end $$;
+
 /* 1. A copy of what is replaced (not this seed's own rows, nor the statement's). */
 insert into sales_reset_backup_payments_2026_08_2026_09
 select p.* from sales_credit_payments p
@@ -771,16 +794,26 @@ select v.invoice_id::uuid, v.amount, v.collected_on::date, v.note, v.recorded_by
 ) as v(invoice_id, amount, collected_on, note, recorded_by)
  where exists (select 1 from sales_invoices i where i.id = v.invoice_id::uuid);
 
+/* 5. WHT off what qualifies (migration 0049), so a re-run never leaves invoices
+      at their full amount. A database without 0049 skips this; running 0049
+      and seed 0028 later applies it. */
+do $$ begin
+  perform apply_sales_wht();
+exception when undefined_function then null;
+end $$;
+
 commit;
 
--- Expect, per month (the register's own sales; the statement's rows are added on top):
+-- Expect, per month (the register's own sales, BEFORE WHT; the statement's rows are added on top):
 --   2026-08: 162 sales, 1223.77 t, 22,347,386.51 cash + 12,959,350 credit, all settled
 --   2026-09: 129 sales, 1107.53 t, 26,964,878 cash + 3,114,200 credit, all settled
 select to_char((i.date at time zone 'Africa/Addis_Ababa')::date, 'YYYY-MM') as month,
        count(*) filter (where i.reported_by = 'VAT sales register') as register_sales,
        round(sum(i.qty) filter (where i.reported_by = 'VAT sales register'), 3) as register_tonnes,
-       round(sum(i.invoice_cash) filter (where i.reported_by = 'VAT sales register'), 2) as register_cash,
-       round(sum(i.invoice_credit) filter (where i.reported_by = 'VAT sales register'), 2) as register_credit,
+       round(sum(coalesce((to_jsonb(i) ->> 'gross_cash')::numeric, i.invoice_cash)) filter (where i.reported_by = 'VAT sales register'), 2) as register_cash,
+       round(sum(coalesce((to_jsonb(i) ->> 'gross_credit')::numeric, i.invoice_credit)) filter (where i.reported_by = 'VAT sales register'), 2) as register_credit,
+       round(sum(coalesce((to_jsonb(i) ->> 'wht_amount')::numeric, 0)) filter (where i.reported_by = 'VAT sales register'), 2) as wht_3pct,
+       round(sum(i.invoice_cash + i.invoice_credit) filter (where i.reported_by = 'VAT sales register'), 2) as net_after_wht,
        count(*) filter (where i.reported_by in ('credit statement 31 Oct 2026', 'cash collection summary Oct 2026')) as statement_sales_kept,
        round(sum(i.invoice_credit) - coalesce(sum((select sum(p.amount) from sales_credit_payments p where p.invoice_id = i.id)), 0), 2) as credit_still_owed
   from sales_invoices i

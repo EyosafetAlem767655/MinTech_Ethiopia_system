@@ -338,8 +338,9 @@ export const SUBMISSIONS: Record<SubmissionCollection, SubmissionSpec> = {
     searchColumns: ["customer", "delivery_no", "bank", "reported_by"],
     displayFields: [
       TEXT("customer", "Deliver to"),
-      NUM("invoice_cash", "Invoice in cash"),
-      NUM("invoice_credit", "Invoice in credit"),
+      NUM("invoice_cash", "Cash (net of WHT)"),
+      NUM("invoice_credit", "Credit (net of WHT)"),
+      NUM("wht_amount", "WHT 3%"),
       NUM("qty", "Invoice qty"),
       TEXT("delivery_no", "Deli"),
       TEXT("bank", "Bank"),

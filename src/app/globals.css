@@ -13,6 +13,22 @@ html {
   -webkit-tap-highlight-color: transparent;
 }
 
+/*
+ * Big desktop monitors: the text grows a little so the page is not a small
+ * island in the middle of the screen. Everything is sized in rem, so cards,
+ * charts and spacing grow with it. Phones and laptops are untouched.
+ */
+@media (min-width: 1920px) {
+  html {
+    font-size: 17px;
+  }
+}
+@media (min-width: 2560px) {
+  html {
+    font-size: 18px;
+  }
+}
+
 body {
   @apply bg-[#faf6f4] text-ink antialiased;
 }
@@ -47,7 +63,7 @@ body {
  * ever wrong — and so nobody widens four pages and forgets the fifth.
  */
 .app-shell {
-  @apply mx-auto w-full max-w-lg lg:max-w-7xl;
+  @apply mx-auto w-full max-w-lg lg:max-w-7xl 2xl:max-w-[112rem];
 }
 
 .shimmer-bg {

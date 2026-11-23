@@ -18,6 +18,9 @@ import { productLabel } from "@/lib/products";
 import { isCustomRange, isMonthRange, rangeDef, type RangeKey } from "@/lib/ranges";
 import type { SalesAnalytics } from "@/lib/sales-analytics";
 
+/** The grey bar for credit still owed (the same label src/lib/sales-analytics.ts writes). */
+const UNCOLLECTED = "Uncollected (credit)";
+
 /**
  * Customer analytics for the Sales tab, over 1 / 3 / 6 / 12 months.
  *
@@ -201,7 +204,7 @@ export default function SalesAnalyticsPanel() {
           </Card>
 
           {/* Where the money lands */}
-          <Card title="Cash by bank · ETB deposited">
+          <Card title="Cash by bank · ETB deposited, and credit uncollected">
             {data.banks.length === 0 ? (
               <Empty />
             ) : (
@@ -210,16 +213,24 @@ export default function SalesAnalyticsPanel() {
                   <BarChart data={data.banks} layout="vertical" margin={{ top: 4, right: 48, bottom: 0, left: 4 }} barCategoryGap={6}>
                     <CartesianGrid strokeDasharray="3 3" stroke={GRID} horizontal={false} />
                     <XAxis type="number" tick={TICK} tickFormatter={compact} tickLine={false} axisLine={false} />
-                    <YAxis type="category" dataKey="bank" width={90} tick={{ ...TICK, fill: "#57534e" }} tickLine={false} axisLine={false} />
+                    <YAxis type="category" dataKey="bank" width={130} tick={{ ...TICK, fill: "#57534e" }} tickLine={false} axisLine={false} />
                     <Tooltip
                       contentStyle={TOOLTIP}
                       cursor={{ fill: "rgba(0,131,0,0.06)" }}
                       formatter={(v: number, _n, item) => {
                         const b = item?.payload as SalesAnalytics["banks"][number];
-                        return [`${etb(v)} · ${b.sales} sale${b.sales === 1 ? "" : "s"}`, "Cash"];
+                        return [
+                          `${etb(v)} · ${b.sales} sale${b.sales === 1 ? "" : "s"}`,
+                          b.bank === UNCOLLECTED ? "Still owed" : "Cash",
+                        ];
                       }}
                     />
-                    <Bar dataKey="etb" fill={INK} radius={[0, 4, 4, 0]} maxBarSize={18} />
+                    <Bar dataKey="etb" fill={INK} radius={[0, 4, 4, 0]} maxBarSize={18}>
+                      {/* Credit still owed is not money in a bank: grey, apart from the banks. */}
+                      {data.banks.map((b) => (
+                        <Cell key={b.bank} fill={b.bank === UNCOLLECTED ? "#a8a29e" : INK} />
+                      ))}
+                    </Bar>
                   </BarChart>
                 </ResponsiveContainer>
               </div>

@@ -43,6 +43,7 @@ import {
   salesQty,
   salesTemplate,
 } from "@/lib/sales-invoice";
+import { salesWht, whtApplies } from "@/lib/sales-wht";
 import { BANKS, BANK_OTHER } from "@/lib/banks";
 import { linkCustomerTin } from "@/lib/sales-tin";
 import {
@@ -1221,15 +1222,8 @@ const CREDIT_PAYMENT_STEPS: AssetStep[] = [
     // Asked only when there is a choice to make: one open sale IS the answer.
     when: (d) => invoicesFor(d).length > 1,
   },
-  {
-    id: "photos",
-    prompt:
-      "📷 የክፍያውን ደረሰኝ ፎቶ ይላኩ — እስከ " +
-      `${MAX_FLOW_PHOTOS} ፎቶ። ከጨረሱ በኋላ "✅ ጨርሻለሁ" ይጫኑ።
-` +
-      "<i>መጠኑ ከደረሰኙ ተነቦ ይሞላል — እርስዎ ያረጋግጣሉ።</i>",
-    type: "photos",
-  },
+  // No receipt photo (owner, 23 Nov 2026): the collection is taken as filed.
+  // The photo was never read or kept, so asking for it only slowed people down.
   {
     id: "amount",
     label: "Amount",
@@ -1734,6 +1728,32 @@ const WHITENESS_STEPS: AssetStep[] = [
  * the editor and the paste parser share; the flow only walks them for what the
  * block left out. The total tonnage is not a step: it is the sum of the brands.
  */
+/* ─────────────── WHT and cheque on the sales report (0049) ─────────────── */
+
+export const SALES_CHEQUE_STEP = "cheque";
+export const SALES_WHT_STEP = "whtReceived";
+export const SALES_WHT_PHONE_STEP = "whtPhone";
+/** The companies already waiting on a WHT receipt, seeded when the flow opens. */
+export const WHT_PENDING_KEY = "_whtPending";
+
+const companyKey = (name: string) => name.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+function salesWhtApplies(d: Record<string, string | number>): boolean {
+  return whtApplies(Number(d[SALES_KEYS.invoiceCash]) || 0, Number(d[SALES_KEYS.invoiceCredit]) || 0, salesTin(d));
+}
+
+/** The pending WHT holder this sale's customer already has, by name, if any. */
+function whtPendingFor(d: Record<string, string | number>): string | null {
+  const key = companyKey(String(d[SALES_KEYS.customer] || ""));
+  if (!key) return null;
+  try {
+    const list = JSON.parse(String(d[WHT_PENDING_KEY] || "[]")) as { id: string; company: string }[];
+    return list.find((h) => companyKey(h.company) === key)?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
 const SALES_INVOICE_STEPS: AssetStep[] = [
   { id: "date", prompt: "📅 የሽያጩን ቀን ይምረጡ።", type: "date" },
   {
@@ -1779,6 +1799,8 @@ const SALES_INVOICE_STEPS: AssetStep[] = [
     type: "multichoice",
     choices: bankChoices(),
     columns: 3,
+    // A credit sale has not been paid into any bank yet: it is a receivable.
+    when: (d) => (Number(d[SALES_KEYS.invoiceCash]) || 0) > 0,
   },
   {
     id: SALES_KEYS.bankOther,
@@ -1796,6 +1818,41 @@ const SALES_INVOICE_STEPS: AssetStep[] = [
     type: "number",
     when: (d) => needsBankAmounts(d) && salesBanksTicked(d).includes(b),
   })),
+  // How the cash part was paid: a cheque is tagged on the dashboard.
+  {
+    id: SALES_CHEQUE_STEP,
+    label: "Paid by cheque",
+    prompt: "💵 ጥሬ ገንዘቡ በቼክ ነው የተከፈለው? (Was the cash paid by cheque?)",
+    type: "choice",
+    choices: [
+      { label: "🧾 አዎ፣ በቼክ (Cheque)", value: "yes" },
+      { label: "💵 አይደለም (Not cheque)", value: "no" },
+    ],
+    when: (d) => (Number(d[SALES_KEYS.invoiceCash]) || 0) > 0,
+  },
+  // WHT: only on a sale the buyer withholds on (TIN, 20,000+ before VAT).
+  {
+    id: SALES_WHT_STEP,
+    label: "WHT received",
+    prompt: "🧾 የWHT ደረሰኙን ተቀብለዋል? (Did you receive the WHT?)",
+    type: "choice",
+    choices: [
+      { label: "✅ አዎ ተቀብያለሁ (Yes, received)", value: "yes" },
+      { label: "❌ አልተቀበልኩም (No, not yet)", value: "no" },
+    ],
+    when: (d) => salesWhtApplies(d),
+  },
+  // Not received: the customer goes on the WHT follow-up, which texts them.
+  // A customer already on it is not asked for a phone a second time.
+  {
+    id: SALES_WHT_PHONE_STEP,
+    label: "Customer phone (WHT)",
+    prompt:
+      "📞 የWHT ደረሰኙን በSMS ለማስታወስ የደንበኛውን ስልክ ቁጥር ይፃፉ (ለምሳሌ 0912345678)።",
+    type: "text",
+    validate: validatePhone,
+    when: (d) => salesWhtApplies(d) && d[SALES_WHT_STEP] === "no" && !whtPendingFor(d),
+  },
 ];
 
 const STEPS: Record<AssetFlowKind, AssetStep[]> = {
@@ -2330,8 +2387,18 @@ export function assetPreview(state: AssetFlowState): string {
       `💵 Invoice in cash: ${money(cash)} ETB${mark(SALES_KEYS.invoiceCash)}\n` +
       `🧾 Invoice in credit: ${money(credit)} ETB${mark(SALES_KEYS.invoiceCredit)}\n` +
       `  <b>ጠቅላላ: ${money(cash + credit)} ETB</b>\n` +
+      (() => {
+        const w = salesWht(cash, credit, salesTin(d));
+        if (w.wht <= 0) return "";
+        const got = d[SALES_WHT_STEP] === "yes" ? "✅ ተቀብለዋል" : d[SALES_WHT_STEP] === "no" ? "⏳ አልተቀበሉም — SMS ይላካል" : "";
+        return (
+          `  WHT 3%: −${money(w.wht)} ETB → <b>Net ${money(w.netCash + w.netCredit)} ETB</b>\n` +
+          (got ? `  🧾 WHT ደረሰኝ: ${got}\n` : "")
+        );
+      })() +
       `🆔 TIN: <b>${esc(salesTin(d) || "—")}</b>${mark(SALES_KEYS.tin)}\n` +
-      bankLines +
+      (cash > 0 && d[SALES_CHEQUE_STEP] ? `💳 ${d[SALES_CHEQUE_STEP] === "yes" ? "🧾 በቼክ (Cheque)" : "ቼክ አይደለም"}\n` : "") +
+      (cash <= 0 && credit > 0 && banks.length === 0 ? `🏦 Bank: <b>Receivable</b>\n\n` : bankLines) +
       `⚖️ <b>ብዛት (ቶን)</b>\n${brands || "  —"}\n` +
       `  ─────────\n  <b>Invoice qty: ${qty(salesQty(d))}</b>\n` +
       (ex?.checked
@@ -3223,21 +3290,51 @@ export async function saveAssetReport(
     // Telegram id. They were read once, the figures on this card are the record,
     // and a receipt that resolves on the dashboard reads as a receipt filed on
     // the dashboard (the objection behind migration 0026).
+    const customer = String(d[SALES_KEYS.customer] || "").trim();
+    const tin = salesTin(d);
+    const typedCash = Number(d[SALES_KEYS.invoiceCash]) || 0;
+    const typedCredit = Number(d[SALES_KEYS.invoiceCredit]) || 0;
+    const w = salesWht(typedCash, typedCredit, tin);
+
+    // WHT is taken off only where the columns that remember the invoice exist
+    // (0049). Before that migration the invoice is stored as typed, and
+    // apply_sales_wht() reduces it once when the migration runs — never twice.
+    const hasWhtColumns =
+      (
+        await sql`
+          select 1 from information_schema.columns
+           where table_name = 'sales_invoices' and column_name = 'gross_cash'`
+      ).length > 0;
+
+    // One bank received the cash as it landed: the invoice less the WHT.
+    const banks = salesBanks(d).map((b, _i, all) =>
+      all.length === 1 && hasWhtColumns ? { ...b, amount: w.netCash } : b
+    );
+
     const row = await insertRow(
       "sales_invoices",
       {
         date,
         date_label: opsDateLabel(date),
-        customer: String(d[SALES_KEYS.customer] || "").trim(),
-        invoice_cash: Number(d[SALES_KEYS.invoiceCash]) || 0,
-        invoice_credit: Number(d[SALES_KEYS.invoiceCredit]) || 0,
+        customer,
+        invoice_cash: hasWhtColumns ? w.netCash : typedCash,
+        invoice_credit: hasWhtColumns ? w.netCredit : typedCredit,
+        ...(hasWhtColumns
+          ? {
+              gross_cash: w.grossCash,
+              gross_credit: w.grossCredit,
+              wht_amount: w.wht,
+              wht_received: w.wht > 0 && d[SALES_WHT_STEP] ? d[SALES_WHT_STEP] === "yes" : null,
+              paid_by_cheque: typedCash > 0 && d[SALES_CHEQUE_STEP] ? d[SALES_CHEQUE_STEP] === "yes" : null,
+            }
+          : {}),
         qty: salesQty(d),
         // No longer asked; a draft from before the change may still carry one.
         delivery_no: String(d[SALES_KEYS.deliveryNo] || "").trim() || null,
         products: sql.json(jsonMap(d, SALES_PRODUCT_PREFIX, DELIVERY_PRODUCTS)),
-        bank: salesBank(d),
-        banks: sql.json(salesBanks(d)),
-        tin: salesTin(d),
+        bank: banks.length ? banks.map((b) => b.bank).join(" + ") : null,
+        banks: sql.json(banks),
+        tin,
         extraction: state.extraction ? sql.json({ ...state.extraction }) : null,
         reported_by: reportedBy,
         source: "telegram",
@@ -3247,6 +3344,31 @@ export async function saveAssetReport(
     // The customer's other sales learn the TIN, and this one learns it from
     // them. Never fatal: the sale is already saved.
     await linkCustomerTin(row.id).catch((e) => console.error("TIN back-fill skipped:", e));
+
+    // WHT not handed over: the customer goes on the WHT follow-up, which texts
+    // them until it is. One holder per customer: a second sale is added to the
+    // one already waiting instead of opening another.
+    if (w.wht > 0 && d[SALES_WHT_STEP] === "no") {
+      const note = `WHT for the sale of ${opsDateLabel(date)} · ${money(w.wht)} ETB`;
+      const pendingId = whtPendingFor(d);
+      if (pendingId) {
+        await sql`
+          update wht_holders
+             set description = trim(both ' ·' from coalesce(description, '') || ' · ' || ${note}), updated_at = now()
+           where id = ${pendingId}::uuid and status = 'pending'`.catch((e) => console.error("WHT holder update skipped:", e));
+      } else if (d[SALES_WHT_PHONE_STEP]) {
+        const phone = String(d[SALES_WHT_PHONE_STEP]);
+        const [holder] = await sql<{ id: string }[]>`
+          insert into wht_holders (company, phone, description, registered_by, source)
+          values (${customer}, ${phone}, ${note}, ${reportedBy}, 'telegram')
+          returning id`.catch((e) => {
+          console.error("WHT holder from sale skipped:", e);
+          return [] as { id: string }[];
+        });
+        // Texted now, as the 📄 WHT flow does; the weekly reminder follows.
+        if (holder) runAfter(chaseHolder({ id: holder.id, company: customer, phone, description: note }));
+      }
+    }
     return { id: row.id, table: "sales_invoices" };
   }
 

@@ -34,6 +34,11 @@ interface Row {
   /** Set by the 📋 Sales data manager (0047). */
   reviewStatus?: "approved" | "edited" | null;
   reviewedBy?: string | null;
+  /** 3% WHT already taken off the cash and credit figures (0049). */
+  whtAmount?: number;
+  /** The WHT receipt was handed over; null when not asked. */
+  whtReceived?: boolean | null;
+  paidByCheque?: boolean;
 }
 
 interface Filters {
@@ -42,7 +47,7 @@ interface Filters {
   bank: string;
   from: string;
   to: string;
-  pay: "" | "cash" | "credit";
+  pay: "" | "cash" | "credit" | "cheque";
   brand: string;
   noTin: boolean;
 }
@@ -53,13 +58,38 @@ const fmtDate = (d: string) => new Date(d).toLocaleDateString("en-GB", { day: "n
 const num = (n?: number | null) => (n ? (Math.round(n * 100) / 100).toLocaleString() : "");
 const short = (v: number) => (v >= 1_000_000 ? `${(v / 1_000_000).toFixed(2)}M` : v >= 1000 ? `${Math.round(v / 1000)}k` : String(Math.round(v)));
 
-/** "CBE 300k · Awash 200k" for a split sale; the one bank otherwise. */
-function bankCell(r: Row): string {
+/** A credit sale has not reached a bank yet: what it is, is money receivable. */
+const RECEIVABLE = "Receivable";
+const isReceivable = (r: Row) => r.invoiceCredit > 0 && !(r.invoiceCash > 0) && r.banks.length === 0 && !r.bank;
+
+/** "CBE 300k · Awash 200k" for a split sale; the one bank otherwise; Receivable for credit. */
+function bankText(r: Row): string {
   if (r.banks.length > 1) return r.banks.map((b) => `${b.bank} ${short(b.amount)}`).join(" · ");
+  if (isReceivable(r)) return RECEIVABLE;
   return r.bank || "";
 }
 
-const bankNames = (r: Row) => (r.banks.length > 0 ? r.banks.map((b) => b.bank) : r.bank ? r.bank.split(" + ") : []);
+function BankCell({ r }: { r: Row }) {
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1">
+      <span className={isReceivable(r) ? "font-semibold text-amber-700" : ""}>{bankText(r)}</span>
+      {r.paidByCheque && (
+        <span className="rounded-full bg-sky-50 px-1.5 py-0.5 text-[10px] font-bold text-sky-800 ring-1 ring-sky-200">🧾 Cheque</span>
+      )}
+      {(r.whtAmount ?? 0) > 0 && r.whtReceived === false && (
+        <span title="The WHT receipt has not been handed over yet" className="rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] font-bold text-amber-800">
+          WHT pending
+        </span>
+      )}
+      {(r.whtAmount ?? 0) > 0 && r.whtReceived === true && (
+        <span title="WHT receipt received" className="text-[10px] font-bold text-green-700">WHT ✓</span>
+      )}
+    </span>
+  );
+}
+
+const bankNames = (r: Row) =>
+  r.banks.length > 0 ? r.banks.map((b) => b.bank) : r.bank ? r.bank.split(" + ") : isReceivable(r) ? [RECEIVABLE] : [];
 
 function applyFilters(rows: Row[], f: Filters): Row[] {
   const name = f.name.trim().toLowerCase();
@@ -74,6 +104,7 @@ function applyFilters(rows: Row[], f: Filters): Row[] {
     if (f.bank && !bankNames(r).includes(f.bank)) return false;
     if (f.pay === "cash" && !(r.invoiceCash > 0)) return false;
     if (f.pay === "credit" && !(r.invoiceCredit > 0)) return false;
+    if (f.pay === "cheque" && !r.paidByCheque) return false;
     if (f.brand && !(Number(r.products?.[f.brand]) > 0)) return false;
     return true;
   });
@@ -122,6 +153,7 @@ export default function SalesInvoicesPanel() {
           <option value="">Cash & credit</option>
           <option value="cash">Cash sales</option>
           <option value="credit">Credit sales</option>
+          <option value="cheque">Paid by cheque</option>
         </select>
         <select className="input" value={filters.brand} onChange={(e) => set({ brand: e.target.value })}>
           <option value="">All brands</option>
@@ -162,8 +194,9 @@ export default function SalesInvoicesPanel() {
                 <th className="p-2 text-left font-bold">Date</th>
                 <th className="p-2 text-left font-bold">Deliver to</th>
                 <th className="p-2 text-left font-bold">TIN</th>
-                <th className="p-2 font-bold">Invoice cash</th>
-                <th className="p-2 font-bold">Invoice credit</th>
+                <th className="p-2 font-bold" title="The invoice less the 3% WHT, where the buyer withholds">Cash (net)</th>
+                <th className="p-2 font-bold" title="The invoice less the 3% WHT, where the buyer withholds">Credit (net)</th>
+                <th className="p-2 font-bold" title="3% of the price before VAT, on sales of 20,000+ to a buyer with a TIN">WHT 3%</th>
                 <th className="p-2 font-bold">Invoice qty</th>
                 {cols.map((c) => (
                   <th key={c} className="p-2 font-bold">{productLabel(c)}</th>
@@ -189,11 +222,14 @@ export default function SalesInvoicesPanel() {
                   <td className="p-2 text-left tabular-nums text-stone-500">{r.tin || <span className="text-stone-300">—</span>}</td>
                   <td className="p-2 tabular-nums text-stone-700">{num(r.invoiceCash)}</td>
                   <td className="p-2 tabular-nums text-stone-700">{num(r.invoiceCredit)}</td>
+                  <td className="p-2 tabular-nums text-stone-500">{num(r.whtAmount)}</td>
                   <td className="p-2 tabular-nums font-semibold text-stone-800">{num(r.qty)}</td>
                   {cols.map((c) => (
                     <td key={c} className="p-2 tabular-nums text-stone-700">{num(r.products?.[c])}</td>
                   ))}
-                  <td className="p-2 text-left text-stone-700">{bankCell(r)}</td>
+                  <td className="p-2 text-left text-stone-700">
+                    <BankCell r={r} />
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -205,6 +241,7 @@ export default function SalesInvoicesPanel() {
                 </td>
                 <td className="p-2 tabular-nums">{num(sum((r) => r.invoiceCash))}</td>
                 <td className="p-2 tabular-nums">{num(sum((r) => r.invoiceCredit))}</td>
+                <td className="p-2 tabular-nums text-stone-500">{num(sum((r) => r.whtAmount ?? 0))}</td>
                 <td className="p-2 tabular-nums text-clay-900">{num(sum((r) => r.qty))}</td>
                 {cols.map((c) => (
                   <td key={c} className="p-2 tabular-nums text-clay-900">
