@@ -200,8 +200,12 @@ export async function saveEditedSale(id: string, d: Record<string, string | numb
     banks: salesBanks(d),
     tin: salesTin(d),
   };
-  // What is typed is the invoice; the WHT is worked out again from it (0049).
-  const w = salesWht(values.cash, values.credit, values.tin);
+  // What is typed is the invoice; the WHT is worked out again from it (0049),
+  // unless the reporter said the customer did not withhold (0050).
+  const [prior] = await sql<{ withheld: string | null }[]>`
+    select to_jsonb(s) ->> 'wht_withheld' as withheld from sales_invoices s where s.id = ${id}::uuid
+  `.catch(() => []);
+  const w = salesWht(values.cash, values.credit, values.tin, prior?.withheld !== "false");
   const saved = await sql`
     update sales_invoices set
       customer = ${values.customer}, invoice_cash = ${w.netCash}, invoice_credit = ${w.netCredit},

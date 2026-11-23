@@ -1731,6 +1731,9 @@ const WHITENESS_STEPS: AssetStep[] = [
 /* ─────────────── WHT and cheque on the sales report (0049) ─────────────── */
 
 export const SALES_CHEQUE_STEP = "cheque";
+/** Did the customer withhold the WHT at all? No: nothing is deducted. */
+export const SALES_WHT_CUT_STEP = "whtWithheld";
+/** Withheld: was the WHT receipt handed over? */
 export const SALES_WHT_STEP = "whtReceived";
 export const SALES_WHT_PHONE_STEP = "whtPhone";
 /** The companies already waiting on a WHT receipt, seeded when the flow opens. */
@@ -1740,6 +1743,21 @@ const companyKey = (name: string) => name.toLowerCase().replace(/[^a-z0-9]/g, ""
 
 function salesWhtApplies(d: Record<string, string | number>): boolean {
   return whtApplies(Number(d[SALES_KEYS.invoiceCash]) || 0, Number(d[SALES_KEYS.invoiceCredit]) || 0, salesTin(d));
+}
+
+/** WHT applies AND the customer withheld it. Not yet answered counts as withheld. */
+function salesWhtWithheld(d: Record<string, string | number>): boolean {
+  return salesWhtApplies(d) && d[SALES_WHT_CUT_STEP] !== "no";
+}
+
+/** This sale's WHT split, honouring a "not withheld" answer. */
+function draftSalesWht(d: Record<string, string | number>) {
+  return salesWht(
+    Number(d[SALES_KEYS.invoiceCash]) || 0,
+    Number(d[SALES_KEYS.invoiceCredit]) || 0,
+    salesTin(d),
+    d[SALES_WHT_CUT_STEP] !== "no"
+  );
 }
 
 /** The pending WHT holder this sale's customer already has, by name, if any. */
@@ -1830,19 +1848,33 @@ const SALES_INVOICE_STEPS: AssetStep[] = [
     ],
     when: (d) => (Number(d[SALES_KEYS.invoiceCash]) || 0) > 0,
   },
-  // WHT: only on a sale the buyer withholds on (TIN, 20,000+ before VAT).
+  // WHT: only on a sale the buyer can withhold on (TIN, 20,000+ before VAT).
+  // First, did the customer withhold at all? No: the full invoice is counted.
+  {
+    id: SALES_WHT_CUT_STEP,
+    label: "Customer withheld WHT",
+    prompt: "🧾 ደንበኛው WHT ቆርጧል? (Did the customer withhold WHT?)",
+    type: "choice",
+    choices: [
+      { label: "✅ አዎ ቆርጧል (Yes, withheld)", value: "yes" },
+      { label: "❌ አልቆረጠም (No, not withheld)", value: "no" },
+    ],
+    when: (d) => salesWhtApplies(d),
+  },
+  // Withheld: was the WHT receipt handed to the reporter? Yes is tagged.
   {
     id: SALES_WHT_STEP,
-    label: "WHT received",
-    prompt: "🧾 የWHT ደረሰኙን ተቀብለዋል? (Did you receive the WHT?)",
+    label: "WHT receipt received",
+    prompt: "🧾 የWHT ደረሰኙን ተቀብለዋል? (Did you receive the WHT receipt?)",
     type: "choice",
     choices: [
       { label: "✅ አዎ ተቀብያለሁ (Yes, received)", value: "yes" },
       { label: "❌ አልተቀበልኩም (No, not yet)", value: "no" },
     ],
-    when: (d) => salesWhtApplies(d),
+    when: (d) => salesWhtWithheld(d),
   },
-  // Not received: the customer goes on the WHT follow-up, which texts them.
+  // Not received: the customer goes on the WHT list. The phone may be left
+  // out ("-"): they are listed without SMS until a phone is added there.
   // A customer already on it is not asked for a phone a second time.
   {
     id: SALES_WHT_PHONE_STEP,
@@ -1851,7 +1883,8 @@ const SALES_INVOICE_STEPS: AssetStep[] = [
       "📞 የWHT ደረሰኙን በSMS ለማስታወስ የደንበኛውን ስልክ ቁጥር ይፃፉ (ለምሳሌ 0912345678)።",
     type: "text",
     validate: validatePhone,
-    when: (d) => salesWhtApplies(d) && d[SALES_WHT_STEP] === "no" && !whtPendingFor(d),
+    skippable: true,
+    when: (d) => salesWhtWithheld(d) && d[SALES_WHT_STEP] === "no" && !whtPendingFor(d),
   },
 ];
 
@@ -2388,9 +2421,19 @@ export function assetPreview(state: AssetFlowState): string {
       `🧾 Invoice in credit: ${money(credit)} ETB${mark(SALES_KEYS.invoiceCredit)}\n` +
       `  <b>ጠቅላላ: ${money(cash + credit)} ETB</b>\n` +
       (() => {
+        if (salesWhtApplies(d) && d[SALES_WHT_CUT_STEP] === "no") {
+          return "  🧾 WHT: ደንበኛው አልቆረጠም — ሙሉ ገንዘቡ ይመዘገባል (not withheld, no 3% deducted)\n";
+        }
         const w = salesWht(cash, credit, salesTin(d));
         if (w.wht <= 0) return "";
-        const got = d[SALES_WHT_STEP] === "yes" ? "✅ ተቀብለዋል" : d[SALES_WHT_STEP] === "no" ? "⏳ አልተቀበሉም — SMS ይላካል" : "";
+        const got =
+          d[SALES_WHT_STEP] === "yes"
+            ? "✅ ተቀብለዋል"
+            : d[SALES_WHT_STEP] === "no"
+              ? d[SALES_WHT_PHONE_STEP] || whtPendingFor(d)
+                ? "⏳ አልተቀበሉም — WHT ዝርዝር ውስጥ ይገባል፣ SMS ይላካል"
+                : "⏳ አልተቀበሉም — WHT ዝርዝር ውስጥ ይገባል (ስልክ የለም)"
+              : "";
         return (
           `  WHT 3%: −${money(w.wht)} ETB → <b>Net ${money(w.netCash + w.netCredit)} ETB</b>\n` +
           (got ? `  🧾 WHT ደረሰኝ: ${got}\n` : "")
@@ -3294,7 +3337,9 @@ export async function saveAssetReport(
     const tin = salesTin(d);
     const typedCash = Number(d[SALES_KEYS.invoiceCash]) || 0;
     const typedCredit = Number(d[SALES_KEYS.invoiceCredit]) || 0;
-    const w = salesWht(typedCash, typedCredit, tin);
+    // Not withheld by the customer: the full invoice is counted, nothing taken off.
+    const w = draftSalesWht(d);
+    const whtAsked = salesWhtApplies(d) && Boolean(d[SALES_WHT_CUT_STEP]);
 
     // WHT is taken off only where the columns that remember the invoice exist
     // (0049). Before that migration the invoice is stored as typed, and
@@ -3326,6 +3371,8 @@ export async function saveAssetReport(
               wht_amount: w.wht,
               wht_received: w.wht > 0 && d[SALES_WHT_STEP] ? d[SALES_WHT_STEP] === "yes" : null,
               paid_by_cheque: typedCash > 0 && d[SALES_CHEQUE_STEP] ? d[SALES_CHEQUE_STEP] === "yes" : null,
+              // 0050; dropped by insertRow where that migration has not run.
+              wht_withheld: whtAsked ? d[SALES_WHT_CUT_STEP] === "yes" : null,
             }
           : {}),
         qty: salesQty(d),
@@ -3339,7 +3386,7 @@ export async function saveAssetReport(
         reported_by: reportedBy,
         source: "telegram",
       },
-      { source: "asset-flows", optional: ["banks", "tin"] }
+      { source: "asset-flows", optional: ["banks", "tin", "wht_withheld"] }
     );
     // The customer's other sales learn the TIN, and this one learns it from
     // them. Never fatal: the sale is already saved.
@@ -3356,8 +3403,9 @@ export async function saveAssetReport(
           update wht_holders
              set description = trim(both ' ·' from coalesce(description, '') || ' · ' || ${note}), updated_at = now()
            where id = ${pendingId}::uuid and status = 'pending'`.catch((e) => console.error("WHT holder update skipped:", e));
-      } else if (d[SALES_WHT_PHONE_STEP]) {
-        const phone = String(d[SALES_WHT_PHONE_STEP]);
+      } else {
+        // The phone may have been left out: listed anyway, texted once one is added.
+        const phone = String(d[SALES_WHT_PHONE_STEP] || "").trim();
         const [holder] = await sql<{ id: string }[]>`
           insert into wht_holders (company, phone, description, registered_by, source)
           values (${customer}, ${phone}, ${note}, ${reportedBy}, 'telegram')
@@ -3366,7 +3414,7 @@ export async function saveAssetReport(
           return [] as { id: string }[];
         });
         // Texted now, as the 📄 WHT flow does; the weekly reminder follows.
-        if (holder) runAfter(chaseHolder({ id: holder.id, company: customer, phone, description: note }));
+        if (holder && phone) runAfter(chaseHolder({ id: holder.id, company: customer, phone, description: note }));
       }
     }
     return { id: row.id, table: "sales_invoices" };

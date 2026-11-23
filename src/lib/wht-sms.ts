@@ -52,6 +52,11 @@ export function chaseMessage(h: WhtHolder): string {
 export async function chaseHolder(h: WhtHolder, now = new Date()): Promise<ChaseResult> {
   const today = eatToday(now);
 
+  // Listed from a sale without a phone: nothing to text until one is added.
+  if (!String(h.phone || "").trim()) {
+    return { ok: false, skipped: true, claimed: false, error: "no phone number" };
+  }
+
   // Nothing can send, so nothing claims the day. Claiming first and failing
   // would mark this customer as chased and skip them until tomorrow — an unset
   // API key would quietly cost a day of chasing for every holder, every day.

@@ -63,6 +63,7 @@ export async function dailyHeartbeat(force = false): Promise<HeartbeatResult> {
       select h.id, h.company, h.phone, h.description
         from wht_holders h
        where h.status = 'pending'
+         and coalesce(trim(h.phone), '') <> ''   -- listed from a sale with no phone: nothing to text
          and not exists (
            select 1 from wht_sms_log l
             where l.holder_id = h.id and l.ok and l.sent_on > ${today}::date - 7

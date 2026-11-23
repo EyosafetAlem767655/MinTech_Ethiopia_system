@@ -35,11 +35,15 @@ export interface SaleWht {
   netCredit: number;
 }
 
-/** The invoice (after VAT, as typed) split into gross, WHT and net, cash and credit apart. */
-export function salesWht(cash: number, credit: number, tin: string | null | undefined): SaleWht {
+/**
+ * The invoice (after VAT, as typed) split into gross, WHT and net, cash and
+ * credit apart. `withheld` false: the customer did not withhold (owner, 23 Nov
+ * 2026), so the full invoice is counted and nothing is deducted.
+ */
+export function salesWht(cash: number, credit: number, tin: string | null | undefined, withheld = true): SaleWht {
   const grossCash = round2(cash);
   const grossCredit = round2(credit);
-  if (!whtApplies(grossCash, grossCredit, tin)) {
+  if (!withheld || !whtApplies(grossCash, grossCredit, tin)) {
     return { grossCash, grossCredit, wht: 0, netCash: grossCash, netCredit: grossCredit };
   }
   const total = grossCash + grossCredit;
